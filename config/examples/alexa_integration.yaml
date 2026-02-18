@@ -1,0 +1,81 @@
+# NeuralBridge — Alexa Integration Configuration Example
+#
+# This example shows a recommended agent stack for use with an Alexa Skill.
+# Agents are tried in ascending priority order (lowest number first).
+# The first agent to return a successful response wins; others are skipped.
+#
+# For full integration instructions see:
+#   docs/user-guide/alexa-integration.md
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent 1 — Home Assistant built-in (priority 10, local)
+#
+# Handles device control commands ("turn off the lights", "set thermostat to 22")
+# using HA's native intent matching. Responds in < 200 ms with no network calls.
+# ─────────────────────────────────────────────────────────────────────────────
+- agent_type: home_assistant
+  agent_name: "HA Local Intents"
+  priority: 10
+  timeout: 5
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent 2 — Ollama (priority 20, local self-hosted model)
+#
+# Handles general questions and follow-up conversation using a locally-hosted
+# model. Session history is automatically maintained per Alexa sessionId so
+# multi-turn exchanges work without any extra configuration.
+#
+# The system_prompt below keeps responses suitable for voice output:
+#   • Plain English — no markdown, no bullet lists
+#   • Concise — Alexa reads the text aloud, so brevity matters
+#   • No "I'm an AI" disclaimers — users already know
+# ─────────────────────────────────────────────────────────────────────────────
+- agent_type: ollama
+  agent_name: "Ollama Voice Assistant"
+  priority: 20
+  ollama_url: "http://localhost:11434"
+  ollama_model: "llama3:8b"   # Replace with the model you have pulled locally
+  timeout: 30
+  system_prompt: >
+    You are a helpful voice assistant integrated with a smart home.
+    Respond in plain, spoken English only.
+    Keep every response under two sentences.
+    Do not use markdown, bullet points, numbered lists, or code blocks.
+    Do not begin responses with "Sure!" or similar filler phrases.
+  agent_cache_enabled: true    # Cache identical queries to speed up repeat questions
+  guard_rail_enabled_for_agent: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent 3 — Cloud LLM fallback (priority 50, optional)
+#
+# Uncomment and configure this block if you want a cloud model as a last resort
+# when the local Ollama agent is unavailable or times out.
+#
+# Note: this sends the user's transcribed text to a third-party cloud provider.
+# ─────────────────────────────────────────────────────────────────────────────
+# - agent_type: existing_integration
+#   agent_name: "Cloud Fallback"
+#   priority: 50
+#   entity_id: "conversation.google_generative_ai_conversation"  # or ChatGPT, Claude, etc.
+#   timeout: 30
+#   agent_cache_enabled: false   # Disable cache for cloud agents to avoid stale answers
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Global response cache
+#
+# Enabled by default. Caches responses keyed on the exact input text.
+# Useful for repeated questions ("what's the time?", "what's the weather?").
+# Set response_cache_enabled to false to always get fresh answers.
+# ─────────────────────────────────────────────────────────────────────────────
+response_cache_enabled: true
+response_cache_ttl: 300   # seconds — cached responses expire after 5 minutes
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Guard rails (optional output safety filter)
+#
+# When enabled, NeuralBridge checks every agent response before returning it.
+# "block" silently replaces unsafe content with a neutral refusal message.
+# ─────────────────────────────────────────────────────────────────────────────
+guard_rail_enabled: true
+guard_rail_action: block        # block | warn | notify_ask
+guard_rail_ai_threshold: 0.7   # 0.5 = check aggressively, 1.0 = rule-based only

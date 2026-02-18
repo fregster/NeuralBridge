@@ -1,0 +1,17 @@
+# Example NeuralBridge Configuration
+# This is an example of how NeuralBridge might be configured in Home Assistant
+
+# NeuralBridge configuration (via UI - this is for reference only)
+neuralbridge:
+  # Tier 1: Local Home Assistant agent
+  tier1_agent: conversation.home_assistant
+
+  # Tier 2: Enable safety/content filter
+  enable_tier2_filter: true
+
+  # Tier 3: Cloud LLM agent
+  tier3_agent: conversation.google_gemini
+
+  # Optional: Timeout settings (seconds)
+  tier1_timeout: 5
+  tier3_timeout: 30

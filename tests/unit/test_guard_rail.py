@@ -6,6 +6,8 @@ import asyncio
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from custom_components.neuralbridge.const import (
     CONF_AGENT_TYPE,
     CONF_OLLAMA_MODEL,
@@ -292,6 +294,13 @@ class TestGuardRailChecker:
         result = checker._parse_ai_response("UNSAFE")
         assert result.is_safe is False
         assert result.confidence >= 0.9
+
+    def test_parse_ai_response_unrecognized_response_fails_safe(self):
+        """_parse_ai_response returns safe (fail-open) for an unrecognised response."""
+        checker = GuardRailChecker()
+        result = checker._parse_ai_response("I cannot determine the safety of this content.")
+        assert result.is_safe is True
+        assert result.confidence == pytest.approx(0.5)
 
     def test_initialization_with_new_params(self):
         """GuardRailChecker accepts use_detoxify and detoxify_threshold constructor params."""
@@ -589,3 +598,196 @@ class TestGuardRailCheckerOptionalLibraries:
         scores = {"toxicity": 0.1, "obscene": 0.2}
         result = checker._evaluate_detoxify_scores(scores)
         assert result.is_safe is True
+
+    def test_evaluate_detoxify_scores_empty_dict_returns_safe(self):
+        """_evaluate_detoxify_scores returns safe when scores dict is empty."""
+        checker = GuardRailChecker()
+        result = checker._evaluate_detoxify_scores({})
+        assert result.is_safe is True
+
+    def test_evaluate_detoxify_scores_unknown_keys_only_returns_safe(self):
+        """_evaluate_detoxify_scores ignores keys not in _DETOXIFY_CATEGORY_MAP."""
+        checker = GuardRailChecker(detoxify_threshold=0.5)
+        result = checker._evaluate_detoxify_scores({"future_score": 0.99, "other": 0.95})
+        assert result.is_safe is True
+
+    def test_evaluate_detoxify_scores_toxicity_maps_to_harmful(self):
+        """toxicity above threshold → GUARD_RAIL_CATEGORY_HARMFUL."""
+        checker = GuardRailChecker(detoxify_threshold=0.7)
+        result = checker._evaluate_detoxify_scores({"toxicity": 0.92})
+        assert result.is_safe is False
+        assert result.category == GUARD_RAIL_CATEGORY_HARMFUL
+        assert "toxicity" in result.reason
+
+    def test_evaluate_detoxify_scores_severe_toxicity_maps_to_harmful(self):
+        """severe_toxicity above threshold → GUARD_RAIL_CATEGORY_HARMFUL."""
+        checker = GuardRailChecker(detoxify_threshold=0.7)
+        result = checker._evaluate_detoxify_scores({"severe_toxicity": 0.88})
+        assert result.is_safe is False
+        assert result.category == GUARD_RAIL_CATEGORY_HARMFUL
+
+    def test_evaluate_detoxify_scores_threat_maps_to_harmful(self):
+        """threat above threshold → GUARD_RAIL_CATEGORY_HARMFUL."""
+        checker = GuardRailChecker(detoxify_threshold=0.7)
+        result = checker._evaluate_detoxify_scores({"threat": 0.85})
+        assert result.is_safe is False
+        assert result.category == GUARD_RAIL_CATEGORY_HARMFUL
+
+    def test_evaluate_detoxify_scores_identity_attack_maps_to_harmful(self):
+        """identity_attack above threshold → GUARD_RAIL_CATEGORY_HARMFUL."""
+        checker = GuardRailChecker(detoxify_threshold=0.7)
+        result = checker._evaluate_detoxify_scores({"identity_attack": 0.91})
+        assert result.is_safe is False
+        assert result.category == GUARD_RAIL_CATEGORY_HARMFUL
+
+    def test_evaluate_detoxify_scores_obscene_maps_to_inappropriate(self):
+        """obscene above threshold → GUARD_RAIL_CATEGORY_INAPPROPRIATE."""
+        checker = GuardRailChecker(detoxify_threshold=0.7)
+        result = checker._evaluate_detoxify_scores({"obscene": 0.85})
+        assert result.is_safe is False
+        assert result.category == GUARD_RAIL_CATEGORY_INAPPROPRIATE
+
+    def test_evaluate_detoxify_scores_insult_maps_to_inappropriate(self):
+        """insult above threshold → GUARD_RAIL_CATEGORY_INAPPROPRIATE."""
+        checker = GuardRailChecker(detoxify_threshold=0.7)
+        result = checker._evaluate_detoxify_scores({"insult": 0.82})
+        assert result.is_safe is False
+        assert result.category == GUARD_RAIL_CATEGORY_INAPPROPRIATE
+
+    def test_evaluate_detoxify_scores_picks_highest_score(self):
+        """When multiple categories exceed threshold, the highest score wins."""
+        checker = GuardRailChecker(detoxify_threshold=0.7)
+        scores = {"toxicity": 0.80, "severe_toxicity": 0.95, "obscene": 0.75}
+        result = checker._evaluate_detoxify_scores(scores)
+        assert result.is_safe is False
+        assert "severe_toxicity" in result.reason
+
+    def test_evaluate_detoxify_custom_threshold_respected(self):
+        """A custom detoxify_threshold of 0.5 flags a score of 0.6 that would miss 0.7."""
+        checker = GuardRailChecker(detoxify_threshold=0.5)
+        result = checker._evaluate_detoxify_scores({"toxicity": 0.6})
+        assert result.is_safe is False
+
+    # ── _init_detoxify success path ──────────────────────────────────────────
+
+    def test_init_detoxify_success_marks_available(self):
+        """_init_detoxify returns True and stores model when detoxify loads successfully."""
+        mock_model = MagicMock()
+        mock_mod = MagicMock()
+        mock_mod.Detoxify.return_value = mock_model
+        with patch.dict(sys.modules, {"detoxify": mock_mod}):
+            checker = GuardRailChecker(use_detoxify=True)
+        assert checker._detoxify_available is True
+        assert checker._detoxify_model is mock_model
+
+    # ── check_input pipeline ─────────────────────────────────────────────────
+
+    def test_check_with_profanity_clean_text_returns_safe(self):
+        """_check_with_profanity returns safe (confidence 0.6) for non-profane text."""
+        mock_prof = MagicMock()
+        mock_prof.contains_profanity.return_value = False
+        mock_mod = MagicMock()
+        mock_mod.profanity = mock_prof
+        checker = GuardRailChecker()
+        with patch.dict(sys.modules, {"better_profanity": mock_mod}):
+            result = checker._check_with_profanity("What is the weather today?")
+        assert result.is_safe is True
+        assert result.confidence == pytest.approx(0.6)
+
+    async def test_check_input_profanity_stage_skipped_when_unavailable(self):
+        """Stage 2 (profanity) is skipped and pipeline continues when _profanity_available=False."""
+        checker = GuardRailChecker()
+        checker._profanity_available = False
+        # Clean text: regex misses (0.6), stage 2 skipped, no detoxify, no AI → rule result
+        result = await checker.check_input("What is the weather?")
+        assert result is not None
+        assert result.is_safe is True
+
+    async def test_check_input_profanity_no_match_falls_through(self):
+        """Stage 2 returning confidence < 0.9 does not short-circuit the pipeline."""
+        checker = GuardRailChecker()
+        checker._profanity_available = True
+        checker._detoxify_available = False
+        low_conf = GuardRailResult(is_safe=True, confidence=0.6)
+        with patch.object(checker, "_check_with_profanity", return_value=low_conf):
+            result = await checker.check_input("What is the weather?")
+        # Pipeline continues; best_result = rule_result (also 0.6) → returned
+        assert result is not None
+        assert result.is_safe is True
+
+    async def test_check_input_detoxify_low_score_does_not_update_best_result(self):
+        """Detoxify result with lower confidence than rule result does not replace best_result."""
+        checker = GuardRailChecker()
+        checker._profanity_available = False
+        checker._detoxify_available = True
+        # Detoxify returns 0.5, rule result is 0.6 → best_result stays at 0.6
+        low_detox = GuardRailResult(is_safe=True, confidence=0.5)
+        with patch.object(
+            checker, "_check_with_detoxify", new_callable=AsyncMock, return_value=low_detox
+        ):
+            result = await checker.check_input("What is the weather?")
+        assert result.confidence == pytest.approx(0.6)
+
+    async def test_check_input_detoxify_updates_best_result_without_short_circuit(self):
+        """Detoxify result with confidence 0.7 updates best_result but does not short-circuit."""
+        checker = GuardRailChecker()
+        checker._profanity_available = False
+        checker._detoxify_available = True
+        # Detoxify returns 0.7 — above rule's 0.6 but below the 0.9 threshold
+        mid_detox = GuardRailResult(is_safe=False, confidence=0.7, category=GUARD_RAIL_CATEGORY_HARMFUL)
+        with patch.object(
+            checker, "_check_with_detoxify", new_callable=AsyncMock, return_value=mid_detox
+        ):
+            result = await checker.check_input("What is the weather?")
+        assert result.confidence == pytest.approx(0.7)
+
+    async def test_check_input_detoxify_high_confidence_short_circuits(self):
+        """Detoxify result with confidence 0.9 causes early return before AI stage."""
+        checker = GuardRailChecker(ai_threshold=0.7)
+        checker._profanity_available = False
+        checker._detoxify_available = True
+        high_detox = GuardRailResult(is_safe=False, confidence=0.9, category=GUARD_RAIL_CATEGORY_HARMFUL)
+        ai_mock = AsyncMock()
+        with (
+            patch.object(checker, "_check_with_detoxify", new_callable=AsyncMock, return_value=high_detox),
+            patch.object(checker, "_check_with_ai", ai_mock),
+        ):
+            result = await checker.check_input(
+                "What is the weather?",
+                use_ai=True,
+                ai_agent_config={"type": "ollama"},
+            )
+        ai_mock.assert_not_called()
+        assert result.confidence == pytest.approx(0.9)
+
+    async def test_check_input_detoxify_miss_falls_through_to_ai(self):
+        """Detoxify returning confidence 0.6 (same as rules) still triggers AI stage."""
+        checker = GuardRailChecker(ai_threshold=0.7)
+        checker._profanity_available = False
+        checker._detoxify_available = True
+        low_detox = GuardRailResult(is_safe=True, confidence=0.6)
+        ai_result = GuardRailResult(is_safe=True, confidence=0.9)
+        with patch.object(
+            checker, "_check_with_detoxify", new_callable=AsyncMock, return_value=low_detox
+        ):
+            with patch.object(
+                checker, "_check_with_ai", new_callable=AsyncMock, return_value=ai_result
+            ) as mock_ai:
+                await checker.check_input(
+                    "What is the weather?",
+                    use_ai=True,
+                    ai_agent_config={"type": "ollama"},
+                )
+        mock_ai.assert_called_once()
+
+    async def test_check_input_profanity_match_skips_detoxify(self):
+        """Stage 2 profanity match short-circuits before the detoxify stage 3."""
+        mock_model = MagicMock()
+        checker = GuardRailChecker()
+        checker._detoxify_model = mock_model
+        checker._detoxify_available = True
+        high_conf = GuardRailResult(is_safe=False, confidence=0.9, category=GUARD_RAIL_CATEGORY_INAPPROPRIATE)
+        with patch.object(checker, "_check_with_profanity", return_value=high_conf):
+            result = await checker.check_input("profane text here")
+        mock_model.predict.assert_not_called()
+        assert result.is_safe is False

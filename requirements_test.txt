@@ -1,0 +1,22 @@
+# Testing dependencies for NeuralBridge
+
+# Core testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+pytest-homeassistant-custom-component>=0.13.0
+
+# Home Assistant
+homeassistant>=2024.1.0
+
+# Linting and formatting
+black>=23.0.0
+ruff>=0.1.0
+mypy>=1.5.0
+
+# Development
+pre-commit>=3.3.0
+
+# Content safety libraries
+better-profanity>=0.7.0
+# detoxify is optional at runtime; mocked in tests (no install required)

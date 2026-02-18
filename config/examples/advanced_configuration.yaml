@@ -1,0 +1,22 @@
+# Advanced NeuralBridge Configuration Example
+# This demonstrates advanced routing and fallback scenarios
+
+neuralbridge:
+  # Tier 1: Local processing
+  tier1_agent: conversation.home_assistant
+
+  # Tier 2: Custom filter rules
+  enable_tier2_filter: true
+  tier2_filter_rules:
+    - block_personal_info: true
+    - block_financial_queries: true
+    - allow_general_knowledge: true
+
+  # Tier 3: Multiple cloud providers with fallback
+  tier3_agents:
+    - conversation.google_gemini
+    - conversation.openai_gpt4
+
+  # Logging
+  log_routing_decisions: true
+  log_level: debug
