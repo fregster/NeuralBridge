@@ -74,7 +74,7 @@ from .const import (
 from .languages_loader import get_string, list_available_languages
 
 if TYPE_CHECKING:
-    from homeassistant.data_entry_flow import FlowResult
+    from homeassistant.config_entries import ConfigFlowResult
 
 _LOGGER = logging.getLogger(__name__)
 _HTTP_OK = 200
@@ -85,7 +85,7 @@ class NeuralBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle the initial step — create integration instance."""
         if user_input is not None:
             await self.async_set_unique_id(DOMAIN)
@@ -139,7 +139,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     # ── Main menu ─────────────────────────────────────────────────────────────
 
-    async def async_step_init(self, _user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_init(self, _user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Manage the options — main menu."""
         return self.async_show_menu(
             step_id="init",
@@ -155,7 +155,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     # ── Add agent ─────────────────────────────────────────────────────────────
 
-    async def async_step_add_agent(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_add_agent(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Add a new agent — select type."""
         if user_input is not None:
             self._agent_data[CONF_AGENT_TYPE] = user_input[CONF_AGENT_TYPE]
@@ -172,7 +174,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 {
                     vol.Required(CONF_AGENT_TYPE): selector.SelectSelector(
                         selector.SelectSelectorConfig(
-                            options=[
+                            options=[  # type: ignore[typeddict-item]
                                 {
                                     "value": AGENT_TYPE_LOCAL_HA,
                                     "label": self._s("agent_types", "home_assistant"),
@@ -232,7 +234,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_configure_ollama(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Configure Ollama agent."""
         errors: dict[str, str] = {}
 
@@ -324,7 +326,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_configure_existing(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Configure existing integration agent."""
         if user_input is not None:
             agent_id = str(uuid4())
@@ -399,7 +401,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_configure_local(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Configure local Home Assistant agent."""
         if user_input is not None:
             agent_id = str(uuid4())
@@ -470,7 +472,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_manage_agents(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Manage existing agents — select an agent to act on."""
         agents = list(self.config_entry.data.get(CONF_AGENTS, []))
 
@@ -489,7 +491,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         enabled_label = self._s("agent_management", "status_enabled")
         disabled_label = self._s("agent_management", "status_disabled")
 
-        agent_options = [
+        agent_options: list[selector.SelectOptionDict] = [
             {
                 "value": agent["id"],
                 "label": (
@@ -516,7 +518,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_manage_agent_action(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Select and apply an action (edit / toggle / delete) for the selected agent."""
         agents = list(self.config_entry.data.get(CONF_AGENTS, []))
         agent_id: str = self._agent_data.get("_selected_agent_id", "")
@@ -557,7 +559,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 {
                     vol.Required("action"): selector.SelectSelector(
                         selector.SelectSelectorConfig(
-                            options=[
+                            options=[  # type: ignore[typeddict-item]
                                 {
                                     "value": "edit",
                                     "label": self._s("agent_management", "action_edit"),
@@ -576,7 +578,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             description_placeholders={"agent_name": agent_name},
         )
 
-    async def _route_to_edit_step(self) -> FlowResult:
+    async def _route_to_edit_step(self) -> ConfigFlowResult:
         """Dispatch to the type-specific edit step for the selected agent."""
         agents = list(self.config_entry.data.get(CONF_AGENTS, []))
         agent_id: str = self._agent_data.get("_selected_agent_id", "")
@@ -598,7 +600,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_edit_agent_ollama(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Edit settings for an existing Ollama agent."""
         errors: dict[str, str] = {}
         agent = self._agent_data.get("_editing_agent", {})
@@ -697,7 +699,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_edit_agent_existing(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Edit settings for an existing-integration agent."""
         agent = self._agent_data.get("_editing_agent", {})
         agent_id: str = agent.get("id", "")
@@ -779,7 +781,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_edit_agent_local(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Edit settings for a local Home Assistant agent."""
         agent = self._agent_data.get("_editing_agent", {})
         agent_id: str = agent.get("id", "")
@@ -856,7 +858,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_advanced_settings(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Configure global response cache and retry settings."""
         if user_input is not None:
             cache_enabled: bool = user_input.get(
@@ -893,13 +895,13 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
             return self.async_create_entry(title="", data={})
 
-        current_data = self.config_entry.data
-        current_enabled = current_data.get(
+        entry_data = self.config_entry.data
+        current_enabled = entry_data.get(
             CONF_RESPONSE_CACHE_ENABLED, DEFAULT_RESPONSE_CACHE_ENABLED
         )
-        current_ttl = current_data.get(CONF_RESPONSE_CACHE_TTL, DEFAULT_RESPONSE_CACHE_TTL)
-        current_max_retries = current_data.get(CONF_MAX_RETRIES, DEFAULT_MAX_RETRIES)
-        current_retry_delay = current_data.get(CONF_RETRY_BASE_DELAY, DEFAULT_RETRY_BASE_DELAY)
+        current_ttl = entry_data.get(CONF_RESPONSE_CACHE_TTL, DEFAULT_RESPONSE_CACHE_TTL)
+        current_max_retries = entry_data.get(CONF_MAX_RETRIES, DEFAULT_MAX_RETRIES)
+        current_retry_delay = entry_data.get(CONF_RETRY_BASE_DELAY, DEFAULT_RETRY_BASE_DELAY)
 
         return self.async_show_form(
             step_id="advanced_settings",
@@ -949,7 +951,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_configure_guard_rails(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Configure global guard rail settings."""
         if user_input is not None:
             current_data = {
@@ -1014,7 +1016,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_GUARD_RAIL_ACTION, default=current_action
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
-                            options=[
+                            options=[  # type: ignore[typeddict-item]
                                 {
                                     "value": GUARD_RAIL_ACTION_NOTIFY_ASK,
                                     "label": self._s("guard_rail_actions", "notify_ask"),
@@ -1066,7 +1068,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_configure_guard_rail_rules(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Configure custom guard rail regex patterns per category."""
         categories = [
             GUARD_RAIL_CATEGORY_HARMFUL,
@@ -1127,7 +1129,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         categories: list[str],
         values: dict[str, Any],
         errors: dict[str, str],
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Show the guard rail rules form.
 
         Args:
@@ -1156,7 +1158,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_language_settings(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Configure the display language for NeuralBridge."""
         if user_input is not None:
             self.hass.config_entries.async_update_entry(
@@ -1166,7 +1168,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data={})
 
         available = list_available_languages()
-        language_options = [{"value": lang["code"], "label": lang["name"]} for lang in available]
+        language_options: list[selector.SelectOptionDict] = [
+            {"value": lang["code"], "label": lang["name"]} for lang in available
+        ]
         current_language = str(self.config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE))
 
         return self.async_show_form(

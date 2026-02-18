@@ -150,7 +150,7 @@ class GuardRailChecker:
 
     def _build_rules(
         self, custom_rules: dict[str, list[str]] | None
-    ) -> dict[str, list[re.Pattern]]:
+    ) -> dict[str, list[re.Pattern[str]]]:
         """Build compiled regex patterns from rules.
 
         Args:
@@ -176,7 +176,7 @@ class GuardRailChecker:
                     rules[category] = patterns
 
         # Compile patterns
-        compiled_rules: dict[str, list[re.Pattern]] = {}
+        compiled_rules: dict[str, list[re.Pattern[str]]] = {}
         for category, patterns in rules.items():
             compiled_rules[category] = [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
 
@@ -410,6 +410,8 @@ class GuardRailChecker:
             ollama_url = ai_agent_config.get(CONF_OLLAMA_URL)
             ollama_model = ai_agent_config.get(CONF_OLLAMA_MODEL)
             timeout = ai_agent_config.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+            if not isinstance(ollama_url, str) or not isinstance(ollama_model, str):
+                return GuardRailResult(is_safe=True, confidence=0.5)
 
             client = OllamaClient(ollama_url, ollama_model, timeout)
 

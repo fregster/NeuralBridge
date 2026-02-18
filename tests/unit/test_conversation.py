@@ -957,6 +957,24 @@ async def test_process_with_ollama_client_returns_none(
 
 
 # ---------------------------------------------------------------------------
+# Test 32b — _process_with_ollama: missing/non-string url or model → None
+# ---------------------------------------------------------------------------
+
+
+async def test_process_with_ollama_missing_url_returns_none(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """_process_with_ollama returns None when ollama_url is None (not a string)."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    agent_cfg = _make_ollama_agent(agent_id="ollama-no-url")
+    agent_cfg[CONF_OLLAMA_URL] = None  # override with non-string
+
+    result = await agent._process_with_ollama(agent_cfg, _make_input())
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
 # Test 33 — _process_with_existing: entity state absent → None
 # ---------------------------------------------------------------------------
 
@@ -969,6 +987,23 @@ async def test_process_with_existing_entity_not_found(
     agent_cfg = {CONF_ENTITY_ID: "conversation.ghost", CONF_AGENT_NAME: "Ghost"}
 
     # hass.states.get returns None for unknown entities by default
+    result = await agent._process_with_existing(agent_cfg, _make_input())
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 33b — _process_with_existing: no entity_id configured → None
+# ---------------------------------------------------------------------------
+
+
+async def test_process_with_existing_no_entity_id_returns_none(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """_process_with_existing returns None when CONF_ENTITY_ID is absent."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    agent_cfg = {CONF_AGENT_NAME: "Missing ID"}  # no CONF_ENTITY_ID
+
     result = await agent._process_with_existing(agent_cfg, _make_input())
 
     assert result is None

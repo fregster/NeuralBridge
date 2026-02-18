@@ -385,7 +385,7 @@ class NeuralBridgeAgent(ConversationEntity):
             Speech text string, or empty string if unavailable.
         """
         if result.response and result.response.speech:
-            return result.response.speech.get("plain", {}).get("speech", "")
+            return str(result.response.speech.get("plain", {}).get("speech", ""))
         return ""
 
     def _maybe_cache_response(
@@ -578,6 +578,8 @@ class NeuralBridgeAgent(ConversationEntity):
         timeout = agent_config.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
         system_prompt: str = agent_config.get(CONF_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT)
 
+        if not isinstance(ollama_url, str) or not isinstance(ollama_model, str):
+            return None
         if agent_id not in self._ollama_clients:
             self._ollama_clients[agent_id] = OllamaClient(ollama_url, ollama_model, timeout)
 
@@ -614,7 +616,10 @@ class NeuralBridgeAgent(ConversationEntity):
         Returns:
             ConversationResult on success, None on failure.
         """
-        entity_id = agent_config.get(CONF_ENTITY_ID)
+        entity_id: str | None = agent_config.get(CONF_ENTITY_ID)
+        if entity_id is None:
+            _LOGGER.error("Existing agent has no entity_id configured")
+            return None
 
         agent_state = self.hass.states.get(entity_id)
         if not agent_state:
@@ -640,7 +645,8 @@ class NeuralBridgeAgent(ConversationEntity):
                 _LOGGER.error("Agent %s returned unexpected response shape", entity_id)
                 return None
 
-            speech_text = response["response"].get("speech", {}).get("plain", {}).get("speech", "")
+            response_section: Any = response["response"]
+            speech_text = str(response_section.get("speech", {}).get("plain", {}).get("speech", ""))
             if speech_text:
                 return self._create_result(speech_text, user_input.conversation_id)
 
@@ -783,8 +789,9 @@ class NeuralBridgeAgent(ConversationEntity):
             return None
 
         for agent in config.get(CONF_AGENTS, []):
-            if agent.get("id") == guard_rail_agent_id:
-                return agent
+            agent_config: dict[str, Any] = agent
+            if agent_config.get("id") == guard_rail_agent_id:
+                return agent_config
 
         return None
 

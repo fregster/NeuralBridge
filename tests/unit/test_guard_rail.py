@@ -227,6 +227,24 @@ class TestGuardRailChecker:
         assert result.is_safe is True
         assert result.confidence >= 0.5
 
+    async def test_check_with_ai_invalid_url_or_model_returns_safe(self):
+        """Guard rail returns safe when ai_agent_config has non-string url/model."""
+        checker = GuardRailChecker()
+        ai_agent_config = {
+            CONF_AGENT_TYPE: "ollama",
+            CONF_OLLAMA_URL: None,  # not a string → isinstance check fails
+            CONF_OLLAMA_MODEL: "llama3",
+        }
+
+        result = await checker.check_input(
+            "Some text",
+            use_ai=True,
+            ai_agent_config=ai_agent_config,
+        )
+
+        assert result.is_safe is True
+        assert result.confidence >= 0.5
+
     @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
     async def test_check_with_ai_empty_response_returns_safe(self, mock_client_class):
         """Test AI-based checking when generate() returns empty string → safe."""

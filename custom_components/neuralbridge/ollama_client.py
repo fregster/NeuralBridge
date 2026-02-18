@@ -44,7 +44,8 @@ class OllamaClient:
                 ) as response:
                     if response.status == _HTTP_OK:
                         data = await response.json()
-                        return data.get("response")
+                        result: str | None = data.get("response")
+                        return result
                     else:
                         _LOGGER.error(
                             "Ollama API returned status %d: %s",
@@ -85,7 +86,8 @@ class OllamaClient:
                     if response.status == _HTTP_OK:
                         data = await response.json()
                         message = data.get("message", {})
-                        return message.get("content")
+                        content: str | None = message.get("content")
+                        return content
                     else:
                         _LOGGER.error(
                             "Ollama API returned status %d: %s",
