@@ -38,6 +38,17 @@ placeholders:
     Kein Router-Agent (Priorität 0) ist konfiguriert.
     Fügen Sie einen leichtgewichtigen lokalen Agenten (z. B. TinyLlama, Qwen) mit Priorität 0
     hinzu, bevor Sie Sicherheitsfilter aktivieren.
+  guard_rail_rules_info: >-
+    Geben Sie benutzerdefinierte Regex-Muster (eines pro Zeile) ein, um übereinstimmende Inhalte
+    zu blockieren. Muster werden mit den integrierten Standards zusammengeführt. Leer lassen,
+    um nur die Standards zu verwenden.
+
+# ── Guard rail rule category labels ───────────────────────────────────────────
+guard_rail_categories:
+  harmful: "Schädliche Inhaltsmuster"
+  privacy: "Datenschutzmuster"
+  security: "Sicherheitsmuster"
+  inappropriate: "Unangemessene Inhaltsmuster"
 
 # ── Guard rail action selector labels ─────────────────────────────────────────
 guard_rail_actions:

@@ -41,6 +41,16 @@ placeholders:
     No router agent (priority 0) is configured.
     Add a lightweight local agent (e.g. TinyLlama, Qwen) with priority 0 before enabling
     guard rails.
+  guard_rail_rules_info: >-
+    Enter custom regex patterns (one per line) to block matching content.
+    Patterns are merged with the built-in defaults. Leave blank to use defaults only.
+
+# ── Guard rail rule category labels ───────────────────────────────────────────
+guard_rail_categories:
+  harmful: "Harmful Content Patterns"
+  privacy: "Privacy Patterns"
+  security: "Security Patterns"
+  inappropriate: "Inappropriate Content Patterns"
 
 # ── Guard rail action selector labels ─────────────────────────────────────────
 guard_rail_actions:

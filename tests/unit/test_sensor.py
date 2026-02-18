@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
-from homeassistant.core import HomeAssistant
+from homeassistant.components.sensor import SensorStateClass
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.neuralbridge.const import DATA_STATISTICS, DOMAIN, SIGNAL_STATS_UPDATED
-from custom_components.neuralbridge.sensor import NeuralBridgeStatsSensor
+from custom_components.neuralbridge.sensor import NeuralBridgeStatsSensor, async_setup_entry
 from custom_components.neuralbridge.statistics import AgentStatistics
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 
 @pytest.fixture
@@ -94,8 +98,6 @@ class TestNeuralBridgeStatsSensor:
 
     def test_state_class(self, sensor: NeuralBridgeStatsSensor) -> None:
         """Test sensor has TOTAL_INCREASING state class."""
-        from homeassistant.components.sensor import SensorStateClass
-
         assert sensor._attr_state_class == SensorStateClass.TOTAL_INCREASING
 
     async def test_async_added_to_hass_subscribes_dispatcher(
@@ -145,8 +147,6 @@ async def test_async_setup_entry_registers_sensor(
     statistics: AgentStatistics,
 ) -> None:
     """async_setup_entry creates a NeuralBridgeStatsSensor and calls async_add_entities."""
-    from custom_components.neuralbridge.sensor import async_setup_entry
-
     mock_config_entry.add_to_hass(hass)
     hass.data.setdefault(DOMAIN, {})[mock_config_entry.entry_id] = {
         DATA_STATISTICS: statistics,

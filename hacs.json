@@ -2,6 +2,5 @@
   "name": "NeuralBridge",
   "content_in_root": false,
   "filename": "neuralbridge.zip",
-  "render_readme": true,
-  "domains": ["conversation"]
+  "render_readme": true
 }

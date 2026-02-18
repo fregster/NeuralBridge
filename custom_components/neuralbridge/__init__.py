@@ -6,13 +6,12 @@ import logging
 from typing import TYPE_CHECKING
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 
 if TYPE_CHECKING:
-    from homeassistant.core import ServiceCall
+    from homeassistant.config_entries import ConfigEntry
+    from homeassistant.core import HomeAssistant, ServiceCall
 
 from .const import (
     CONF_RESPONSE_CACHE_ENABLED,

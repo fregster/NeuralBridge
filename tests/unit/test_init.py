@@ -5,9 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
-from homeassistant.core import HomeAssistant
-from pytest_homeassistant_custom_component.common import MockConfigEntry
-
 from custom_components.neuralbridge import async_reload_entry, async_setup_entry, async_unload_entry
 from custom_components.neuralbridge.const import (
     DATA_SESSION_MEMORY,
@@ -16,6 +13,9 @@ from custom_components.neuralbridge.const import (
 )
 
 if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
     from custom_components.neuralbridge.session_memory import SessionMemory
 
 

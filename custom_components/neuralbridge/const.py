@@ -127,6 +127,12 @@ DATA_SESSION_MEMORY: Final = "session_memory"
 # Service names
 SERVICE_CLEAR_CONVERSATION: Final = "clear_conversation"
 
+# Retry / exponential back-off
+CONF_MAX_RETRIES: Final = "max_retries"
+DEFAULT_MAX_RETRIES: Final = 2
+CONF_RETRY_BASE_DELAY: Final = "retry_base_delay"
+DEFAULT_RETRY_BASE_DELAY: Final = 1.0  # seconds
+
 # Router agent classification prompt
 # Sent to priority-0 Ollama agents to classify whether a request should be processed.
 # Use .format(user_text=...) when building the final prompt.

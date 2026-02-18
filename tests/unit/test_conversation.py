@@ -6,8 +6,9 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from homeassistant.components.conversation import ConversationInput
+from homeassistant.components.conversation import ConversationInput, ConversationResult
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.helpers import intent
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.neuralbridge.const import (
@@ -23,18 +24,24 @@ from custom_components.neuralbridge.const import (
     CONF_GUARD_RAIL_ACTION,
     CONF_GUARD_RAIL_ENABLED,
     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
+    CONF_GUARD_RAIL_RULES,
+    CONF_MAX_RETRIES,
     CONF_OLLAMA_MODEL,
     CONF_OLLAMA_URL,
     CONF_PRIORITY,
+    CONF_RETRY_BASE_DELAY,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DOMAIN,
     EVENT_GUARD_RAIL_TRIGGERED,
     FALLBACK_RESPONSE,
     GUARD_RAIL_ACTION_BLOCK,
+    GUARD_RAIL_ACTION_NOTIFY_ASK,
+    GUARD_RAIL_ACTION_WARN,
+    GUARD_RAIL_BLOCKED_RESPONSE,
     NO_AGENTS_RESPONSE,
 )
-from custom_components.neuralbridge.conversation import NeuralBridgeAgent
+from custom_components.neuralbridge.conversation import NeuralBridgeAgent, async_setup_entry
 from custom_components.neuralbridge.guard_rail import GuardRailResult
 
 # ---------------------------------------------------------------------------
@@ -330,9 +337,7 @@ async def test_async_process_response_stored_in_cache_on_success(
             new_callable=AsyncMock,
             return_value=(success_result, False),
         ),
-        patch.object(
-            conv_agent, "_check_guardrails", new_callable=AsyncMock, return_value=None
-        ),
+        patch.object(conv_agent, "_check_guardrails", new_callable=AsyncMock, return_value=None),
     ):
         await conv_agent.async_process(_make_input("unique query"))
 
@@ -393,7 +398,10 @@ async def test_try_agent_with_tracking_circuit_open_returns_none(
 
 async def test_try_agent_with_tracking_records_timeout(hass: HomeAssistant) -> None:
     """A timed-out agent call records timeout in circuit breaker and statistics."""
-    entry = _entry_with_agents(_make_ollama_agent())
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [_make_ollama_agent()], CONF_MAX_RETRIES: 0},
+    )
     conv_agent = NeuralBridgeAgent(hass, entry)
     agent_cfg = _make_ollama_agent()
 
@@ -412,7 +420,10 @@ async def test_try_agent_with_tracking_records_timeout(hass: HomeAssistant) -> N
 
 async def test_try_agent_with_tracking_records_failure(hass: HomeAssistant) -> None:
     """A failed (non-timeout) agent call records failure in stats and circuit breaker."""
-    entry = _entry_with_agents(_make_ollama_agent())
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [_make_ollama_agent()], CONF_MAX_RETRIES: 0},
+    )
     conv_agent = NeuralBridgeAgent(hass, entry)
     agent_cfg = _make_ollama_agent()
 
@@ -467,8 +478,6 @@ async def test_handle_confirmation_check_no_blocks_response(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
     """'no' with a pending guard rail response returns the blocked message."""
-    from custom_components.neuralbridge.const import GUARD_RAIL_BLOCKED_RESPONSE
-
     conv_agent = NeuralBridgeAgent(hass, mock_config_entry)
     mock_gr = MagicMock()
     await conv_agent._guard_rail_cache.store_pending_response("conv-2", "Blocked text", mock_gr)
@@ -499,11 +508,7 @@ def test_extract_response_text_no_speech(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
     """_extract_response_text returns empty string when speech is absent."""
-    from homeassistant.helpers import intent
-
     conv_agent = NeuralBridgeAgent(hass, mock_config_entry)
-    from homeassistant.components.conversation import ConversationResult
-
     empty_response = intent.IntentResponse(language="en")
     cr = ConversationResult(response=empty_response, conversation_id=None)
     # Remove speech dict so result is empty
@@ -592,7 +597,7 @@ async def test_check_guardrails_fires_event_on_unsafe_content(
     fired_events: list = []
     hass.bus.async_listen(
         EVENT_GUARD_RAIL_TRIGGERED,
-        lambda event: fired_events.append(event),
+        fired_events.append,
     )
 
     unsafe_result = GuardRailResult(
@@ -952,6 +957,24 @@ async def test_process_with_ollama_client_returns_none(
 
 
 # ---------------------------------------------------------------------------
+# Test 32b — _process_with_ollama: missing/non-string url or model → None
+# ---------------------------------------------------------------------------
+
+
+async def test_process_with_ollama_missing_url_returns_none(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """_process_with_ollama returns None when ollama_url is None (not a string)."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    agent_cfg = _make_ollama_agent(agent_id="ollama-no-url")
+    agent_cfg[CONF_OLLAMA_URL] = None  # override with non-string
+
+    result = await agent._process_with_ollama(agent_cfg, _make_input())
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
 # Test 33 — _process_with_existing: entity state absent → None
 # ---------------------------------------------------------------------------
 
@@ -964,6 +987,23 @@ async def test_process_with_existing_entity_not_found(
     agent_cfg = {CONF_ENTITY_ID: "conversation.ghost", CONF_AGENT_NAME: "Ghost"}
 
     # hass.states.get returns None for unknown entities by default
+    result = await agent._process_with_existing(agent_cfg, _make_input())
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 33b — _process_with_existing: no entity_id configured → None
+# ---------------------------------------------------------------------------
+
+
+async def test_process_with_existing_no_entity_id_returns_none(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """_process_with_existing returns None when CONF_ENTITY_ID is absent."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    agent_cfg = {CONF_AGENT_NAME: "Missing ID"}  # no CONF_ENTITY_ID
+
     result = await agent._process_with_existing(agent_cfg, _make_input())
 
     assert result is None
@@ -1294,8 +1334,6 @@ async def test_async_setup_entry_creates_agent(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
     """async_setup_entry instantiates NeuralBridgeAgent and calls async_add_entities."""
-    from custom_components.neuralbridge.conversation import async_setup_entry
-
     added: list = []
 
     await async_setup_entry(hass, mock_config_entry, added.append)
@@ -1472,3 +1510,337 @@ async def test_get_guard_rail_agent_config_id_not_found_returns_none(
     result = await conv_agent._get_guard_rail_agent_config()
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 56 — async_process: confirmation result returned early (line 172)
+# ---------------------------------------------------------------------------
+
+
+async def test_async_process_returns_confirmation_result(hass: HomeAssistant) -> None:
+    """async_process returns early when _handle_confirmation_check returns non-None."""
+    entry = _entry_with_agents()
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    expected = conv_agent._create_result("confirmed response")
+
+    with patch.object(
+        conv_agent,
+        "_handle_confirmation_check",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ):
+        result = await conv_agent.async_process(_make_input("yes"))
+
+    assert result.response.speech["plain"]["speech"] == "confirmed response"
+
+
+# ---------------------------------------------------------------------------
+# Test 57 — _try_agent_with_retries: retries on failure (lines 306-314)
+# ---------------------------------------------------------------------------
+
+
+async def test_retry_succeeds_on_second_attempt(hass: HomeAssistant) -> None:
+    """_try_agent_with_retries retries after a failure and succeeds on second attempt."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [_make_ollama_agent()], CONF_MAX_RETRIES: 1, CONF_RETRY_BASE_DELAY: 0.1},
+    )
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    agent_cfg = _make_ollama_agent()
+    success_result = conv_agent._create_result("success on retry")
+
+    call_count = 0
+
+    def try_agent_side_effect(_cfg, _inp):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return None, False
+        return success_result, False
+
+    with (
+        patch.object(conv_agent, "_try_agent", side_effect=try_agent_side_effect),
+        patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
+        result = await conv_agent._try_agent_with_retries(
+            agent_cfg, _make_input(), "agent-1", "Test Ollama"
+        )
+
+    assert result is not None
+    assert result.response.speech["plain"]["speech"] == "success on retry"
+    mock_sleep.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test 58 — _try_agent_with_retries: all retries exhausted (line 335)
+# ---------------------------------------------------------------------------
+
+
+async def test_retry_exhausted_returns_none(hass: HomeAssistant) -> None:
+    """_try_agent_with_retries returns None when all attempts fail."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [_make_ollama_agent()], CONF_MAX_RETRIES: 2, CONF_RETRY_BASE_DELAY: 0.1},
+    )
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    agent_cfg = _make_ollama_agent()
+
+    with (
+        patch.object(conv_agent, "_try_agent", new_callable=AsyncMock, return_value=(None, False)),
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        result = await conv_agent._try_agent_with_retries(
+            agent_cfg, _make_input(), "agent-1", "Test Ollama"
+        )
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 59 — _try_agent_with_retries: circuit trips → stops retrying (lines 328-333)
+# ---------------------------------------------------------------------------
+
+
+async def test_retry_stops_when_circuit_trips(hass: HomeAssistant) -> None:
+    """_try_agent_with_retries stops after the circuit breaker trips mid-retry."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [_make_ollama_agent()], CONF_MAX_RETRIES: 3, CONF_RETRY_BASE_DELAY: 0.1},
+    )
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    agent_cfg = _make_ollama_agent()
+
+    with (
+        patch.object(conv_agent, "_try_agent", new_callable=AsyncMock, return_value=(None, False)),
+        patch.object(conv_agent._circuit_breaker, "is_open", return_value=True),
+        patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
+        result = await conv_agent._try_agent_with_retries(
+            agent_cfg, _make_input(), "agent-1", "Test Ollama"
+        )
+
+    assert result is None
+    # No sleep because circuit tripped immediately after first attempt
+    mock_sleep.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 60 — _check_guardrails: guard rail globally disabled → None (line 712)
+# ---------------------------------------------------------------------------
+
+
+async def test_check_guardrails_disabled_globally_returns_none(hass: HomeAssistant) -> None:
+    """_check_guardrails returns None immediately when guard rails are globally disabled."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [], CONF_GUARD_RAIL_ENABLED: False},
+    )
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    agent_cfg = {CONF_AGENT_NAME: "Agent", CONF_GUARD_RAIL_ENABLED_FOR_AGENT: True}
+    conv_result = conv_agent._create_result("some text")
+
+    result = await conv_agent._check_guardrails(agent_cfg, conv_result, None)
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 61 — _check_guardrails: per-agent guard rail disabled → None (line 712)
+# ---------------------------------------------------------------------------
+
+
+async def test_check_guardrails_disabled_for_agent_returns_none(hass: HomeAssistant) -> None:
+    """_check_guardrails returns None when guard rails are disabled for the agent."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [], CONF_GUARD_RAIL_ENABLED: True},
+    )
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    agent_cfg = {CONF_AGENT_NAME: "Agent", CONF_GUARD_RAIL_ENABLED_FOR_AGENT: False}
+    conv_result = conv_agent._create_result("some text")
+
+    result = await conv_agent._check_guardrails(agent_cfg, conv_result, None)
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 62 — _check_guardrails: checker initialized with custom rules (lines 724-729)
+# ---------------------------------------------------------------------------
+
+
+async def test_guard_rail_checker_uses_custom_rules(hass: HomeAssistant) -> None:
+    """When CONF_GUARD_RAIL_RULES is set, GuardRailChecker is constructed with those rules."""
+    custom_rules = {"harmful": ["\\bbomb\\b"]}
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [],
+            CONF_GUARD_RAIL_ENABLED: True,
+            CONF_GUARD_RAIL_RULES: custom_rules,
+        },
+    )
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    agent_cfg = {CONF_AGENT_NAME: "Agent", CONF_GUARD_RAIL_ENABLED_FOR_AGENT: True}
+    safe_result_gr = GuardRailResult(is_safe=True, confidence=0.1, category="")
+
+    captured_kwargs: dict = {}
+
+    def capture_checker(**kwargs):
+        captured_kwargs.update(kwargs)
+        mock_instance = MagicMock()
+        mock_instance.check_output = AsyncMock(return_value=safe_result_gr)
+        return mock_instance
+
+    with patch(
+        "custom_components.neuralbridge.conversation.GuardRailChecker",
+        side_effect=capture_checker,
+    ):
+        await conv_agent._check_guardrails(
+            agent_cfg, conv_agent._create_result("some response"), None
+        )
+
+    assert captured_kwargs.get("rules") == custom_rules
+
+
+# ---------------------------------------------------------------------------
+# Test 63 — _check_guardrails: guard rail result is safe → None (line 744)
+# ---------------------------------------------------------------------------
+
+
+async def test_check_guardrails_safe_result_returns_none(hass: HomeAssistant) -> None:
+    """_check_guardrails returns None when the checker reports the content as safe."""
+    entry = _entry_with_guard_rails()
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    safe_result_gr = GuardRailResult(is_safe=True, confidence=0.05, category="")
+    mock_checker = MagicMock()
+    mock_checker.check_output = AsyncMock(return_value=safe_result_gr)
+    conv_agent._guard_rail_checker = mock_checker
+
+    agent_cfg = {CONF_AGENT_NAME: "Agent", CONF_GUARD_RAIL_ENABLED_FOR_AGENT: True}
+    result = await conv_agent._check_guardrails(
+        agent_cfg, conv_agent._create_result("safe content"), None
+    )
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 64 — _apply_guard_rail_action: WARN modifies result (lines 677-679)
+# ---------------------------------------------------------------------------
+
+
+async def test_apply_guard_rail_action_warn_modifies_response(hass: HomeAssistant) -> None:
+    """GUARD_RAIL_ACTION_WARN prefixes the response and returns None."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: []},
+    )
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    conv_result = conv_agent._create_result("original text")
+    guard_result = GuardRailResult(is_safe=False, confidence=0.9, category="harmful")
+
+    returned = await conv_agent._apply_guard_rail_action(
+        GUARD_RAIL_ACTION_WARN, conv_result, "original text", None, guard_result
+    )
+
+    assert returned is None
+    speech = conv_result.response.speech["plain"]["speech"]
+    assert "original text" in speech
+
+
+# ---------------------------------------------------------------------------
+# Test 65 — _apply_guard_rail_action: NOTIFY_ASK caches response (lines 681-684)
+# ---------------------------------------------------------------------------
+
+
+async def test_apply_guard_rail_action_notify_ask_caches_and_returns(
+    hass: HomeAssistant,
+) -> None:
+    """GUARD_RAIL_ACTION_NOTIFY_ASK stores the response and returns a prompt result."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: []},
+    )
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    conv_result = conv_agent._create_result("sensitive text")
+    guard_result = GuardRailResult(is_safe=False, confidence=0.9, category="harmful")
+
+    returned = await conv_agent._apply_guard_rail_action(
+        GUARD_RAIL_ACTION_NOTIFY_ASK, conv_result, "sensitive text", "conv-99", guard_result
+    )
+
+    assert returned is not None
+    pending = await conv_agent._guard_rail_cache.get_pending_response("conv-99")
+    assert pending is not None
+    assert pending[0] == "sensitive text"
+
+
+# ---------------------------------------------------------------------------
+# Test 66 — _check_guardrails: rules change invalidates checker (lines 720-721)
+# ---------------------------------------------------------------------------
+
+
+async def test_guard_rail_checker_reinitialised_when_rules_change(
+    hass: HomeAssistant,
+) -> None:
+    """_check_guardrails recreates the checker when CONF_GUARD_RAIL_RULES changes."""
+    new_rules = {"harmful": ["\\bnewrule\\b"]}
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [],
+            CONF_GUARD_RAIL_ENABLED: True,
+            CONF_GUARD_RAIL_RULES: new_rules,
+        },
+    )
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    # Simulate an old checker and a different (old) snapshot
+    old_checker = MagicMock()
+    conv_agent._guard_rail_checker = old_checker
+    conv_agent._guard_rail_rules_snapshot = {"harmful": ["\\boldRule\\b"]}
+
+    agent_cfg = {CONF_AGENT_NAME: "Agent", CONF_GUARD_RAIL_ENABLED_FOR_AGENT: True}
+    safe_gr = GuardRailResult(is_safe=True, confidence=0.1, category="")
+
+    new_checker = MagicMock()
+    new_checker.check_output = AsyncMock(return_value=safe_gr)
+
+    with patch(
+        "custom_components.neuralbridge.conversation.GuardRailChecker",
+        return_value=new_checker,
+    ):
+        await conv_agent._check_guardrails(agent_cfg, conv_agent._create_result("some text"), None)
+
+    assert conv_agent._guard_rail_checker is new_checker
+    assert conv_agent._guard_rail_rules_snapshot == new_rules
+
+
+# ---------------------------------------------------------------------------
+# Test 67 — _get_guard_rail_agent_config: agent found → returns config (line 787)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_guard_rail_agent_config_found_returns_config(
+    hass: HomeAssistant,
+) -> None:
+    """_get_guard_rail_agent_config returns the agent config when the ID matches."""
+    agent = _make_ollama_agent(agent_id="gr-agent")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [agent],
+            "guard_rail_agent_id": "gr-agent",
+        },
+    )
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    result = await conv_agent._get_guard_rail_agent_config()
+
+    assert result is not None
+    assert result["id"] == "gr-agent"

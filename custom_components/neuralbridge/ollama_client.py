@@ -9,6 +9,7 @@ from typing import Any
 import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
+_HTTP_OK = 200
 
 
 class OllamaClient:
@@ -41,9 +42,10 @@ class OllamaClient:
                     f"{self.base_url}/api/generate",
                     json=payload,
                 ) as response:
-                    if response.status == 200:
+                    if response.status == _HTTP_OK:
                         data = await response.json()
-                        return data.get("response")
+                        result: str | None = data.get("response")
+                        return result
                     else:
                         _LOGGER.error(
                             "Ollama API returned status %d: %s",
@@ -81,10 +83,11 @@ class OllamaClient:
                     f"{self.base_url}/api/chat",
                     json=payload,
                 ) as response:
-                    if response.status == 200:
+                    if response.status == _HTTP_OK:
                         data = await response.json()
                         message = data.get("message", {})
-                        return message.get("content")
+                        content: str | None = message.get("content")
+                        return content
                     else:
                         _LOGGER.error(
                             "Ollama API returned status %d: %s",

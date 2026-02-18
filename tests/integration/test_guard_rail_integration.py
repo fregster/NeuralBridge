@@ -54,7 +54,7 @@ def mock_ollama_client():
     """
     with (
         patch("custom_components.neuralbridge.conversation.OllamaClient") as mock_conv,
-        patch("custom_components.neuralbridge.ollama_client.OllamaClient") as mock_gr,
+        patch("custom_components.neuralbridge.guard_rail.OllamaClient") as mock_gr,
     ):
         client_instance = AsyncMock()
         client_instance.generate = AsyncMock()

@@ -56,12 +56,12 @@ For detailed project context, technical requirements, and coding standards, refe
 
 ## Pre-Commit Checklist
 
-Before ANY code commit:
-- [ ] 100% test coverage (`pytest --cov --cov-fail-under=100`)
-- [ ] All tests pass (`pytest`)
+Before ANY code commit, **run in this order**:
+- [ ] Ruff passes (`ruff check custom_components tests`) — **run BEFORE tests**
 - [ ] Black formatted (`black .`)
-- [ ] Ruff passes (`ruff check .`)
 - [ ] Mypy passes (`mypy custom_components`)
+- [ ] All tests pass (`pytest`)
+- [ ] 100% test coverage (`pytest --cov --cov-fail-under=100`)
 - [ ] No security issues
 - [ ] Line length ≤ 115
 - [ ] Function complexity ≤ 15

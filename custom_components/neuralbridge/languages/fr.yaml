@@ -38,6 +38,17 @@ placeholders:
     Aucun agent routeur (priorité 0) n'est configuré.
     Ajoutez un agent local léger (p. ex. TinyLlama, Qwen) avec la priorité 0 avant
     d'activer les garde-fous.
+  guard_rail_rules_info: >-
+    Saisissez des expressions régulières personnalisées (une par ligne) pour bloquer le contenu
+    correspondant. Les motifs sont fusionnés avec les défauts intégrés. Laissez vide pour
+    utiliser uniquement les défauts.
+
+# ── Guard rail rule category labels ───────────────────────────────────────────
+guard_rail_categories:
+  harmful: "Motifs de contenu nuisible"
+  privacy: "Motifs de confidentialité"
+  security: "Motifs de sécurité"
+  inappropriate: "Motifs de contenu inapproprié"
 
 # ── Guard rail action selector labels ─────────────────────────────────────────
 guard_rail_actions:
