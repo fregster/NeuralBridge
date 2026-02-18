@@ -1,0 +1,67 @@
+# NeuralBridge Language File — Deutsch (German)
+# Derived from en_gb.yaml (British English — default and source of truth).
+#
+# Keys must exactly match those in en_gb.yaml.
+# Missing keys fall back automatically to en_gb.yaml at runtime.
+
+language:
+  name: "Deutsch"
+  code: "de"
+
+# ── Agent type selector labels ─────────────────────────────────────────────────
+agent_types:
+  home_assistant: "Home Assistant (Eingebaut)"
+  existing_integration: "Bestehende Integration (Gemini, ChatGPT, usw.)"
+  ollama: "Ollama (Extern)"
+
+# ── Agent management UI ────────────────────────────────────────────────────────
+agent_management:
+  status_enabled: "✓ Aktiviert"
+  status_disabled: "✗ Deaktiviert"
+  action_edit: "Agenteneinstellungen bearbeiten"
+  action_enable: "Agenten aktivieren"
+  action_disable: "Agenten deaktivieren"
+  action_delete: "Agenten löschen"
+  no_agents_yet: "Noch keine Agenten konfiguriert."
+  default_ha_agent_name: "Home Assistant"
+
+# ── Description placeholder text used inside config flow steps ─────────────────
+placeholders:
+  priority_info: >-
+    0 = Router/Filter (TinyLlama, Qwen), 0–100 = Verarbeitungspriorität.
+    Sicherheitsfilter für Agenten mit Priorität 0 deaktiviert (zur Vermeidung von Schleifen).
+  guard_rails_info: >-
+    Sicherheitsfilter laufen auf dem Agenten mit der höchsten Priorität (niedrigster Wert,
+    typischerweise 0) für schnelles, datenschutzfreundliches Inhaltsfiltern.
+    Hybridansatz: zunächst schnelle Regeln, dann KI, falls der Schwellenwert nicht erreicht wird.
+  no_router_agent_error: >-
+    Kein Router-Agent (Priorität 0) ist konfiguriert.
+    Fügen Sie einen leichtgewichtigen lokalen Agenten (z. B. TinyLlama, Qwen) mit Priorität 0
+    hinzu, bevor Sie Sicherheitsfilter aktivieren.
+
+# ── Guard rail action selector labels ─────────────────────────────────────────
+guard_rail_actions:
+  notify_ask: "Benachrichtigen und fragen (Empfohlen)"
+  warn: "Warnen (Antwort mit Warnung prefixen)"
+  block: "Blockieren (Antwort verhindern)"
+
+# ── Runtime response messages returned to the user ────────────────────────────
+responses:
+  fallback: "Ich habe gerade Probleme, mich mit meinen KI-Agenten zu verbinden."
+  no_agents: "Keine KI-Agenten konfiguriert. Bitte fügen Sie Agenten in den Integrationseinstellungen hinzu."
+  router_blocked: "Ich kann diese Art von Anfrage nicht bearbeiten."
+  guard_rail_blocked: "Ich kann diese Anfrage nicht bearbeiten, da sie möglicherweise schädliche Inhalte enthält."
+  guard_rail_warning_prefix: "⚠️ Warnung: Dieser Inhalt könnte sensibel sein. "
+  guard_rail_notify_ask: >-
+    Diese Antwort könnte schädliche oder sensible Informationen enthalten.
+    Möchten Sie fortfahren?
+
+# ── Language settings step ────────────────────────────────────────────────────
+language_settings:
+  title: "Spracheinstellungen"
+  description: >-
+    Wählen Sie Ihre bevorzugte Sprache für NeuralBridge-Antworten und die Benutzeroberfläche.
+    Laden Sie die Integration nach dieser Änderung neu.
+  language_label: "Sprache"
+  restart_note: >-
+    Die Integration muss neu geladen werden, damit die Sprachänderung vollständig wirksam wird.

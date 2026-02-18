@@ -1,0 +1,67 @@
+# NeuralBridge Language File — Español (Spanish)
+# Derived from en_gb.yaml (British English — default and source of truth).
+#
+# Keys must exactly match those in en_gb.yaml.
+# Missing keys fall back automatically to en_gb.yaml at runtime.
+
+language:
+  name: "Español"
+  code: "es"
+
+# ── Agent type selector labels ─────────────────────────────────────────────────
+agent_types:
+  home_assistant: "Home Assistant (Integrado)"
+  existing_integration: "Integración existente (Gemini, ChatGPT, etc.)"
+  ollama: "Ollama (Externo)"
+
+# ── Agent management UI ────────────────────────────────────────────────────────
+agent_management:
+  status_enabled: "✓ Activado"
+  status_disabled: "✗ Desactivado"
+  action_edit: "Editar configuración del agente"
+  action_enable: "Activar agente"
+  action_disable: "Desactivar agente"
+  action_delete: "Eliminar agente"
+  no_agents_yet: "No hay agentes configurados todavía."
+  default_ha_agent_name: "Home Assistant"
+
+# ── Description placeholder text used inside config flow steps ─────────────────
+placeholders:
+  priority_info: >-
+    0 = Enrutador/Filtro (TinyLlama, Qwen), 0–100 = Prioridad de procesamiento.
+    Las barandillas desactivadas para agentes con prioridad 0 (para evitar bucles).
+  guard_rails_info: >-
+    Las barandillas se ejecutan en el agente local de mayor prioridad (valor más bajo,
+    normalmente 0) para un filtrado de contenido rápido y respetuoso con la privacidad.
+    Enfoque híbrido: reglas rápidas primero, luego IA si no se alcanza el umbral de confianza.
+  no_router_agent_error: >-
+    No hay ningún agente enrutador (prioridad 0) configurado.
+    Añada un agente local ligero (p. ej. TinyLlama, Qwen) con prioridad 0 antes de
+    activar las barandillas.
+
+# ── Guard rail action selector labels ─────────────────────────────────────────
+guard_rail_actions:
+  notify_ask: "Notificar y preguntar (Recomendado)"
+  warn: "Advertir (Prefijar con aviso)"
+  block: "Bloquear (Impedir respuesta)"
+
+# ── Runtime response messages returned to the user ────────────────────────────
+responses:
+  fallback: "Tengo problemas para conectarme a mis agentes de IA en este momento."
+  no_agents: "No hay agentes de IA configurados. Por favor, añada agentes en la configuración de la integración."
+  router_blocked: "No puedo procesar este tipo de solicitud."
+  guard_rail_blocked: "No puedo procesar esta solicitud ya que puede contener contenido dañino."
+  guard_rail_warning_prefix: "⚠️ Advertencia: Este contenido puede ser sensible. "
+  guard_rail_notify_ask: >-
+    Esta respuesta puede contener información dañina o sensible.
+    ¿Le gustaría continuar?
+
+# ── Language settings step ────────────────────────────────────────────────────
+language_settings:
+  title: "Configuración de idioma"
+  description: >-
+    Seleccione su idioma preferido para las respuestas e interfaz de NeuralBridge.
+    Recargue la integración después de cambiar esta configuración.
+  language_label: "Idioma"
+  restart_note: >-
+    La integración debe recargarse para que el cambio de idioma surta pleno efecto.

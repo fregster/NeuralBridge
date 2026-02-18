@@ -1,0 +1,67 @@
+# NeuralBridge Language File — Français (French)
+# Derived from en_gb.yaml (British English — default and source of truth).
+#
+# Keys must exactly match those in en_gb.yaml.
+# Missing keys fall back automatically to en_gb.yaml at runtime.
+
+language:
+  name: "Français"
+  code: "fr"
+
+# ── Agent type selector labels ─────────────────────────────────────────────────
+agent_types:
+  home_assistant: "Home Assistant (Intégré)"
+  existing_integration: "Intégration existante (Gemini, ChatGPT, etc.)"
+  ollama: "Ollama (Externe)"
+
+# ── Agent management UI ────────────────────────────────────────────────────────
+agent_management:
+  status_enabled: "✓ Activé"
+  status_disabled: "✗ Désactivé"
+  action_edit: "Modifier les paramètres de l'agent"
+  action_enable: "Activer l'agent"
+  action_disable: "Désactiver l'agent"
+  action_delete: "Supprimer l'agent"
+  no_agents_yet: "Aucun agent configuré pour l'instant."
+  default_ha_agent_name: "Home Assistant"
+
+# ── Description placeholder text used inside config flow steps ─────────────────
+placeholders:
+  priority_info: >-
+    0 = Routeur/Filtre (TinyLlama, Qwen), 0–100 = Priorité de traitement.
+    Les garde-fous sont désactivés pour les agents de priorité 0 (pour éviter les boucles).
+  guard_rails_info: >-
+    Les garde-fous s'exécutent sur l'agent local de plus haute priorité (valeur la plus basse,
+    généralement 0) pour un filtrage de contenu rapide et respectueux de la vie privée.
+    Approche hybride : règles rapides d'abord, puis IA si le seuil de confiance n'est pas atteint.
+  no_router_agent_error: >-
+    Aucun agent routeur (priorité 0) n'est configuré.
+    Ajoutez un agent local léger (p. ex. TinyLlama, Qwen) avec la priorité 0 avant
+    d'activer les garde-fous.
+
+# ── Guard rail action selector labels ─────────────────────────────────────────
+guard_rail_actions:
+  notify_ask: "Notifier et demander (Recommandé)"
+  warn: "Avertir (Préfixer avec un avertissement)"
+  block: "Bloquer (Empêcher la réponse)"
+
+# ── Runtime response messages returned to the user ────────────────────────────
+responses:
+  fallback: "J'ai des difficultés à me connecter à mes agents IA en ce moment."
+  no_agents: "Aucun agent IA n'est configuré. Veuillez ajouter des agents dans les paramètres de l'intégration."
+  router_blocked: "Je ne peux pas traiter ce type de demande."
+  guard_rail_blocked: "Je ne peux pas traiter cette demande car elle pourrait contenir du contenu nuisible."
+  guard_rail_warning_prefix: "⚠️ Avertissement : Ce contenu peut être sensible. "
+  guard_rail_notify_ask: >-
+    Cette réponse pourrait contenir des informations nuisibles ou sensibles.
+    Voulez-vous continuer ?
+
+# ── Language settings step ────────────────────────────────────────────────────
+language_settings:
+  title: "Paramètres de langue"
+  description: >-
+    Sélectionnez votre langue préférée pour les réponses et l'interface de NeuralBridge.
+    Rechargez l'intégration après avoir modifié ce paramètre.
+  language_label: "Langue"
+  restart_note: >-
+    L'intégration doit être rechargée pour que le changement de langue prenne pleinement effet.

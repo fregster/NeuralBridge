@@ -1,0 +1,70 @@
+# NeuralBridge Language File — American English (en_US)
+# Alternative language file. British English (en_gb.yaml) is the default.
+#
+# To add a new language:
+#   1. Copy this file and rename it (e.g. de.yaml, fr.yaml).
+#   2. Translate the values (keep the keys exactly as-is).
+#   3. Restart or reload the NeuralBridge integration.
+#   4. Select the new language in Settings → Integrations → NeuralBridge → Configure.
+
+language:
+  name: "English (US)"
+  code: "en_US"
+
+# ── Agent type selector labels ─────────────────────────────────────────────────
+agent_types:
+  home_assistant: "Home Assistant (Built-in)"
+  existing_integration: "Existing Integration (Gemini, ChatGPT, etc.)"
+  ollama: "Ollama (External)"
+
+# ── Agent management UI ────────────────────────────────────────────────────────
+agent_management:
+  status_enabled: "✓ Enabled"
+  status_disabled: "✗ Disabled"
+  action_edit: "Edit Agent Settings"
+  action_enable: "Enable Agent"
+  action_disable: "Disable Agent"
+  action_delete: "Delete Agent"
+  no_agents_yet: "No agents configured yet."
+  default_ha_agent_name: "Home Assistant"
+
+# ── Description placeholder text used inside config flow steps ─────────────────
+placeholders:
+  priority_info: >-
+    0 = Router/Filter (TinyLlama, Qwen), 0-100 = Processing priority.
+    Guard rails disabled for priority 0 agents (to prevent loops).
+  guard_rails_info: >-
+    Guard rails run on the highest-priority (lowest value, typically 0) local agent
+    for fast, privacy-preserving content filtering.
+    Uses a hybrid approach: fast rules first, then AI if the confidence threshold is not met.
+  no_router_agent_error: >-
+    No router agent (priority 0) is configured.
+    Add a lightweight local agent (e.g. TinyLlama, Qwen) with priority 0 before enabling
+    guard rails.
+
+# ── Guard rail action selector labels ─────────────────────────────────────────
+guard_rail_actions:
+  notify_ask: "Notify & Ask (Recommended)"
+  warn: "Warn (Prefix with warning)"
+  block: "Block (Prevent response)"
+
+# ── Runtime response messages returned to the user ────────────────────────────
+responses:
+  fallback: "I'm having trouble connecting to my AI agents right now."
+  no_agents: "No AI agents are configured. Please add agents in the integration settings."
+  router_blocked: "I cannot process that type of request."
+  guard_rail_blocked: "I cannot process this request as it may contain harmful content."
+  guard_rail_warning_prefix: "⚠️ Warning: This content may be sensitive. "
+  guard_rail_notify_ask: >-
+    This response may contain harmful or sensitive information.
+    Would you like to continue?
+
+# ── Language settings step ────────────────────────────────────────────────────
+language_settings:
+  title: "Language Settings"
+  description: >-
+    Select your preferred language for NeuralBridge runtime responses and
+    interface text. Reload the integration after changing this setting.
+  language_label: "Language"
+  restart_note: >-
+    The integration must be reloaded for the language change to take full effect.
