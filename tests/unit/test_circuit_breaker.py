@@ -65,10 +65,10 @@ class TestCircuitBreaker:
     def test_is_open_true_during_cooldown(self) -> None:
         """Test is_open returns True while cooldown period is active."""
         cb = CircuitBreaker(failure_threshold=2, cooldown_seconds=60)
-        cb.record_failure("agent-1")
-        cb.record_failure("agent-1")
         with patch("time.monotonic", return_value=1000.0):
-            # Still within cooldown
+            cb.record_failure("agent-1")
+            cb.record_failure("agent-1")
+            # 0 seconds elapsed — still within 60s cooldown
             assert cb.is_open("agent-1") is True
 
     def test_is_open_false_after_cooldown(self) -> None:
