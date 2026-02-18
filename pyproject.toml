@@ -86,6 +86,10 @@ disallow_untyped_defs = false
 module = ["custom_components.neuralbridge.languages_loader", "custom_components.neuralbridge.guard_rail"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["better_profanity.*", "detoxify.*"]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["custom_components.neuralbridge"]
 omit = [
