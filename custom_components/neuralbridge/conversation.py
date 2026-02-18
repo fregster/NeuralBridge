@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from homeassistant.components.conversation import (
     ConversationEntity,
@@ -13,11 +13,8 @@ from homeassistant.components.conversation import (
     ConversationResult,
 )
 from homeassistant.components.conversation.const import DOMAIN as CONVERSATION_DOMAIN
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
 from homeassistant.helpers import intent
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .circuit_breaker import CircuitBreaker
 from .const import (
@@ -35,11 +32,14 @@ from .const import (
     CONF_GUARD_RAIL_DETOXIFY_THRESHOLD,
     CONF_GUARD_RAIL_ENABLED,
     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
+    CONF_GUARD_RAIL_RULES,
     CONF_GUARD_RAIL_USE_DETOXIFY,
     CONF_LANGUAGE,
+    CONF_MAX_RETRIES,
     CONF_OLLAMA_MODEL,
     CONF_OLLAMA_URL,
     CONF_PRIORITY,
+    CONF_RETRY_BASE_DELAY,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DATA_RESPONSE_CACHE,
@@ -56,8 +56,10 @@ from .const import (
     DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
     DEFAULT_GUARD_RAIL_USE_DETOXIFY,
     DEFAULT_LANGUAGE,
+    DEFAULT_MAX_RETRIES,
     DEFAULT_RESPONSE_CACHE_ENABLED,
     DEFAULT_RESPONSE_CACHE_TTL,
+    DEFAULT_RETRY_BASE_DELAY,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     DOMAIN,
@@ -79,6 +81,11 @@ from .ollama_client import OllamaClient
 from .response_cache import ResponseCache
 from .session_memory import SessionMemory
 from .statistics import AgentStatistics
+
+if TYPE_CHECKING:
+    from homeassistant.config_entries import ConfigEntry
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -104,6 +111,7 @@ class NeuralBridgeAgent(ConversationEntity):
         self._attr_unique_id = config_entry.entry_id
         self._ollama_clients: dict[str, OllamaClient] = {}
         self._guard_rail_checker: GuardRailChecker | None = None
+        self._guard_rail_rules_snapshot: dict[str, list[str]] | None = None
         self._guard_rail_cache = GuardRailCache()
         self._circuit_breaker = CircuitBreaker(
             failure_threshold=DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
@@ -169,7 +177,7 @@ class NeuralBridgeAgent(ConversationEntity):
             _LOGGER.debug("Cache hit — returning cached response")
             return self._create_result(cached, user_input.conversation_id)
 
-        # Steps 3–5: Load enabled agents, split by role, run router check
+        # Steps 3-5: Load enabled agents, split by role, run router check
         config = self._get_config()
         agents = [
             a
@@ -251,7 +259,7 @@ class NeuralBridgeAgent(ConversationEntity):
     async def _try_agent_with_tracking(
         self, agent_config: dict[str, Any], user_input: ConversationInput
     ) -> ConversationResult | None:
-        """Try a single agent with circuit breaker, stats, and cache tracking.
+        """Try a single agent with circuit breaker guard, then retry logic.
 
         Args:
             agent_config: Configuration dict for the agent to try.
@@ -269,17 +277,61 @@ class NeuralBridgeAgent(ConversationEntity):
             )
             return None
 
-        self._statistics.record_request(agent_id, agent_name)
-        start_time = time.monotonic()
-        result, timed_out = await self._try_agent(agent_config, user_input)
-        elapsed_ms = (time.monotonic() - start_time) * 1000
+        return await self._try_agent_with_retries(agent_config, user_input, agent_id, agent_name)
 
-        if result is not None:
-            return await self._handle_successful_result(
-                agent_config, result, user_input, agent_id, elapsed_ms
-            )
+    async def _try_agent_with_retries(
+        self,
+        agent_config: dict[str, Any],
+        user_input: ConversationInput,
+        agent_id: str,
+        agent_name: str,
+    ) -> ConversationResult | None:
+        """Attempt an agent call with exponential back-off on failure.
 
-        self._record_agent_failure(agent_id, timed_out)
+        Args:
+            agent_config: Configuration dict for the agent to try.
+            user_input: The user's conversation input.
+            agent_id: Unique identifier for the agent.
+            agent_name: Display name of the agent (for logging).
+
+        Returns:
+            ConversationResult on success, None if all attempts are exhausted.
+        """
+        config = self._get_config()
+        max_retries = int(config.get(CONF_MAX_RETRIES, DEFAULT_MAX_RETRIES))
+        retry_base_delay = float(config.get(CONF_RETRY_BASE_DELAY, DEFAULT_RETRY_BASE_DELAY))
+
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                delay = retry_base_delay * (2 ** (attempt - 1))
+                _LOGGER.debug(
+                    "Retry %d/%d for agent %s — waiting %.1fs before next attempt",
+                    attempt,
+                    max_retries,
+                    agent_name,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+            self._statistics.record_request(agent_id, agent_name)
+            start_time = time.monotonic()
+            result, timed_out = await self._try_agent(agent_config, user_input)
+            elapsed_ms = (time.monotonic() - start_time) * 1000
+
+            if result is not None:
+                return await self._handle_successful_result(
+                    agent_config, result, user_input, agent_id, elapsed_ms
+                )
+
+            self._record_agent_failure(agent_id, timed_out)
+            if self._circuit_breaker.is_open(agent_id):
+                _LOGGER.warning(
+                    "Circuit tripped for agent %s after attempt %d — stopping retries",
+                    agent_name,
+                    attempt + 1,
+                )
+                break
+
         return None
 
     async def _handle_successful_result(
@@ -597,6 +649,43 @@ class NeuralBridgeAgent(ConversationEntity):
 
         return None
 
+    async def _apply_guard_rail_action(
+        self,
+        action: str,
+        result: ConversationResult,
+        response_text: str,
+        conversation_id: str | None,
+        guard_rail_result: Any,
+    ) -> ConversationResult | None:
+        """Apply the configured guard rail action after a triggered rule.
+
+        Args:
+            action: The configured guard rail action key.
+            result: The conversation result to modify or replace.
+            response_text: The extracted response text.
+            conversation_id: Conversation ID for pending-response caching.
+            guard_rail_result: The guard rail check result.
+
+        Returns:
+            ConversationResult if the action produces a response, None otherwise.
+        """
+        if action == GUARD_RAIL_ACTION_BLOCK:
+            return self._create_error_result(
+                self._localized("responses", "guard_rail_blocked"), conversation_id
+            )
+        if action == GUARD_RAIL_ACTION_WARN:
+            prefix = self._localized("responses", "guard_rail_warning_prefix")
+            result.response.async_set_speech(f"{prefix}{response_text}")
+            return None
+        if action == GUARD_RAIL_ACTION_NOTIFY_ASK:
+            await self._guard_rail_cache.store_pending_response(
+                conversation_id or "default", response_text, guard_rail_result
+            )
+            return self._create_result(
+                self._localized("responses", "guard_rail_notify_ask"), conversation_id
+            )
+        return None
+
     async def _check_guardrails(
         self,
         agent_config: dict[str, Any],
@@ -616,18 +705,20 @@ class NeuralBridgeAgent(ConversationEntity):
         config = self._get_config()
 
         guard_rail_enabled = config.get(CONF_GUARD_RAIL_ENABLED, DEFAULT_GUARD_RAIL_ENABLED)
-        if not guard_rail_enabled:
-            return None
-
         agent_guard_rail_enabled = agent_config.get(
             CONF_GUARD_RAIL_ENABLED_FOR_AGENT, DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT
         )
-        if not agent_guard_rail_enabled:
+        if not guard_rail_enabled or not agent_guard_rail_enabled:
             return None
 
         response_text = self._extract_response_text(result)
         if not response_text:
             return None
+
+        current_rules: dict[str, list[str]] | None = config.get(CONF_GUARD_RAIL_RULES)
+        if current_rules != self._guard_rail_rules_snapshot:
+            self._guard_rail_checker = None
+            self._guard_rail_rules_snapshot = current_rules
 
         if self._guard_rail_checker is None:
             ai_threshold = config.get(CONF_GUARD_RAIL_AI_THRESHOLD, DEFAULT_GUARD_RAIL_AI_THRESHOLD)
@@ -636,7 +727,7 @@ class NeuralBridgeAgent(ConversationEntity):
                 CONF_GUARD_RAIL_DETOXIFY_THRESHOLD, DEFAULT_GUARD_RAIL_DETOXIFY_THRESHOLD
             )
             self._guard_rail_checker = GuardRailChecker(
-                rules=None,
+                rules=current_rules,
                 ai_threshold=ai_threshold,
                 use_detoxify=use_detoxify,
                 detoxify_threshold=detoxify_threshold,
@@ -676,25 +767,9 @@ class NeuralBridgeAgent(ConversationEntity):
             },
         )
 
-        if action == GUARD_RAIL_ACTION_BLOCK:
-            return self._create_error_result(
-                self._localized("responses", "guard_rail_blocked"), conversation_id
-            )
-
-        if action == GUARD_RAIL_ACTION_WARN:
-            prefix = self._localized("responses", "guard_rail_warning_prefix")
-            result.response.async_set_speech(f"{prefix}{response_text}")
-            return None
-
-        if action == GUARD_RAIL_ACTION_NOTIFY_ASK:
-            await self._guard_rail_cache.store_pending_response(
-                conversation_id or "default", response_text, guard_rail_result
-            )
-            return self._create_result(
-                self._localized("responses", "guard_rail_notify_ask"), conversation_id
-            )
-
-        return None
+        return await self._apply_guard_rail_action(
+            action, result, response_text, conversation_id, guard_rail_result
+        )
 
     async def _get_guard_rail_agent_config(self) -> dict[str, Any] | None:
         """Return the configuration for the designated guard rail agent.

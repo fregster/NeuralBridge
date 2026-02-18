@@ -33,7 +33,7 @@ class AgentStats:
 
     @property
     def success_rate(self) -> float:
-        """Fraction of requests that succeeded (0.0–1.0).
+        """Fraction of requests that succeeded (0.0-1.0).
 
         Returns:
             Success rate as a float, or 0.0 if no requests recorded.

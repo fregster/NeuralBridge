@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from .const import (
     CONF_AGENT_TYPE,
@@ -19,8 +20,11 @@ from .const import (
     GUARD_RAIL_CATEGORY_PRIVACY,
     GUARD_RAIL_CATEGORY_SECURITY,
 )
+from .ollama_client import OllamaClient
 
 _LOGGER = logging.getLogger(__name__)
+
+_HIGH_CONFIDENCE: float = 0.9
 
 # Default rule patterns for fast filtering
 DEFAULT_HARMFUL_PATTERNS = [
@@ -61,7 +65,7 @@ class GuardRailChecker:
     """Guard rail checker with hybrid rule-based and AI filtering."""
 
     # Maps detoxify score keys to NeuralBridge guard rail categories.
-    _DETOXIFY_CATEGORY_MAP: dict[str, str] = {
+    _DETOXIFY_CATEGORY_MAP: ClassVar[dict[str, str]] = {
         "toxicity": GUARD_RAIL_CATEGORY_HARMFUL,
         "severe_toxicity": GUARD_RAIL_CATEGORY_HARMFUL,
         "obscene": GUARD_RAIL_CATEGORY_INAPPROPRIATE,
@@ -86,7 +90,7 @@ class GuardRailChecker:
                 stage. Requires ``pip install detoxify`` (~200 MB model). Disabled
                 by default to avoid forcing a large download on all users.
             detoxify_threshold: Score above which a detoxify category is flagged
-                (0.0–1.0, default 0.7). Independently tunable from ai_threshold.
+                (0.0-1.0, default 0.7). Independently tunable from ai_threshold.
         """
         self._ai_threshold = ai_threshold
         self._detoxify_threshold = detoxify_threshold
@@ -207,23 +211,23 @@ class GuardRailChecker:
 
         # Stage 1: Fast regex rules (unchanged behaviour)
         rule_result = await self._check_with_rules(text)
-        if rule_result.confidence >= 0.9:
+        if rule_result.confidence >= _HIGH_CONFIDENCE:
             return rule_result
 
         # Stage 2: better-profanity word-list
         if self._profanity_available:
             profanity_result = self._check_with_profanity(text)
-            if profanity_result.confidence >= 0.9:
+            if profanity_result.confidence >= _HIGH_CONFIDENCE:
                 return profanity_result
 
         best_result = rule_result
 
         # Stage 3: detoxify ML model (opt-in, runs in thread executor)
-        if self._detoxify_available and best_result.confidence < 0.9:
+        if self._detoxify_available and best_result.confidence < _HIGH_CONFIDENCE:
             detox_result = await self._check_with_detoxify(text)
             if detox_result.confidence > best_result.confidence:
                 best_result = detox_result
-            if best_result.confidence >= 0.9:
+            if best_result.confidence >= _HIGH_CONFIDENCE:
                 return best_result
 
         # Stage 4: Ollama AI (opt-in, only when still uncertain)
@@ -322,7 +326,7 @@ class GuardRailChecker:
         The user text is never included in log output.
 
         Args:
-            scores: Detoxify category → float score (0.0–1.0) mapping.
+            scores: Detoxify category -> float score (0.0-1.0) mapping.
 
         Returns:
             GuardRailResult reflecting the most significant detected category.
@@ -397,9 +401,6 @@ class GuardRailChecker:
             Guard rail check result.
         """
         try:
-            # Import here to avoid circular dependency
-            from .ollama_client import OllamaClient
-
             agent_type = ai_agent_config.get(CONF_AGENT_TYPE)
             if agent_type != "ollama":
                 _LOGGER.warning("AI guard rail checking only supports Ollama agents")
@@ -533,8 +534,6 @@ class GuardRailCache:
             response: The response text to cache.
             guard_rail_result: The guard rail check result.
         """
-        import time
-
         key = f"pending:{conversation_id}"
         expiry = time.time() + self._ttl_seconds
 
@@ -557,8 +556,6 @@ class GuardRailCache:
         Returns:
             Tuple of (response, guard_rail_result) if found, None otherwise.
         """
-        import time
-
         key = f"pending:{conversation_id}"
         if key in self._cache:
             data, expiry = self._cache[key]
@@ -581,8 +578,6 @@ class GuardRailCache:
 
     async def _cleanup(self) -> None:
         """Clean up expired entries."""
-        import time
-
         current_time = time.time()
 
         # Remove expired entries

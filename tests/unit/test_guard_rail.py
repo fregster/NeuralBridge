@@ -121,7 +121,7 @@ class TestGuardRailChecker:
         assert input_result.confidence == output_result.confidence
         assert input_result.category == output_result.category
 
-    @patch("custom_components.neuralbridge.ollama_client.OllamaClient")
+    @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
     async def test_check_with_ai_safe(self, mock_client_class):
         """Test AI-based checking with safe content."""
         # Mock Ollama client
@@ -150,7 +150,7 @@ class TestGuardRailChecker:
         assert result.confidence >= 0.5
         mock_client.generate.assert_called_once()
 
-    @patch("custom_components.neuralbridge.ollama_client.OllamaClient")
+    @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
     async def test_check_with_ai_unsafe(self, mock_client_class):
         """Test AI-based checking with unsafe content."""
         # Mock Ollama client
@@ -179,7 +179,7 @@ class TestGuardRailChecker:
         # _parse_ai_response uppercases the response; compare case-insensitively.
         assert "harmful content" in result.reason.lower()
 
-    @patch("custom_components.neuralbridge.ollama_client.OllamaClient")
+    @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
     async def test_check_with_ai_timeout(self, mock_client_class):
         """Test AI-based checking with timeout."""
         # Mock Ollama client to timeout
@@ -227,7 +227,7 @@ class TestGuardRailChecker:
         assert result.is_safe is True
         assert result.confidence >= 0.5
 
-    @patch("custom_components.neuralbridge.ollama_client.OllamaClient")
+    @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
     async def test_check_with_ai_empty_response_returns_safe(self, mock_client_class):
         """Test AI-based checking when generate() returns empty string → safe."""
         mock_client = AsyncMock()
@@ -252,7 +252,7 @@ class TestGuardRailChecker:
         assert result.is_safe is True
         assert result.confidence >= 0.5
 
-    @patch("custom_components.neuralbridge.ollama_client.OllamaClient")
+    @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
     async def test_check_with_ai_generic_exception_returns_safe(self, mock_client_class):
         """Test AI-based checking when generate() raises a generic exception → safe."""
         mock_client = AsyncMock()
@@ -734,7 +734,9 @@ class TestGuardRailCheckerOptionalLibraries:
         checker._profanity_available = False
         checker._detoxify_available = True
         # Detoxify returns 0.7 — above rule's 0.6 but below the 0.9 threshold
-        mid_detox = GuardRailResult(is_safe=False, confidence=0.7, category=GUARD_RAIL_CATEGORY_HARMFUL)
+        mid_detox = GuardRailResult(
+            is_safe=False, confidence=0.7, category=GUARD_RAIL_CATEGORY_HARMFUL
+        )
         with patch.object(
             checker, "_check_with_detoxify", new_callable=AsyncMock, return_value=mid_detox
         ):
@@ -746,10 +748,14 @@ class TestGuardRailCheckerOptionalLibraries:
         checker = GuardRailChecker(ai_threshold=0.7)
         checker._profanity_available = False
         checker._detoxify_available = True
-        high_detox = GuardRailResult(is_safe=False, confidence=0.9, category=GUARD_RAIL_CATEGORY_HARMFUL)
+        high_detox = GuardRailResult(
+            is_safe=False, confidence=0.9, category=GUARD_RAIL_CATEGORY_HARMFUL
+        )
         ai_mock = AsyncMock()
         with (
-            patch.object(checker, "_check_with_detoxify", new_callable=AsyncMock, return_value=high_detox),
+            patch.object(
+                checker, "_check_with_detoxify", new_callable=AsyncMock, return_value=high_detox
+            ),
             patch.object(checker, "_check_with_ai", ai_mock),
         ):
             result = await checker.check_input(
@@ -767,17 +773,19 @@ class TestGuardRailCheckerOptionalLibraries:
         checker._detoxify_available = True
         low_detox = GuardRailResult(is_safe=True, confidence=0.6)
         ai_result = GuardRailResult(is_safe=True, confidence=0.9)
-        with patch.object(
-            checker, "_check_with_detoxify", new_callable=AsyncMock, return_value=low_detox
-        ):
-            with patch.object(
+        with (
+            patch.object(
+                checker, "_check_with_detoxify", new_callable=AsyncMock, return_value=low_detox
+            ),
+            patch.object(
                 checker, "_check_with_ai", new_callable=AsyncMock, return_value=ai_result
-            ) as mock_ai:
-                await checker.check_input(
-                    "What is the weather?",
-                    use_ai=True,
-                    ai_agent_config={"type": "ollama"},
-                )
+            ) as mock_ai,
+        ):
+            await checker.check_input(
+                "What is the weather?",
+                use_ai=True,
+                ai_agent_config={"type": "ollama"},
+            )
         mock_ai.assert_called_once()
 
     async def test_check_input_profanity_match_skips_detoxify(self):
@@ -786,7 +794,9 @@ class TestGuardRailCheckerOptionalLibraries:
         checker = GuardRailChecker()
         checker._detoxify_model = mock_model
         checker._detoxify_available = True
-        high_conf = GuardRailResult(is_safe=False, confidence=0.9, category=GUARD_RAIL_CATEGORY_INAPPROPRIATE)
+        high_conf = GuardRailResult(
+            is_safe=False, confidence=0.9, category=GUARD_RAIL_CATEGORY_INAPPROPRIATE
+        )
         with patch.object(checker, "_check_with_profanity", return_value=high_conf):
             result = await checker.check_input("profane text here")
         mock_model.predict.assert_not_called()

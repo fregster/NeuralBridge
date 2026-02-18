@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
-from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -28,12 +27,15 @@ from custom_components.neuralbridge.const import (
     CONF_GUARD_RAIL_AI_THRESHOLD,
     CONF_GUARD_RAIL_ENABLED,
     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
+    CONF_GUARD_RAIL_RULES,
     CONF_LANGUAGE,
+    CONF_MAX_RETRIES,
     CONF_OLLAMA_MODEL,
     CONF_OLLAMA_URL,
     CONF_PRIORITY,
     CONF_RESPONSE_CACHE_ENABLED,
     CONF_RESPONSE_CACHE_TTL,
+    CONF_RETRY_BASE_DELAY,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DATA_RESPONSE_CACHE,
@@ -43,11 +45,18 @@ from custom_components.neuralbridge.const import (
     DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
     DEFAULT_LANGUAGE,
     DEFAULT_OLLAMA_URL,
+    DEFAULT_RESPONSE_CACHE_ENABLED,
+    DEFAULT_RESPONSE_CACHE_TTL,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     DOMAIN,
     GUARD_RAIL_ACTION_BLOCK,
+    GUARD_RAIL_CATEGORY_HARMFUL,
+    GUARD_RAIL_CATEGORY_PRIVACY,
 )
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -322,7 +331,7 @@ async def test_user_step_creates_entry(hass: HomeAssistant) -> None:
 async def test_options_flow_init_shows_menu(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
-    """async_step_init returns a MENU result with the 5 expected options."""
+    """async_step_init returns a MENU result with the 6 expected options."""
     handler = _make_handler(mock_config_entry, hass)
     result = await handler.async_step_init()
     assert result["type"] == FlowResultType.MENU
@@ -330,6 +339,7 @@ async def test_options_flow_init_shows_menu(
         "add_agent",
         "manage_agents",
         "configure_guard_rails",
+        "configure_guard_rail_rules",
         "advanced_settings",
         "language_settings",
     }
@@ -1313,3 +1323,154 @@ def test_async_get_options_flow_returns_handler(
     """NeuralBridgeConfigFlow.async_get_options_flow returns an options flow handler."""
     handler = NeuralBridgeConfigFlow.async_get_options_flow(mock_config_entry)
     assert isinstance(handler, NeuralBridgeOptionsFlowHandler)
+
+
+# ---------------------------------------------------------------------------
+# Test 52 — configure_guard_rail_rules: shows form
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_guard_rail_rules_show_form(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """async_step_configure_guard_rail_rules without input shows the form."""
+    handler = _make_handler(mock_config_entry, hass)
+    result = await handler.async_step_configure_guard_rail_rules()
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "configure_guard_rail_rules"
+
+
+# ---------------------------------------------------------------------------
+# Test 53 — configure_guard_rail_rules: saves valid patterns
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_guard_rail_rules_save_valid_patterns(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Submitting valid regex patterns saves them under CONF_GUARD_RAIL_RULES."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_configure_guard_rail_rules(
+            {
+                GUARD_RAIL_CATEGORY_HARMFUL: "\\bharm\\b\nbomb",
+                GUARD_RAIL_CATEGORY_PRIVACY: "ssn|social.security",
+                "security": "",
+                "inappropriate": "",
+            }
+        )
+
+    saved = mock_config_entry.data[CONF_GUARD_RAIL_RULES]
+    assert saved[GUARD_RAIL_CATEGORY_HARMFUL] == ["\\bharm\\b", "bomb"]
+    assert saved[GUARD_RAIL_CATEGORY_PRIVACY] == ["ssn|social.security"]
+    assert saved["security"] == []
+    assert saved["inappropriate"] == []
+
+
+# ---------------------------------------------------------------------------
+# Test 54 — configure_guard_rail_rules: invalid regex returns error
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_guard_rail_rules_invalid_regex(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """An invalid regex pattern returns a form with errors."""
+    handler = _make_handler(mock_config_entry, hass)
+
+    result = await handler.async_step_configure_guard_rail_rules(
+        {
+            GUARD_RAIL_CATEGORY_HARMFUL: "[invalid(regex",
+            GUARD_RAIL_CATEGORY_PRIVACY: "",
+            "security": "",
+            "inappropriate": "",
+        }
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_regex"}
+
+
+# ---------------------------------------------------------------------------
+# Test 55 — configure_guard_rail_rules: empty fields save empty lists
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_guard_rail_rules_save_empty(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Submitting empty fields saves empty lists for all categories."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_configure_guard_rail_rules(
+            {
+                GUARD_RAIL_CATEGORY_HARMFUL: "",
+                GUARD_RAIL_CATEGORY_PRIVACY: "",
+                "security": "",
+                "inappropriate": "",
+            }
+        )
+
+    saved = mock_config_entry.data[CONF_GUARD_RAIL_RULES]
+    assert all(v == [] for v in saved.values())
+
+
+# ---------------------------------------------------------------------------
+# Test 56 — advanced_settings: form includes retry fields
+# ---------------------------------------------------------------------------
+
+
+async def test_advanced_settings_includes_retry_fields(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """advanced_settings form schema includes max_retries and retry_base_delay fields."""
+    handler = _make_handler(mock_config_entry, hass)
+    result = await handler.async_step_advanced_settings()
+
+    assert result["type"] == FlowResultType.FORM
+    schema_keys = {str(k) for k in result["data_schema"].schema}
+    assert CONF_MAX_RETRIES in schema_keys
+    assert CONF_RETRY_BASE_DELAY in schema_keys
+
+
+# ---------------------------------------------------------------------------
+# Test 57 — advanced_settings: saves retry config
+# ---------------------------------------------------------------------------
+
+
+async def test_advanced_settings_saves_retry_config(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Submitting advanced settings persists max_retries and retry_base_delay."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_advanced_settings(
+            {
+                CONF_RESPONSE_CACHE_ENABLED: DEFAULT_RESPONSE_CACHE_ENABLED,
+                CONF_RESPONSE_CACHE_TTL: DEFAULT_RESPONSE_CACHE_TTL,
+                "purge_cache_now": False,
+                CONF_MAX_RETRIES: 3,
+                CONF_RETRY_BASE_DELAY: 2.0,
+            }
+        )
+
+    assert mock_config_entry.data[CONF_MAX_RETRIES] == 3
+    assert abs(mock_config_entry.data[CONF_RETRY_BASE_DELAY] - 2.0) < 0.001
