@@ -106,9 +106,9 @@ def test_hacs_manifest_bool_fields(key: str) -> None:
     data = _load_hacs_manifest()
     if key not in data:
         pytest.skip(f"Optional field '{key}' not present in hacs.json")
-    assert isinstance(data[key], bool), (
-        f"hacs.json field '{key}' must be a boolean, got {type(data[key]).__name__!r}"
-    )
+    assert isinstance(
+        data[key], bool
+    ), f"hacs.json field '{key}' must be a boolean, got {type(data[key]).__name__!r}"
 
 
 @pytest.mark.parametrize("key", sorted(_STR_KEYS))
@@ -121,9 +121,9 @@ def test_hacs_manifest_string_fields(key: str) -> None:
     data = _load_hacs_manifest()
     if key not in data:
         pytest.skip(f"Optional field '{key}' not present in hacs.json")
-    assert isinstance(data[key], str) and data[key].strip(), (
-        f"hacs.json field '{key}' must be a non-empty string"
-    )
+    assert (
+        isinstance(data[key], str) and data[key].strip()
+    ), f"hacs.json field '{key}' must be a non-empty string"
 
 
 @pytest.mark.parametrize("key", sorted(_LIST_KEYS))
@@ -137,9 +137,7 @@ def test_hacs_manifest_list_fields(key: str) -> None:
     if key not in data:
         pytest.skip(f"Optional field '{key}' not present in hacs.json")
     value = data[key]
-    assert isinstance(value, list) and value, (
-        f"hacs.json field '{key}' must be a non-empty list"
-    )
-    assert all(isinstance(item, str) for item in value), (
-        f"hacs.json field '{key}' must contain only strings"
-    )
+    assert isinstance(value, list) and value, f"hacs.json field '{key}' must be a non-empty list"
+    assert all(
+        isinstance(item, str) for item in value
+    ), f"hacs.json field '{key}' must contain only strings"
