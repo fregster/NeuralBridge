@@ -6,6 +6,7 @@ Statistics are held in memory and reset on Home Assistant restart.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +20,8 @@ class AgentStats:
     failures: int = 0
     timeouts: int = 0
     total_latency_ms: float = 0.0
+    blocks: int = 0
+    first_request_time: float | None = None
 
     @property
     def avg_latency_ms(self) -> float:
@@ -42,6 +45,31 @@ class AgentStats:
             return 0.0
         return round(self.successes / self.requests, 3)
 
+    @property
+    def queries_per_hour(self) -> float:
+        """Estimated request rate in queries per hour since the first request.
+
+        Returns:
+            Queries per hour, or 0.0 if fewer than 1 second of data exists.
+        """
+        if self.requests == 0 or self.first_request_time is None:
+            return 0.0
+        elapsed_hours = (time.monotonic() - self.first_request_time) / 3600
+        if elapsed_hours < 1 / 3600:
+            return 0.0
+        return round(self.requests / elapsed_hours, 1)
+
+    @property
+    def block_rate(self) -> float:
+        """Fraction of requests that were blocked (router agents only).
+
+        Returns:
+            Block rate as a float (0.0-1.0), or 0.0 if no requests recorded.
+        """
+        if self.requests == 0:
+            return 0.0
+        return round(self.blocks / self.requests, 3)
+
     def to_dict(self) -> dict[str, Any]:
         """Return a serialisable dict for use in sensor attributes.
 
@@ -55,6 +83,9 @@ class AgentStats:
             "timeouts": self.timeouts,
             "avg_latency_ms": self.avg_latency_ms,
             "success_rate": self.success_rate,
+            "blocks": self.blocks,
+            "block_rate": self.block_rate,
+            "queries_per_hour": self.queries_per_hour,
         }
 
 
@@ -79,6 +110,8 @@ class AgentStatistics:
         """
         self._agent_names[agent_id] = agent_name
         stats = self._stats.setdefault(agent_id, AgentStats())
+        if stats.requests == 0:
+            stats.first_request_time = time.monotonic()
         stats.requests += 1
 
     def record_success(self, agent_id: str, latency_ms: float) -> None:
@@ -115,6 +148,28 @@ class AgentStatistics:
         if stats is None:
             return
         stats.timeouts += 1
+
+    def record_block(self, agent_id: str) -> None:
+        """Record that a router agent blocked a request.
+
+        Args:
+            agent_id: Unique identifier for the router agent.
+        """
+        stats = self._stats.get(agent_id)
+        if stats is None:
+            return
+        stats.blocks += 1
+
+    def get_agent_stats(self, agent_id: str) -> AgentStats | None:
+        """Return the statistics for a specific agent.
+
+        Args:
+            agent_id: Unique identifier for the agent.
+
+        Returns:
+            AgentStats instance, or None if no stats have been recorded yet.
+        """
+        return self._stats.get(agent_id)
 
     def total_requests(self) -> int:
         """Return the total number of routing attempts across all agents.

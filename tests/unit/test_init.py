@@ -6,11 +6,15 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 from custom_components.neuralbridge import async_reload_entry, async_setup_entry, async_unload_entry
+from custom_components.neuralbridge.circuit_breaker import CircuitBreaker
 from custom_components.neuralbridge.const import (
+    DATA_CIRCUIT_BREAKER,
     DATA_SESSION_MEMORY,
+    DATA_STATISTICS,
     DOMAIN,
     SERVICE_CLEAR_CONVERSATION,
 )
+from custom_components.neuralbridge.statistics import AgentStatistics
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -154,3 +158,30 @@ async def test_async_reload_entry_calls_async_reload(
         await async_reload_entry(hass, mock_config_entry)
 
     mock_reload.assert_called_once_with(mock_config_entry.entry_id)
+
+
+# ---------------------------------------------------------------------------
+# DATA_CIRCUIT_BREAKER stored in hass.data
+# ---------------------------------------------------------------------------
+
+
+async def test_setup_entry_stores_circuit_breaker(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """async_setup_entry stores a CircuitBreaker instance in hass.data."""
+    await _setup(hass, mock_config_entry)
+
+    entry_data = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert DATA_CIRCUIT_BREAKER in entry_data
+    assert isinstance(entry_data[DATA_CIRCUIT_BREAKER], CircuitBreaker)
+
+
+async def test_setup_entry_stores_statistics(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """async_setup_entry stores an AgentStatistics instance in hass.data."""
+    await _setup(hass, mock_config_entry)
+
+    entry_data = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert DATA_STATISTICS in entry_data
+    assert isinstance(entry_data[DATA_STATISTICS], AgentStatistics)

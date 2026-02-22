@@ -19,11 +19,14 @@ from .const import (
     AGENT_TYPE_EXISTING,
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
+    CONF_AGENT_ASSIST_MODE,
     CONF_AGENT_CACHE_ENABLED,
     CONF_AGENT_ENABLED,
     CONF_AGENT_NAME,
     CONF_AGENT_TYPE,
     CONF_AGENTS,
+    CONF_DEFAULT_PROMPT,
+    CONF_ENABLE_HOME_CONTROL,
     CONF_ENTITY_ID,
     CONF_GUARD_RAIL_ACTION,
     CONF_GUARD_RAIL_AI_THRESHOLD,
@@ -32,6 +35,7 @@ from .const import (
     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
     CONF_GUARD_RAIL_RULES,
     CONF_GUARD_RAIL_USE_DETOXIFY,
+    CONF_IS_ROUTER,
     CONF_LANGUAGE,
     CONF_MAX_RETRIES,
     CONF_OLLAMA_MODEL,
@@ -40,17 +44,23 @@ from .const import (
     CONF_RESPONSE_CACHE_ENABLED,
     CONF_RESPONSE_CACHE_TTL,
     CONF_RETRY_BASE_DELAY,
+    CONF_ROUTER_CUSTOM_PROMPT,
+    CONF_ROUTER_FALLBACK,
+    CONF_ROUTER_LOG_LEVEL,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DATA_RESPONSE_CACHE,
     DEFAULT_AGENT_CACHE_ENABLED,
     DEFAULT_AGENT_ENABLED,
+    DEFAULT_DEFAULT_PROMPT,
+    DEFAULT_ENABLE_HOME_CONTROL,
     DEFAULT_GUARD_RAIL_ACTION,
     DEFAULT_GUARD_RAIL_AI_THRESHOLD,
     DEFAULT_GUARD_RAIL_DETOXIFY_THRESHOLD,
     DEFAULT_GUARD_RAIL_ENABLED,
     DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
     DEFAULT_GUARD_RAIL_USE_DETOXIFY,
+    DEFAULT_IS_ROUTER,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_RETRIES,
     DEFAULT_OLLAMA_URL,
@@ -58,6 +68,10 @@ from .const import (
     DEFAULT_RESPONSE_CACHE_ENABLED,
     DEFAULT_RESPONSE_CACHE_TTL,
     DEFAULT_RETRY_BASE_DELAY,
+    DEFAULT_ROUTER_CUSTOM_PROMPT,
+    DEFAULT_ROUTER_FALLBACK,
+    DEFAULT_ROUTER_LOG_LEVEL,
+    DEFAULT_ROUTER_TIMEOUT,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     DOMAIN,
@@ -69,7 +83,15 @@ from .const import (
     GUARD_RAIL_CATEGORY_PRIVACY,
     GUARD_RAIL_CATEGORY_SECURITY,
     PRIORITY_MAX,
-    PRIORITY_MIN,
+    PRIORITY_MIN_PROCESSING,
+    PRIORITY_ROUTER,
+    ROUTER_FALLBACK_BLOCK,
+    ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+    ROUTER_FALLBACK_SKIP_ROUTING,
+    ROUTER_LOG_LEVEL_COMPLEXITY,
+    ROUTER_LOG_LEVEL_DEBUG,
+    ROUTER_LOG_LEVEL_DEBUG_QUERY,
+    ROUTER_LOG_LEVEL_NONE,
 )
 from .languages_loader import get_string, list_available_languages
 
@@ -105,18 +127,17 @@ class NeuralBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(
-        config_entry: config_entries.ConfigEntry,
+        config_entry: config_entries.ConfigEntry,  # noqa: ARG004
     ) -> NeuralBridgeOptionsFlowHandler:
         """Get the options flow for this handler."""
-        return NeuralBridgeOptionsFlowHandler(config_entry)
+        return NeuralBridgeOptionsFlowHandler()
 
 
 class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for NeuralBridge."""
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+    def __init__(self) -> None:
         """Initialise options flow."""
-        self.config_entry = config_entry
         self._agent_data: dict[str, Any] = {}
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -140,17 +161,290 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
     # ── Main menu ─────────────────────────────────────────────────────────────
 
     async def async_step_init(self, _user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Manage the options — main menu."""
+        """Manage the options — run migration then show the main menu."""
+        self._migrate_legacy_router_agents()
         return self.async_show_menu(
             step_id="init",
             menu_options=[
+                "default_prompt",
                 "add_agent",
+                "configure_routing_agent",
                 "manage_agents",
                 "configure_guard_rails",
-                "configure_guard_rail_rules",
                 "advanced_settings",
                 "language_settings",
+                "done",
             ],
+        )
+
+    # ── Legacy migration ──────────────────────────────────────────────────────
+
+    def _migrate_legacy_router_agents(self) -> None:
+        """Idempotently upgrade priority-0 agents to first-class routing agents.
+
+        Any agent stored with ``priority == 0`` and no explicit ``is_router``
+        key is a legacy router agent.  This method sets ``is_router = True`` on
+        each such agent so the new routing logic recognises them correctly.
+
+        The migration is idempotent — running it multiple times is safe.
+        """
+        agents: list[dict[str, Any]] = list(self.config_entry.data.get(CONF_AGENTS, []))
+        changed = False
+        updated: list[dict[str, Any]] = []
+        for agent in agents:
+            if agent.get(CONF_PRIORITY) == PRIORITY_ROUTER and CONF_IS_ROUTER not in agent:
+                updated.append({**agent, CONF_IS_ROUTER: True})
+                changed = True
+            else:
+                updated.append(agent)
+
+        if changed:
+            self.hass.config_entries.async_update_entry(
+                self.config_entry,
+                data={**self.config_entry.data, CONF_AGENTS: updated},
+            )
+            _LOGGER.debug("Migrated legacy priority-0 router agents to is_router=True")
+
+    # ── Default prompt ────────────────────────────────────────────────────────
+
+    async def async_step_default_prompt(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure the global default system prompt.
+
+        This prompt is used for all Ollama agents that do not have their own
+        per-agent system prompt set.
+
+        Args:
+            user_input: Form data submitted by the user, or None on first load.
+
+        Returns:
+            Form result or redirect to main menu after saving.
+        """
+        if user_input is not None:
+            self.hass.config_entries.async_update_entry(
+                self.config_entry,
+                data={
+                    **self.config_entry.data,
+                    CONF_DEFAULT_PROMPT: user_input[CONF_DEFAULT_PROMPT],
+                },
+            )
+            return await self.async_step_init()
+
+        current_prompt: str = self.config_entry.data.get(
+            CONF_DEFAULT_PROMPT, DEFAULT_DEFAULT_PROMPT
+        )
+        return self.async_show_form(
+            step_id="default_prompt",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_DEFAULT_PROMPT, default=current_prompt
+                    ): selector.TextSelector(selector.TextSelectorConfig(multiline=True)),
+                }
+            ),
+        )
+
+    # ── Configure routing agent (unified add / edit) ──────────────────────────
+
+    async def async_step_configure_routing_agent(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure the single routing agent — handles both add and edit.
+
+        Only one routing agent is permitted.  When opened from the main menu
+        this step auto-loads the existing routing agent for editing.  When
+        reached via ``manage_agents`` the agent is pre-loaded in
+        ``_agent_data["_editing_agent"]``.
+
+        The routing agent uses any installed Home Assistant conversation agent
+        (Gemini, Claude, ChatGPT, etc.) as its back-end.  The classification
+        prompt is sent as the user message and the JSON response is parsed to
+        produce a routing decision.
+
+        Args:
+            user_input: Form data submitted by the user, or None on first load.
+
+        Returns:
+            Form result or redirect to main menu after saving.
+        """
+        errors: dict[str, str] = {}
+
+        # ── Resolve the existing routing agent (if any) ──────────────────────
+        agents: list[dict[str, Any]] = list(self.config_entry.data.get(CONF_AGENTS, []))
+        existing_routers = [
+            a
+            for a in agents
+            if a.get(CONF_IS_ROUTER, False) or a.get(CONF_PRIORITY) == PRIORITY_ROUTER
+        ]
+        # manage_agents path pre-loads agent into _editing_agent; fall back to
+        # the first existing router when entering from the main menu.
+        existing: dict[str, Any] | None = self._agent_data.get("_editing_agent") or (
+            existing_routers[0] if existing_routers else None
+        )
+        is_editing = existing is not None
+        agent_id: str = existing.get("id", "") if existing else ""
+
+        # ── Handle form submission ────────────────────────────────────────────
+        if user_input is not None:
+            if is_editing and user_input.get("delete_agent"):
+                # Ensure the agent is registered for the delete confirmation step
+                if not self._agent_data.get("_editing_agent"):
+                    self._agent_data["_editing_agent"] = existing
+                return await self.async_step_confirm_delete_agent()
+
+            entity_id: str = user_input.get(CONF_ENTITY_ID, "")
+            if not entity_id or not self.hass.states.get(entity_id):
+                errors["base"] = "entity_not_found"
+
+            if not errors:
+                custom_prompt: str = user_input.get(
+                    CONF_ROUTER_CUSTOM_PROMPT, DEFAULT_ROUTER_CUSTOM_PROMPT
+                ).strip()
+                base: dict[str, Any] = existing or {}
+                updated: dict[str, Any] = {
+                    **base,
+                    "id": agent_id or str(uuid4()),
+                    CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+                    CONF_IS_ROUTER: True,
+                    CONF_PRIORITY: PRIORITY_ROUTER,
+                    CONF_AGENT_ENABLED: user_input.get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED),
+                    CONF_AGENT_NAME: user_input[CONF_AGENT_NAME],
+                    CONF_ENTITY_ID: entity_id,
+                    CONF_TIMEOUT: int(user_input.get(CONF_TIMEOUT, DEFAULT_ROUTER_TIMEOUT)),
+                    CONF_ROUTER_LOG_LEVEL: user_input.get(
+                        CONF_ROUTER_LOG_LEVEL, DEFAULT_ROUTER_LOG_LEVEL
+                    ),
+                    CONF_ROUTER_CUSTOM_PROMPT: custom_prompt,
+                    CONF_ROUTER_FALLBACK: user_input.get(
+                        CONF_ROUTER_FALLBACK, DEFAULT_ROUTER_FALLBACK
+                    ),
+                    # Routing agents never use the response cache or guard rails
+                    CONF_AGENT_CACHE_ENABLED: False,
+                    CONF_GUARD_RAIL_ENABLED_FOR_AGENT: False,
+                }
+                if is_editing:
+                    agents = [updated if a.get("id") == agent_id else a for a in agents]
+                else:
+                    agents.append(updated)
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={**self.config_entry.data, CONF_AGENTS: agents},
+                )
+                self._agent_data.pop("_editing_agent", None)
+                return await self.async_step_init()
+
+        # ── Build default values for the form ─────────────────────────────────
+        default_name = (existing or {}).get(CONF_AGENT_NAME, "Routing Agent")
+        default_entity = (existing or {}).get(CONF_ENTITY_ID, "")
+        default_enabled = (existing or {}).get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED)
+        default_timeout = (existing or {}).get(CONF_TIMEOUT, DEFAULT_ROUTER_TIMEOUT)
+        default_log_level = (existing or {}).get(CONF_ROUTER_LOG_LEVEL, DEFAULT_ROUTER_LOG_LEVEL)
+        default_custom_prompt = (existing or {}).get(
+            CONF_ROUTER_CUSTOM_PROMPT, DEFAULT_ROUTER_CUSTOM_PROMPT
+        )
+        default_fallback = (existing or {}).get(CONF_ROUTER_FALLBACK, DEFAULT_ROUTER_FALLBACK)
+
+        log_level_options: list[selector.SelectOptionDict] = [
+            {
+                "value": ROUTER_LOG_LEVEL_NONE,
+                "label": self._s("router_log_levels", "none") or "None",
+            },
+            {
+                "value": ROUTER_LOG_LEVEL_COMPLEXITY,
+                "label": (self._s("router_log_levels", "complexity_only") or "Complexity only"),
+            },
+            {
+                "value": ROUTER_LOG_LEVEL_DEBUG,
+                "label": (self._s("router_log_levels", "debug_info") or "Debug information"),
+            },
+            {
+                "value": ROUTER_LOG_LEVEL_DEBUG_QUERY,
+                "label": (
+                    self._s("router_log_levels", "debug_with_query")
+                    or "Debug with query (logs PII)"
+                ),
+            },
+        ]
+        fallback_options: list[selector.SelectOptionDict] = [
+            {
+                "value": ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+                "label": (
+                    self._s("router_fallbacks", "default_complexity") or "Use default complexity"
+                ),
+            },
+            {
+                "value": ROUTER_FALLBACK_SKIP_ROUTING,
+                "label": (
+                    self._s("router_fallbacks", "skip_routing") or "Skip routing (try all agents)"
+                ),
+            },
+            {
+                "value": ROUTER_FALLBACK_BLOCK,
+                "label": self._s("router_fallbacks", "block") or "Block the request",
+            },
+        ]
+
+        schema_fields: dict[Any, Any] = {
+            vol.Required(CONF_AGENT_NAME, default=default_name): str,
+        }
+        if is_editing:
+            schema_fields[vol.Optional(CONF_AGENT_ENABLED, default=default_enabled)] = (
+                selector.BooleanSelector()
+            )
+        entity_field: Any = (
+            vol.Required(CONF_ENTITY_ID, default=default_entity)
+            if default_entity
+            else vol.Required(CONF_ENTITY_ID)
+        )
+        schema_fields[entity_field] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain=CONVERSATION_DOMAIN)
+        )
+        schema_fields.update(
+            {
+                vol.Optional(CONF_TIMEOUT, default=default_timeout): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=2,
+                        max=30,
+                        unit_of_measurement="seconds",
+                    )
+                ),
+                vol.Optional(
+                    CONF_ROUTER_LOG_LEVEL, default=default_log_level
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=log_level_options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_ROUTER_CUSTOM_PROMPT, default=default_custom_prompt
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        multiline=True,
+                        type=selector.TextSelectorType.TEXT,
+                    )
+                ),
+                vol.Optional(
+                    CONF_ROUTER_FALLBACK, default=default_fallback
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=fallback_options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+            }
+        )
+        if is_editing:
+            schema_fields[vol.Optional("delete_agent", default=False)] = selector.BooleanSelector()
+
+        return self.async_show_form(
+            step_id="configure_routing_agent",
+            data_schema=vol.Schema(schema_fields),
+            errors=errors,
+            description_placeholders={
+                "routing_agent_info": self._s("placeholders", "routing_agent_info"),
+            },
         )
 
     # ── Add agent ─────────────────────────────────────────────────────────────
@@ -276,7 +570,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     self.config_entry,
                     data={**self.config_entry.data, CONF_AGENTS: agents},
                 )
-                return self.async_create_entry(title="", data={})
+                return await self.async_step_init()
 
         return self.async_show_form(
             step_id="configure_ollama",
@@ -285,7 +579,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required(CONF_AGENT_NAME): str,
                     vol.Required(CONF_PRIORITY, default=DEFAULT_PRIORITY): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=PRIORITY_MIN,
+                            min=PRIORITY_MIN_PROCESSING,
                             max=PRIORITY_MAX,
                             mode=selector.NumberSelectorMode.SLIDER,
                         )
@@ -294,7 +588,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required(CONF_OLLAMA_MODEL): str,
                     vol.Optional(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=5,
+                            min=2,
                             max=120,
                             unit_of_measurement="seconds",
                         )
@@ -357,7 +651,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 self.config_entry,
                 data={**self.config_entry.data, CONF_AGENTS: agents},
             )
-            return self.async_create_entry(title="", data={})
+            return await self.async_step_init()
 
         return self.async_show_form(
             step_id="configure_existing",
@@ -366,7 +660,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required(CONF_AGENT_NAME): str,
                     vol.Required(CONF_PRIORITY, default=DEFAULT_PRIORITY): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=PRIORITY_MIN,
+                            min=PRIORITY_MIN_PROCESSING,
                             max=PRIORITY_MAX,
                             mode=selector.NumberSelectorMode.SLIDER,
                         )
@@ -378,7 +672,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                     vol.Optional(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=5,
+                            min=2,
                             max=120,
                             unit_of_measurement="seconds",
                         )
@@ -416,6 +710,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_AGENT_CACHE_ENABLED: user_input.get(
                     CONF_AGENT_CACHE_ENABLED, DEFAULT_AGENT_CACHE_ENABLED
                 ),
+                CONF_AGENT_ASSIST_MODE: user_input.get(CONF_AGENT_ASSIST_MODE, True),
                 CONF_GUARD_RAIL_ENABLED_FOR_AGENT: user_input.get(
                     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
                     (
@@ -432,7 +727,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 self.config_entry,
                 data={**self.config_entry.data, CONF_AGENTS: agents},
             )
-            return self.async_create_entry(title="", data={})
+            return await self.async_step_init()
 
         default_name = self._s("agent_management", "default_ha_agent_name")
         return self.async_show_form(
@@ -442,20 +737,24 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required(CONF_AGENT_NAME, default=default_name): str,
                     vol.Required(CONF_PRIORITY, default=DEFAULT_PRIORITY): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=PRIORITY_MIN,
+                            min=PRIORITY_MIN_PROCESSING,
                             max=PRIORITY_MAX,
                             mode=selector.NumberSelectorMode.SLIDER,
                         )
                     ),
                     vol.Optional(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=5,
+                            min=2,
                             max=120,
                             unit_of_measurement="seconds",
                         )
                     ),
                     vol.Optional(
                         CONF_AGENT_CACHE_ENABLED, default=DEFAULT_AGENT_CACHE_ENABLED
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_AGENT_ASSIST_MODE,
+                        default=True,
                     ): selector.BooleanSelector(),
                     vol.Optional(
                         CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
@@ -486,7 +785,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
         if user_input is not None:
             self._agent_data["_selected_agent_id"] = user_input["agent_id"]
-            return await self.async_step_manage_agent_action()
+            return await self._route_to_edit_step()
 
         enabled_label = self._s("agent_management", "status_enabled")
         disabled_label = self._s("agent_management", "status_disabled")
@@ -516,68 +815,6 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             ),
         )
 
-    async def async_step_manage_agent_action(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Select and apply an action (edit / toggle / delete) for the selected agent."""
-        agents = list(self.config_entry.data.get(CONF_AGENTS, []))
-        agent_id: str = self._agent_data.get("_selected_agent_id", "")
-        agent = next((a for a in agents if a.get("id") == agent_id), None)
-
-        if user_input is not None and agent is not None:
-            action = user_input.get("action")
-
-            if action == "edit":
-                return await self._route_to_edit_step()
-            if action == "toggle":
-                current_enabled = agent.get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED)
-                agent[CONF_AGENT_ENABLED] = not current_enabled
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry,
-                    data={**self.config_entry.data, CONF_AGENTS: agents},
-                )
-            elif action == "delete":
-                agents = [a for a in agents if a.get("id") != agent_id]
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry,
-                    data={**self.config_entry.data, CONF_AGENTS: agents},
-                )
-
-            return self.async_create_entry(title="", data={})
-
-        agent_name = agent.get(CONF_AGENT_NAME, "Unknown") if agent else "Unknown"
-        is_enabled = agent.get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED) if agent else True
-        toggle_label = (
-            self._s("agent_management", "action_disable")
-            if is_enabled
-            else self._s("agent_management", "action_enable")
-        )
-
-        return self.async_show_form(
-            step_id="manage_agent_action",
-            data_schema=vol.Schema(
-                {
-                    vol.Required("action"): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[  # type: ignore[typeddict-item]
-                                {
-                                    "value": "edit",
-                                    "label": self._s("agent_management", "action_edit"),
-                                },
-                                {"value": "toggle", "label": toggle_label},
-                                {
-                                    "value": "delete",
-                                    "label": self._s("agent_management", "action_delete"),
-                                },
-                            ],
-                            mode=selector.SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                }
-            ),
-            description_placeholders={"agent_name": agent_name},
-        )
-
     async def _route_to_edit_step(self) -> ConfigFlowResult:
         """Dispatch to the type-specific edit step for the selected agent."""
         agents = list(self.config_entry.data.get(CONF_AGENTS, []))
@@ -585,9 +822,15 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         agent = next((a for a in agents if a.get("id") == agent_id), None)
 
         if agent is None:
-            return self.async_create_entry(title="", data={})
+            return await self.async_step_init()
 
         self._agent_data["_editing_agent"] = dict(agent)
+
+        # Routing agents (first-class is_router flag or legacy priority==0) get
+        # the unified routing agent configure step
+        if agent.get(CONF_IS_ROUTER, False) or agent.get(CONF_PRIORITY) == PRIORITY_ROUTER:
+            return await self.async_step_configure_routing_agent()
+
         agent_type = agent.get(CONF_AGENT_TYPE)
 
         if agent_type == AGENT_TYPE_OLLAMA:
@@ -607,6 +850,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         agent_id: str = agent.get("id", "")
 
         if user_input is not None:
+            if user_input.get("delete_agent"):
+                return await self.async_step_confirm_delete_agent()
+
             error_key = await self._validate_ollama_connection(
                 user_input[CONF_OLLAMA_URL], user_input[CONF_OLLAMA_MODEL]
             )
@@ -616,6 +862,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             if not errors:
                 updated = {
                     **agent,
+                    CONF_AGENT_ENABLED: user_input.get(
+                        CONF_AGENT_ENABLED, agent.get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED)
+                    ),
                     CONF_AGENT_NAME: user_input[CONF_AGENT_NAME],
                     CONF_PRIORITY: user_input[CONF_PRIORITY],
                     CONF_OLLAMA_URL: user_input[CONF_OLLAMA_URL],
@@ -635,7 +884,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     self.config_entry,
                     data={**self.config_entry.data, CONF_AGENTS: agents},
                 )
-                return self.async_create_entry(title="", data={})
+                return await self.async_step_init()
 
         return self.async_show_form(
             step_id="edit_agent_ollama",
@@ -647,11 +896,15 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         default=agent.get(CONF_PRIORITY, DEFAULT_PRIORITY),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=PRIORITY_MIN,
+                            min=PRIORITY_MIN_PROCESSING,
                             max=PRIORITY_MAX,
                             mode=selector.NumberSelectorMode.SLIDER,
                         )
                     ),
+                    vol.Optional(
+                        CONF_AGENT_ENABLED,
+                        default=agent.get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED),
+                    ): selector.BooleanSelector(),
                     vol.Required(
                         CONF_OLLAMA_URL,
                         default=agent.get(CONF_OLLAMA_URL, DEFAULT_OLLAMA_URL),
@@ -662,7 +915,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         default=agent.get(CONF_TIMEOUT, DEFAULT_TIMEOUT),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=5,
+                            min=2,
                             max=120,
                             unit_of_measurement="seconds",
                         )
@@ -687,6 +940,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                             DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                         ),
                     ): selector.BooleanSelector(),
+                    vol.Optional("delete_agent", default=False): selector.BooleanSelector(),
                 }
             ),
             errors=errors,
@@ -705,8 +959,14 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         agent_id: str = agent.get("id", "")
 
         if user_input is not None:
+            if user_input.get("delete_agent"):
+                return await self.async_step_confirm_delete_agent()
+
             updated = {
                 **agent,
+                CONF_AGENT_ENABLED: user_input.get(
+                    CONF_AGENT_ENABLED, agent.get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED)
+                ),
                 CONF_AGENT_NAME: user_input[CONF_AGENT_NAME],
                 CONF_PRIORITY: user_input[CONF_PRIORITY],
                 CONF_ENTITY_ID: user_input[CONF_ENTITY_ID],
@@ -724,7 +984,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 self.config_entry,
                 data={**self.config_entry.data, CONF_AGENTS: agents},
             )
-            return self.async_create_entry(title="", data={})
+            return await self.async_step_init()
 
         return self.async_show_form(
             step_id="edit_agent_existing",
@@ -736,11 +996,15 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         default=agent.get(CONF_PRIORITY, DEFAULT_PRIORITY),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=PRIORITY_MIN,
+                            min=PRIORITY_MIN_PROCESSING,
                             max=PRIORITY_MAX,
                             mode=selector.NumberSelectorMode.SLIDER,
                         )
                     ),
+                    vol.Optional(
+                        CONF_AGENT_ENABLED,
+                        default=agent.get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED),
+                    ): selector.BooleanSelector(),
                     vol.Required(
                         CONF_ENTITY_ID,
                         default=agent.get(CONF_ENTITY_ID, ""),
@@ -754,7 +1018,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         default=agent.get(CONF_TIMEOUT, DEFAULT_TIMEOUT),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=5,
+                            min=2,
                             max=120,
                             unit_of_measurement="seconds",
                         )
@@ -770,6 +1034,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                             DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                         ),
                     ): selector.BooleanSelector(),
+                    vol.Optional("delete_agent", default=False): selector.BooleanSelector(),
                 }
             ),
             description_placeholders={
@@ -787,14 +1052,21 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         agent_id: str = agent.get("id", "")
 
         if user_input is not None:
+            if user_input.get("delete_agent"):
+                return await self.async_step_confirm_delete_agent()
+
             updated = {
                 **agent,
+                CONF_AGENT_ENABLED: user_input.get(
+                    CONF_AGENT_ENABLED, agent.get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED)
+                ),
                 CONF_AGENT_NAME: user_input[CONF_AGENT_NAME],
                 CONF_PRIORITY: user_input[CONF_PRIORITY],
                 CONF_TIMEOUT: user_input.get(CONF_TIMEOUT, DEFAULT_TIMEOUT),
                 CONF_AGENT_CACHE_ENABLED: user_input.get(
                     CONF_AGENT_CACHE_ENABLED, DEFAULT_AGENT_CACHE_ENABLED
                 ),
+                CONF_AGENT_ASSIST_MODE: user_input.get(CONF_AGENT_ASSIST_MODE, True),
                 CONF_GUARD_RAIL_ENABLED_FOR_AGENT: user_input.get(
                     CONF_GUARD_RAIL_ENABLED_FOR_AGENT, DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT
                 ),
@@ -805,7 +1077,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 self.config_entry,
                 data={**self.config_entry.data, CONF_AGENTS: agents},
             )
-            return self.async_create_entry(title="", data={})
+            return await self.async_step_init()
 
         default_name = self._s("agent_management", "default_ha_agent_name")
         return self.async_show_form(
@@ -821,17 +1093,21 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         default=agent.get(CONF_PRIORITY, DEFAULT_PRIORITY),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=PRIORITY_MIN,
+                            min=PRIORITY_MIN_PROCESSING,
                             max=PRIORITY_MAX,
                             mode=selector.NumberSelectorMode.SLIDER,
                         )
                     ),
                     vol.Optional(
+                        CONF_AGENT_ENABLED,
+                        default=agent.get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
                         CONF_TIMEOUT,
                         default=agent.get(CONF_TIMEOUT, DEFAULT_TIMEOUT),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=5,
+                            min=2,
                             max=120,
                             unit_of_measurement="seconds",
                         )
@@ -841,17 +1117,59 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         default=agent.get(CONF_AGENT_CACHE_ENABLED, DEFAULT_AGENT_CACHE_ENABLED),
                     ): selector.BooleanSelector(),
                     vol.Optional(
+                        CONF_AGENT_ASSIST_MODE,
+                        default=agent.get(CONF_AGENT_ASSIST_MODE, True),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
                         CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
                         default=agent.get(
                             CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
                             DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                         ),
                     ): selector.BooleanSelector(),
+                    vol.Optional("delete_agent", default=False): selector.BooleanSelector(),
                 }
             ),
             description_placeholders={
                 "priority_info": self._s("placeholders", "priority_info"),
             },
+        )
+
+    # ── Confirm agent deletion ─────────────────────────────────────────────────
+
+    async def async_step_confirm_delete_agent(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask the user to confirm deletion of the selected agent.
+
+        Args:
+            user_input: Form data submitted by the user, or None on first load.
+
+        Returns:
+            Confirmation form, or redirect to main menu after acting on the choice.
+        """
+        agent = self._agent_data.get("_editing_agent", {})
+        agent_id: str = agent.get("id", "")
+        agent_name: str = agent.get(CONF_AGENT_NAME, "Unknown")
+
+        if user_input is not None:
+            if user_input.get("confirm"):
+                agents = list(self.config_entry.data.get(CONF_AGENTS, []))
+                agents = [a for a in agents if a.get("id") != agent_id]
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={**self.config_entry.data, CONF_AGENTS: agents},
+                )
+            return await self.async_step_init()
+
+        return self.async_show_form(
+            step_id="confirm_delete_agent",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("confirm", default=False): selector.BooleanSelector(),
+                }
+            ),
+            description_placeholders={"agent_name": agent_name},
         )
 
     # ── Advanced settings ─────────────────────────────────────────────────────
@@ -872,6 +1190,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             retry_base_delay: float = float(
                 user_input.get(CONF_RETRY_BASE_DELAY, DEFAULT_RETRY_BASE_DELAY)
             )
+            enable_home_control: bool = user_input.get(
+                CONF_ENABLE_HOME_CONTROL, DEFAULT_ENABLE_HOME_CONTROL
+            )
 
             current_data = {
                 **self.config_entry.data,
@@ -879,6 +1200,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_RESPONSE_CACHE_TTL: cache_ttl,
                 CONF_MAX_RETRIES: max_retries,
                 CONF_RETRY_BASE_DELAY: retry_base_delay,
+                CONF_ENABLE_HOME_CONTROL: enable_home_control,
             }
             self.hass.config_entries.async_update_entry(
                 self.config_entry,
@@ -893,7 +1215,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     _LOGGER.info("Response cache purged: %d entries removed", purged)
                 response_cache.configure(enabled=cache_enabled, ttl_seconds=cache_ttl)
 
-            return self.async_create_entry(title="", data={})
+            return await self.async_step_init()
 
         entry_data = self.config_entry.data
         current_enabled = entry_data.get(
@@ -902,11 +1224,15 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         current_ttl = entry_data.get(CONF_RESPONSE_CACHE_TTL, DEFAULT_RESPONSE_CACHE_TTL)
         current_max_retries = entry_data.get(CONF_MAX_RETRIES, DEFAULT_MAX_RETRIES)
         current_retry_delay = entry_data.get(CONF_RETRY_BASE_DELAY, DEFAULT_RETRY_BASE_DELAY)
+        current_home_control = entry_data.get(CONF_ENABLE_HOME_CONTROL, DEFAULT_ENABLE_HOME_CONTROL)
 
         return self.async_show_form(
             step_id="advanced_settings",
             data_schema=vol.Schema(
                 {
+                    vol.Required(
+                        CONF_ENABLE_HOME_CONTROL, default=current_home_control
+                    ): selector.BooleanSelector(),
                     vol.Required(
                         CONF_RESPONSE_CACHE_ENABLED, default=current_enabled
                     ): selector.BooleanSelector(),
@@ -914,7 +1240,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_RESPONSE_CACHE_TTL, default=current_ttl
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=60,
+                            min=0,
                             max=600,
                             step=30,
                             unit_of_measurement="seconds",
@@ -950,6 +1276,19 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
     # ── Guard rails ───────────────────────────────────────────────────────────
 
     async def async_step_configure_guard_rails(
+        self, _user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the guard rails sub-menu."""
+        return self.async_show_menu(
+            step_id="configure_guard_rails",
+            menu_options=[
+                "guard_rails_settings",
+                "configure_guard_rail_rules",
+                "back_to_main",
+            ],
+        )
+
+    async def async_step_guard_rails_settings(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Configure global guard rail settings."""
@@ -968,15 +1307,19 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             }
 
             if user_input[CONF_GUARD_RAIL_ENABLED]:
+                # Routing agents are identified by is_router flag; fall back to
+                # legacy priority==0 for configs created before v0.3.0
                 router_agents = [
-                    a for a in current_data.get(CONF_AGENTS, []) if a.get(CONF_PRIORITY) == 0
+                    a
+                    for a in current_data.get(CONF_AGENTS, [])
+                    if a.get(CONF_IS_ROUTER, DEFAULT_IS_ROUTER) or a.get(CONF_PRIORITY) == 0
                 ]
 
                 if router_agents:
                     current_data["guard_rail_agent_id"] = router_agents[0]["id"]
                 else:
                     return self.async_show_form(
-                        step_id="configure_guard_rails",
+                        step_id="guard_rails_settings",
                         errors={"base": "no_router_agent"},
                         description_placeholders={
                             "info": self._s("placeholders", "no_router_agent_error"),
@@ -987,7 +1330,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 self.config_entry,
                 data=current_data,
             )
-            return self.async_create_entry(title="", data={})
+            return await self.async_step_init()
 
         current_enabled = self.config_entry.data.get(
             CONF_GUARD_RAIL_ENABLED, DEFAULT_GUARD_RAIL_ENABLED
@@ -1006,7 +1349,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         )
 
         return self.async_show_form(
-            step_id="configure_guard_rails",
+            step_id="guard_rails_settings",
             data_schema=vol.Schema(
                 {
                     vol.Required(
@@ -1064,6 +1407,12 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             },
         )
 
+    async def async_step_back_to_main(
+        self, _user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Return to the main options menu from the guard rails sub-menu."""
+        return await self.async_step_init()
+
     # ── Guard rail rules ──────────────────────────────────────────────────────
 
     async def async_step_configure_guard_rail_rules(
@@ -1090,7 +1439,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 self.config_entry,
                 data=current_data,
             )
-            return self.async_create_entry(title="", data={})
+            return await self.async_step_init()
 
         saved_rules: dict[str, list[str]] = self.config_entry.data.get(CONF_GUARD_RAIL_RULES, {})
         prefilled = {cat: "\n".join(saved_rules.get(cat, [])) for cat in categories}
@@ -1165,7 +1514,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 self.config_entry,
                 data={**self.config_entry.data, CONF_LANGUAGE: user_input[CONF_LANGUAGE]},
             )
-            return self.async_create_entry(title="", data={})
+            return await self.async_step_init()
 
         available = list_available_languages()
         language_options: list[selector.SelectOptionDict] = [
@@ -1186,3 +1535,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 }
             ),
         )
+
+    # ── Done ──────────────────────────────────────────────────────────────────
+
+    async def async_step_done(self, _user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Close the options flow."""
+        return self.async_create_entry(title="", data={})

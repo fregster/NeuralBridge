@@ -28,16 +28,20 @@ agent_management:
 # ── Description placeholder text used inside config flow steps ─────────────────
 placeholders:
   priority_info: >-
-    0 = Router/Filter (TinyLlama, Qwen), 0–100 = Verarbeitungspriorität.
-    Sicherheitsfilter für Agenten mit Priorität 0 deaktiviert (zur Vermeidung von Schleifen).
+    1–100 = Verarbeitungspriorität (niedrigerer Wert = höhere Priorität).
+    Fügen Sie dedizierte Router-Agenten über \"Router-Agent hinzufügen\" hinzu.
+  routing_agent_info: >-
+    Router-Agenten klassifizieren eingehende Anfragen per JSON-Prompt und
+    steuern die Agentenauswahl. Sie laufen mit Priorität 0; Caching und
+    Sicherheitsfilter sind automatisch deaktiviert, um Schleifen zu vermeiden.
   guard_rails_info: >-
-    Sicherheitsfilter laufen auf dem Agenten mit der höchsten Priorität (niedrigster Wert,
-    typischerweise 0) für schnelles, datenschutzfreundliches Inhaltsfiltern.
-    Hybridansatz: zunächst schnelle Regeln, dann KI, falls der Schwellenwert nicht erreicht wird.
+    Sicherheitsfilter laufen auf dem konfigurierten Router-Agenten für schnelles,
+    datenschutzfreundliches Inhaltsfiltern. Hybridansatz: zunächst schnelle Regeln,
+    dann KI, falls der Schwellenwert nicht erreicht wird.
   no_router_agent_error: >-
-    Kein Router-Agent (Priorität 0) ist konfiguriert.
-    Fügen Sie einen leichtgewichtigen lokalen Agenten (z. B. TinyLlama, Qwen) mit Priorität 0
-    hinzu, bevor Sie Sicherheitsfilter aktivieren.
+    Kein Router-Agent ist konfiguriert.
+    Verwenden Sie \"Router-Agent hinzufügen\", um einen leichtgewichtigen Ollama-Agenten
+    (z. B. TinyLlama, Qwen) hinzuzufügen, bevor Sie Sicherheitsfilter aktivieren.
   guard_rail_rules_info: >-
     Geben Sie benutzerdefinierte Regex-Muster (eines pro Zeile) ein, um übereinstimmende Inhalte
     zu blockieren. Muster werden mit den integrierten Standards zusammengeführt. Leer lassen,
@@ -55,6 +59,19 @@ guard_rail_actions:
   notify_ask: "Benachrichtigen und fragen (Empfohlen)"
   warn: "Warnen (Antwort mit Warnung prefixen)"
   block: "Blockieren (Antwort verhindern)"
+
+# ── Router log level selector labels ──────────────────────────────────────────
+router_log_levels:
+  none: "None"
+  complexity_only: "Complexity level only"
+  debug_info: "Debug information"
+  debug_with_query: "Debug with query logging (⚠ logs PII)"
+
+# ── Router fallback behaviour selector labels ──────────────────────────────────
+router_fallbacks:
+  default_complexity: "Use default complexity (fail open)"
+  skip_routing: "Skip routing (try all agents in priority order)"
+  block: "Block the request"
 
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:

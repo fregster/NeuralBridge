@@ -31,16 +31,20 @@ agent_management:
 # ── Description placeholder text used inside config flow steps ─────────────────
 placeholders:
   priority_info: >-
-    0 = Router/Filter (TinyLlama, Qwen), 0-100 = Processing priority.
-    Guard rails disabled for priority 0 agents (to prevent loops).
+    1-100 = Processing priority (lower numbers are tried first).
+    Add dedicated Routing Agents via the \"Add Routing Agent\" menu option.
+  routing_agent_info: >-
+    Routing agents classify incoming requests using a JSON prompt and guide
+    agent selection. They run at priority 0, with caching and guard rails
+    disabled automatically to prevent routing loops.
   guard_rails_info: >-
-    Guard rails run on the highest-priority (lowest value, typically 0) local agent
-    for fast, privacy-preserving content filtering.
-    Uses a hybrid approach: fast rules first, then AI if the confidence threshold is not met.
+    Guard rails run on the configured routing agent for fast, privacy-preserving
+    content filtering. Uses a hybrid approach: fast rules first, then AI if the
+    confidence threshold is not met.
   no_router_agent_error: >-
-    No router agent (priority 0) is configured.
-    Add a lightweight local agent (e.g. TinyLlama, Qwen) with priority 0 before enabling
-    guard rails.
+    No routing agent is configured.
+    Use \"Add Routing Agent\" to add a lightweight Ollama agent (e.g. TinyLlama, Qwen)
+    before enabling guard rails.
   guard_rail_rules_info: >-
     Enter custom regex patterns (one per line) to block matching content.
     Patterns are merged with the built-in defaults. Leave blank to use defaults only.
@@ -57,6 +61,19 @@ guard_rail_actions:
   notify_ask: "Notify & Ask (Recommended)"
   warn: "Warn (Prefix with warning)"
   block: "Block (Prevent response)"
+
+# ── Router log level selector labels ──────────────────────────────────────────
+router_log_levels:
+  none: "None"
+  complexity_only: "Complexity level only"
+  debug_info: "Debug information"
+  debug_with_query: "Debug with query logging (⚠ logs PII)"
+
+# ── Router fallback behavior selector labels ───────────────────────────────────
+router_fallbacks:
+  default_complexity: "Use default complexity (fail open)"
+  skip_routing: "Skip routing (try all agents in priority order)"
+  block: "Block the request"
 
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:

@@ -3,35 +3,51 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from homeassistant.components.conversation import ConversationInput, ConversationResult
+import pytest
+from homeassistant.components.conversation import (
+    ConversationEntityFeature,
+    ConversationInput,
+    ConversationResult,
+)
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import intent
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.neuralbridge.circuit_breaker import CircuitBreaker
 from custom_components.neuralbridge.const import (
     AGENT_TYPE_EXISTING,
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
+    CONF_AGENT_ASSIST_MODE,
     CONF_AGENT_CACHE_ENABLED,
     CONF_AGENT_ENABLED,
     CONF_AGENT_NAME,
     CONF_AGENT_TYPE,
     CONF_AGENTS,
+    CONF_ENABLE_HOME_CONTROL,
     CONF_ENTITY_ID,
     CONF_GUARD_RAIL_ACTION,
     CONF_GUARD_RAIL_ENABLED,
     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
     CONF_GUARD_RAIL_RULES,
+    CONF_IS_ROUTER,
     CONF_MAX_RETRIES,
     CONF_OLLAMA_MODEL,
     CONF_OLLAMA_URL,
     CONF_PRIORITY,
     CONF_RETRY_BASE_DELAY,
+    CONF_ROUTER_CUSTOM_PROMPT,
+    CONF_ROUTER_FALLBACK,
+    CONF_ROUTER_LOG_LEVEL,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
+    DATA_CIRCUIT_BREAKER,
+    DEFAULT_ROUTER_COMPLEXITY,
     DOMAIN,
     EVENT_GUARD_RAIL_TRIGGERED,
     FALLBACK_RESPONSE,
@@ -40,8 +56,23 @@ from custom_components.neuralbridge.const import (
     GUARD_RAIL_ACTION_WARN,
     GUARD_RAIL_BLOCKED_RESPONSE,
     NO_AGENTS_RESPONSE,
+    ROUTER_FALLBACK_BLOCK,
+    ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+    ROUTER_FALLBACK_SKIP_ROUTING,
+    ROUTER_LOG_LEVEL_COMPLEXITY,
+    ROUTER_LOG_LEVEL_DEBUG,
+    ROUTER_LOG_LEVEL_DEBUG_QUERY,
+    ROUTER_LOG_LEVEL_NONE,
+    ROUTER_SKIP_ROUTING_COMPLEXITY,
+    SIGNAL_STATS_UPDATED,
 )
-from custom_components.neuralbridge.conversation import NeuralBridgeAgent, async_setup_entry
+from custom_components.neuralbridge.conversation import (
+    NeuralBridgeAgent,
+    RouterDecision,
+    _apply_router_decision,
+    _parse_router_response,
+    async_setup_entry,
+)
 from custom_components.neuralbridge.guard_rail import GuardRailResult
 
 # ---------------------------------------------------------------------------
@@ -664,9 +695,7 @@ async def test_async_process_router_blocks_request(hass: HomeAssistant) -> None:
     entry = _entry_with_agents(router)
     conv_agent = NeuralBridgeAgent(hass, entry)
 
-    with patch.object(
-        conv_agent, "_check_with_routers", new_callable=AsyncMock, return_value=False
-    ):
+    with patch.object(conv_agent, "_check_with_routers", new_callable=AsyncMock, return_value=None):
         result = await conv_agent.async_process(_make_input())
 
     assert "cannot process" in result.response.speech["plain"]["speech"].lower()
@@ -1063,124 +1092,131 @@ def _make_router_config(
 
 
 # ---------------------------------------------------------------------------
-# Test 35 — _check_with_routers: all routers pass → True
+# Test 35 — _check_with_routers: all routers return RouterDecision → last decision returned
 # ---------------------------------------------------------------------------
 
 
-async def test_check_with_routers_all_pass_returns_true(hass: HomeAssistant) -> None:
-    """_check_with_routers returns True when every router classifies PASS."""
+async def test_check_with_routers_all_pass_returns_decision(hass: HomeAssistant) -> None:
+    """_check_with_routers returns the last RouterDecision when every router classifies."""
     entry = _entry_with_agents(_make_ollama_agent())
     conv_agent = NeuralBridgeAgent(hass, entry)
     routers = [_make_router_config("r1"), _make_router_config("r2")]
+    expected_decision = RouterDecision(local_ha=True, complexity=30)
 
     with patch.object(
-        conv_agent, "_classify_with_router", new_callable=AsyncMock, return_value=True
+        conv_agent, "_classify_with_router", new_callable=AsyncMock, return_value=expected_decision
     ):
         result = await conv_agent._check_with_routers(_make_input("turn on lights"), routers)
 
-    assert result is True
+    assert result is not None
+    assert result.local_ha is True
+    assert result.complexity == 30
 
 
 # ---------------------------------------------------------------------------
-# Test 36 — _check_with_routers: first BLOCK stops immediately → False
+# Test 36 — _check_with_routers: first None (block) stops immediately
 # ---------------------------------------------------------------------------
 
 
 async def test_check_with_routers_block_stops_at_first_router(hass: HomeAssistant) -> None:
-    """_check_with_routers returns False on the first BLOCK without calling later routers."""
+    """_check_with_routers returns None on the first block without calling later routers."""
     entry = _entry_with_agents(_make_ollama_agent())
     conv_agent = NeuralBridgeAgent(hass, entry)
     routers = [_make_router_config("r1"), _make_router_config("r2")]
 
     call_count = 0
 
-    def always_block(router_config: dict, user_text: str) -> bool:
+    def always_block(router_config: dict, user_text: str) -> None:
         nonlocal call_count
         call_count += 1
-        return False
 
     with patch.object(conv_agent, "_classify_with_router", side_effect=always_block):
         result = await conv_agent._check_with_routers(_make_input("bad"), routers)
 
-    assert result is False
-    assert call_count == 1  # stopped after first BLOCK
+    assert result is None
+    assert call_count == 1  # stopped after first block
 
 
 # ---------------------------------------------------------------------------
-# Test 37 — _check_with_routers: single router BLOCK → False
+# Test 37 — _check_with_routers: single router block → None
 # ---------------------------------------------------------------------------
 
 
-async def test_check_with_routers_single_block_returns_false(hass: HomeAssistant) -> None:
-    """A single router returning BLOCK causes _check_with_routers to return False."""
+async def test_check_with_routers_single_block_returns_none(hass: HomeAssistant) -> None:
+    """A single router returning None causes _check_with_routers to return None."""
     entry = _entry_with_agents(_make_ollama_agent())
     conv_agent = NeuralBridgeAgent(hass, entry)
 
     with patch.object(
-        conv_agent, "_classify_with_router", new_callable=AsyncMock, return_value=False
+        conv_agent, "_classify_with_router", new_callable=AsyncMock, return_value=None
     ):
         result = await conv_agent._check_with_routers(
             _make_input("harmful query"), [_make_router_config()]
         )
 
-    assert result is False
+    assert result is None
 
 
 # ---------------------------------------------------------------------------
-# Test 38 — _classify_with_router: non-Ollama agent type → PASS (fail-open)
+# Test 38 — _classify_with_router: AGENT_TYPE_EXISTING missing entity_id → fail-open
 # ---------------------------------------------------------------------------
 
 
-async def test_classify_with_router_non_ollama_returns_pass(hass: HomeAssistant) -> None:
-    """Non-Ollama router agents always return PASS (not supported for classification)."""
+async def test_classify_with_router_non_ollama_returns_fail_open(hass: HomeAssistant) -> None:
+    """AGENT_TYPE_EXISTING router with no entity_id returns fail-open RouterDecision."""
     entry = _entry_with_agents(_make_ollama_agent())
     conv_agent = NeuralBridgeAgent(hass, entry)
     router = _make_router_config(agent_type=AGENT_TYPE_EXISTING)
+    # _make_router_config does not set entity_id, triggering the missing-entity path
 
     result = await conv_agent._classify_with_router(router, "some text")
 
-    assert result is True
+    assert result is not None
+    assert isinstance(result, RouterDecision)
+    assert result.complexity == DEFAULT_ROUTER_COMPLEXITY
 
 
 # ---------------------------------------------------------------------------
-# Test 39 — _classify_with_router: missing URL → PASS (fail-open)
+# Test 39 — _classify_with_router: missing URL → fail-open RouterDecision
 # ---------------------------------------------------------------------------
 
 
-async def test_classify_with_router_missing_url_returns_pass(hass: HomeAssistant) -> None:
-    """Router with no URL configured defaults to PASS (fail-open)."""
+async def test_classify_with_router_missing_url_returns_fail_open(hass: HomeAssistant) -> None:
+    """Router with no URL configured returns fail-open RouterDecision."""
     entry = _entry_with_agents(_make_ollama_agent())
     conv_agent = NeuralBridgeAgent(hass, entry)
     router = _make_router_config(url="")
 
     result = await conv_agent._classify_with_router(router, "some text")
 
-    assert result is True
+    assert result is not None
+    assert isinstance(result, RouterDecision)
 
 
 # ---------------------------------------------------------------------------
-# Test 40 — _classify_with_router: missing model → PASS (fail-open)
+# Test 40 — _classify_with_router: missing model → fail-open RouterDecision
 # ---------------------------------------------------------------------------
 
 
-async def test_classify_with_router_missing_model_returns_pass(hass: HomeAssistant) -> None:
-    """Router with no model configured defaults to PASS (fail-open)."""
+async def test_classify_with_router_missing_model_returns_fail_open(hass: HomeAssistant) -> None:
+    """Router with no model configured returns fail-open RouterDecision."""
     entry = _entry_with_agents(_make_ollama_agent())
     conv_agent = NeuralBridgeAgent(hass, entry)
     router = _make_router_config(model="")
 
     result = await conv_agent._classify_with_router(router, "some text")
 
-    assert result is True
+    assert result is not None
+    assert isinstance(result, RouterDecision)
 
 
 # ---------------------------------------------------------------------------
-# Test 41 — _classify_with_router: Ollama returns "PASS" → True
+# Test 41 — _classify_with_router: valid JSON PASS response → RouterDecision
 # ---------------------------------------------------------------------------
 
 
-async def test_classify_with_router_pass_response_returns_true(hass: HomeAssistant) -> None:
-    """Router Ollama response containing 'PASS' (no BLOCK) yields True."""
+async def test_classify_with_router_json_pass_returns_decision(hass: HomeAssistant) -> None:
+    """Router returning valid JSON with complexity>0 yields a RouterDecision."""
     entry = _entry_with_agents(_make_ollama_agent())
     conv_agent = NeuralBridgeAgent(hass, entry)
     router = _make_router_config()
@@ -1188,20 +1224,22 @@ async def test_classify_with_router_pass_response_returns_true(hass: HomeAssista
     with patch(
         "custom_components.neuralbridge.conversation.OllamaClient.generate",
         new_callable=AsyncMock,
-        return_value="PASS",
+        return_value='{"local_ha": true, "complexity": 12}',
     ):
         result = await conv_agent._classify_with_router(router, "turn on the lights")
 
-    assert result is True
+    assert result is not None
+    assert result.local_ha is True
+    assert result.complexity == 12
 
 
 # ---------------------------------------------------------------------------
-# Test 42 — _classify_with_router: Ollama returns "BLOCK" → False
+# Test 42 — _classify_with_router: JSON complexity=0 → None (block)
 # ---------------------------------------------------------------------------
 
 
-async def test_classify_with_router_block_response_returns_false(hass: HomeAssistant) -> None:
-    """Router Ollama response containing 'BLOCK' yields False."""
+async def test_classify_with_router_json_block_returns_none(hass: HomeAssistant) -> None:
+    """Router returning complexity=0 JSON yields None (block signal)."""
     entry = _entry_with_agents(_make_ollama_agent())
     conv_agent = NeuralBridgeAgent(hass, entry)
     router = _make_router_config()
@@ -1209,20 +1247,20 @@ async def test_classify_with_router_block_response_returns_false(hass: HomeAssis
     with patch(
         "custom_components.neuralbridge.conversation.OllamaClient.generate",
         new_callable=AsyncMock,
-        return_value="BLOCK",
+        return_value='{"local_ha": false, "complexity": 0}',
     ):
         result = await conv_agent._classify_with_router(router, "harmful request")
 
-    assert result is False
+    assert result is None
 
 
 # ---------------------------------------------------------------------------
-# Test 43 — _classify_with_router: Ollama returns None → PASS (fail-open)
+# Test 43 — _classify_with_router: Ollama returns None → fail-open RouterDecision
 # ---------------------------------------------------------------------------
 
 
-async def test_classify_with_router_none_response_returns_pass(hass: HomeAssistant) -> None:
-    """Router returning None (network error / timeout) defaults to PASS (fail-open)."""
+async def test_classify_with_router_none_response_returns_fail_open(hass: HomeAssistant) -> None:
+    """Router returning None (network error / timeout) returns fail-open RouterDecision."""
     entry = _entry_with_agents(_make_ollama_agent())
     conv_agent = NeuralBridgeAgent(hass, entry)
     router = _make_router_config()
@@ -1234,18 +1272,20 @@ async def test_classify_with_router_none_response_returns_pass(hass: HomeAssista
     ):
         result = await conv_agent._classify_with_router(router, "some text")
 
-    assert result is True
+    assert result is not None
+    assert isinstance(result, RouterDecision)
+    assert result.complexity == DEFAULT_ROUTER_COMPLEXITY
 
 
 # ---------------------------------------------------------------------------
-# Test 44 — _classify_with_router: unrecognised response → PASS (fail-open)
+# Test 44 — _classify_with_router: unparseable response → fail-open RouterDecision
 # ---------------------------------------------------------------------------
 
 
-async def test_classify_with_router_unrecognised_response_returns_pass(
+async def test_classify_with_router_unparseable_response_returns_fail_open(
     hass: HomeAssistant,
 ) -> None:
-    """Router returning unexpected text defaults to PASS (BLOCK not in response)."""
+    """Router returning non-JSON text returns fail-open RouterDecision."""
     entry = _entry_with_agents(_make_ollama_agent())
     conv_agent = NeuralBridgeAgent(hass, entry)
     router = _make_router_config()
@@ -1257,28 +1297,34 @@ async def test_classify_with_router_unrecognised_response_returns_pass(
     ):
         result = await conv_agent._classify_with_router(router, "some text")
 
-    assert result is True
+    assert result is not None
+    assert isinstance(result, RouterDecision)
+    assert result.complexity == DEFAULT_ROUTER_COMPLEXITY
 
 
 # ---------------------------------------------------------------------------
-# Test 45 — _classify_with_router: BLOCK detection is case-insensitive
+# Test 45 — _classify_with_router: JSON local_ha=false, general question
 # ---------------------------------------------------------------------------
 
 
-async def test_classify_with_router_block_case_insensitive(hass: HomeAssistant) -> None:
-    """'block', 'Block', 'BLOCK this' etc. all trigger a BLOCK decision."""
+async def test_classify_with_router_general_question_not_local_ha(
+    hass: HomeAssistant,
+) -> None:
+    """Router classifying a general question returns local_ha=False."""
     entry = _entry_with_agents(_make_ollama_agent())
     conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config(agent_id="r-general")
 
-    for response_text in ("block", "Block", "  block  ", "BLOCK this request"):
-        router = _make_router_config(agent_id=f"r-{response_text[:4]}")
-        with patch(
-            "custom_components.neuralbridge.conversation.OllamaClient.generate",
-            new_callable=AsyncMock,
-            return_value=response_text,
-        ):
-            result = await conv_agent._classify_with_router(router, "test")
-        assert result is False, f"Expected False for response: {response_text!r}"
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient.generate",
+        new_callable=AsyncMock,
+        return_value='{"local_ha": false, "complexity": 70}',
+    ):
+        result = await conv_agent._classify_with_router(router, "What is the capital of France?")
+
+    assert result is not None
+    assert result.local_ha is False
+    assert result.complexity == 70
 
 
 # ---------------------------------------------------------------------------
@@ -1297,7 +1343,7 @@ async def test_classify_with_router_creates_client(hass: HomeAssistant) -> None:
     with patch(
         "custom_components.neuralbridge.conversation.OllamaClient.generate",
         new_callable=AsyncMock,
-        return_value="PASS",
+        return_value='{"local_ha": false, "complexity": 30}',
     ):
         await conv_agent._classify_with_router(router, "hello")
 
@@ -1316,7 +1362,7 @@ async def test_classify_with_router_reuses_existing_client(hass: HomeAssistant) 
     router = _make_router_config(agent_id="cached-router")
 
     mock_client = MagicMock()
-    mock_client.generate = AsyncMock(return_value="PASS")
+    mock_client.generate = AsyncMock(return_value='{"local_ha": false, "complexity": 20}')
     conv_agent._ollama_clients["cached-router"] = mock_client
 
     await conv_agent._classify_with_router(router, "hello")
@@ -1843,4 +1889,1509 @@ async def test_get_guard_rail_agent_config_found_returns_config(
     result = await conv_agent._get_guard_rail_agent_config()
 
     assert result is not None
-    assert result["id"] == "gr-agent"
+
+
+# ---------------------------------------------------------------------------
+# Test 68 — _classify_with_router: AGENT_TYPE_EXISTING missing entity_id records failure
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_existing_missing_entity_records_failure(
+    hass: HomeAssistant,
+) -> None:
+    """AGENT_TYPE_EXISTING router with no entity_id records a request + failure."""
+
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config(agent_id="non-ollama-router", agent_type=AGENT_TYPE_EXISTING)
+    # _make_router_config does not set entity_id, so it will be missing
+
+    result = await conv_agent._classify_with_router(router, "some text")
+
+    # Fallback=default_complexity returns a RouterDecision, not None
+    assert result is not None
+    stats = conv_agent._statistics.get_agent_stats("non-ollama-router")
+    assert stats is not None
+    assert stats.requests == 1
+    assert stats.successes == 0
+    assert stats.failures == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 69 — _classify_with_router: records request + failure when URL missing
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_missing_url_records_failure(
+    hass: HomeAssistant,
+) -> None:
+    """Router with missing URL records a request + failure in statistics."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config(agent_id="no-url-router", url="")
+
+    result = await conv_agent._classify_with_router(router, "some text")
+
+    assert result is not None
+    stats = conv_agent._statistics.get_agent_stats("no-url-router")
+    assert stats is not None
+    assert stats.requests == 1
+    assert stats.failures == 1
+    assert stats.successes == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 70 — _classify_with_router: records request + failure when no response
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_no_response_records_failure(
+    hass: HomeAssistant,
+) -> None:
+    """Router returning None records a request + failure in statistics."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config(agent_id="silent-router")
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.OllamaClient.generate",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        result = await conv_agent._classify_with_router(router, "some text")
+
+    assert result is not None
+    stats = conv_agent._statistics.get_agent_stats("silent-router")
+    assert stats is not None
+    assert stats.requests == 1
+    assert stats.failures == 1
+    assert stats.successes == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 71 — _classify_with_router: PASS response records success, no block
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_pass_records_success_not_block(
+    hass: HomeAssistant,
+) -> None:
+    """JSON PASS classification records a success but does NOT increment blocks."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config(agent_id="pass-router")
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.OllamaClient.generate",
+        new_callable=AsyncMock,
+        return_value='{"local_ha": true, "complexity": 8}',
+    ):
+        result = await conv_agent._classify_with_router(router, "turn on lights")
+
+    assert result is not None
+    stats = conv_agent._statistics.get_agent_stats("pass-router")
+    assert stats is not None
+    assert stats.requests == 1
+    assert stats.successes == 1
+    assert stats.blocks == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 72 — _classify_with_router: BLOCK response records success + block
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_block_records_success_and_block(
+    hass: HomeAssistant,
+) -> None:
+    """JSON complexity=0 block records both a success and a block in statistics."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config(agent_id="block-router")
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.OllamaClient.generate",
+        new_callable=AsyncMock,
+        return_value='{"local_ha": false, "complexity": 0}',
+    ):
+        result = await conv_agent._classify_with_router(router, "harmful request")
+
+    assert result is None
+    stats = conv_agent._statistics.get_agent_stats("block-router")
+    assert stats is not None
+    assert stats.requests == 1
+    assert stats.successes == 1
+    assert stats.blocks == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 73 — _classify_with_router: PASS dispatches stats update signal
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_pass_dispatches_signal(
+    hass: HomeAssistant,
+) -> None:
+    """_classify_with_router sends SIGNAL_STATS_UPDATED after a JSON PASS classification."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config(agent_id="signal-router")
+    dispatched: list[str] = []
+
+    original_send = async_dispatcher_send
+
+    def capturing_send(h: HomeAssistant, signal: str, *args: object) -> None:
+        dispatched.append(signal)
+        original_send(h, signal, *args)
+
+    with (
+        patch(
+            "custom_components.neuralbridge.ollama_client.OllamaClient.generate",
+            new_callable=AsyncMock,
+            return_value='{"local_ha": false, "complexity": 40}',
+        ),
+        patch(
+            "custom_components.neuralbridge.conversation.async_dispatcher_send",
+            side_effect=capturing_send,
+        ),
+    ):
+        await conv_agent._classify_with_router(router, "hello")
+
+    expected = SIGNAL_STATS_UPDATED.format(entry_id=entry.entry_id)
+    assert expected in dispatched
+
+
+# ---------------------------------------------------------------------------
+# Test 74 — NeuralBridgeAgent reads CircuitBreaker from hass.data
+# ---------------------------------------------------------------------------
+
+
+def test_agent_reads_circuit_breaker_from_hass_data(hass: HomeAssistant) -> None:
+    """NeuralBridgeAgent uses the CircuitBreaker instance stored in hass.data."""
+    cb = CircuitBreaker(failure_threshold=99)
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {DATA_CIRCUIT_BREAKER: cb}
+
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    assert conv_agent._circuit_breaker is cb
+
+
+# ---------------------------------------------------------------------------
+# Test 75 — supported_features: CONTROL returned when enable_home_control is True
+# ---------------------------------------------------------------------------
+
+
+def test_supported_features_returns_control_when_enabled(hass: HomeAssistant) -> None:
+    """supported_features includes CONTROL when CONF_ENABLE_HOME_CONTROL is True."""
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_ENABLE_HOME_CONTROL: True})
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    assert conv_agent.supported_features == ConversationEntityFeature.CONTROL
+
+
+# ---------------------------------------------------------------------------
+# Test 76 — supported_features: 0 returned when enable_home_control is False
+# ---------------------------------------------------------------------------
+
+
+def test_supported_features_returns_zero_when_disabled(hass: HomeAssistant) -> None:
+    """supported_features is 0 (no CONTROL) when CONF_ENABLE_HOME_CONTROL is False."""
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_ENABLE_HOME_CONTROL: False})
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    assert conv_agent.supported_features == ConversationEntityFeature(0)
+
+
+# ---------------------------------------------------------------------------
+# Test 77 — supported_features: defaults to CONTROL when key is absent
+# ---------------------------------------------------------------------------
+
+
+def test_supported_features_defaults_to_control(hass: HomeAssistant) -> None:
+    """supported_features defaults to CONTROL when CONF_ENABLE_HOME_CONTROL is not set."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    assert conv_agent.supported_features == ConversationEntityFeature.CONTROL
+
+
+# ---------------------------------------------------------------------------
+# Test 78 — _process_with_existing: assist_mode=True + action_done → result returned
+# ---------------------------------------------------------------------------
+
+
+async def test_process_with_existing_assist_mode_action_done_returns_result(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """In assist mode, an action_done response is returned as a ConversationResult."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    agent_cfg = {
+        CONF_ENTITY_ID: "conversation.home_assistant",
+        CONF_AGENT_NAME: "HA Local",
+        CONF_AGENT_ASSIST_MODE: True,
+    }
+
+    service_response = {
+        "response": {
+            "response_type": "action_done",
+            "speech": {"plain": {"speech": "OK, turning on the lights"}},
+        }
+    }
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = "en"
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(return_value=service_response)
+    agent.hass = mock_hass
+
+    result = await agent._process_with_existing(agent_cfg, _make_input("Turn on the lights"))
+
+    assert result is not None
+    assert result.response.speech["plain"]["speech"] == "OK, turning on the lights"
+
+
+# ---------------------------------------------------------------------------
+# Test 79 — _process_with_existing: assist_mode=True + response_type "error" → None
+# ---------------------------------------------------------------------------
+
+
+async def test_process_with_existing_assist_mode_error_response_returns_none(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """In assist mode, an error response falls through (returns None) to the next agent."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    agent_cfg = {
+        CONF_ENTITY_ID: "conversation.home_assistant",
+        CONF_AGENT_NAME: "HA Local",
+        CONF_AGENT_ASSIST_MODE: True,
+    }
+
+    service_response = {
+        "response": {
+            "response_type": "error",
+            "speech": {"plain": {"speech": "I don't understand that command"}},
+        }
+    }
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = "en"
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(return_value=service_response)
+    agent.hass = mock_hass
+
+    result = await agent._process_with_existing(
+        agent_cfg, _make_input("What is the capital of France?")
+    )
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 80 — _process_with_existing: assist_mode=True + response_type "plain" → None
+# ---------------------------------------------------------------------------
+
+
+async def test_process_with_existing_assist_mode_plain_response_returns_none(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """In assist mode, a plain (non-intent) response falls through to the next agent."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    agent_cfg = {
+        CONF_ENTITY_ID: "conversation.home_assistant",
+        CONF_AGENT_NAME: "HA Local",
+        CONF_AGENT_ASSIST_MODE: True,
+    }
+
+    service_response = {
+        "response": {
+            "response_type": "plain",
+            "speech": {"plain": {"speech": "I'm not sure how to help with that"}},
+        }
+    }
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = "en"
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(return_value=service_response)
+    agent.hass = mock_hass
+
+    result = await agent._process_with_existing(agent_cfg, _make_input("Tell me a joke"))
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 81 — _process_with_existing: assist_mode=False (default) → returns any speech
+# ---------------------------------------------------------------------------
+
+
+async def test_process_with_existing_assist_mode_off_returns_any_speech(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """With assist_mode=False, any speech response is returned (original behaviour)."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    agent_cfg = {
+        CONF_ENTITY_ID: "conversation.home_assistant",
+        CONF_AGENT_NAME: "HA Local",
+        CONF_AGENT_ASSIST_MODE: False,
+    }
+
+    service_response = {
+        "response": {
+            "response_type": "plain",
+            "speech": {"plain": {"speech": "I'm not sure how to help with that"}},
+        }
+    }
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = "en"
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(return_value=service_response)
+    agent.hass = mock_hass
+
+    result = await agent._process_with_existing(agent_cfg, _make_input("Tell me a joke"))
+
+    assert result is not None
+    assert result.response.speech["plain"]["speech"] == "I'm not sure how to help with that"
+
+
+# ---------------------------------------------------------------------------
+# Test 82 — _process_with_existing: assist_mode absent defaults to False (no change)
+# ---------------------------------------------------------------------------
+
+
+async def test_process_with_existing_assist_mode_absent_defaults_to_false(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """When assist_mode is absent from config, it defaults to False (returns any speech)."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    agent_cfg = {
+        CONF_ENTITY_ID: "conversation.home_assistant",
+        CONF_AGENT_NAME: "HA Local",
+        # No CONF_AGENT_ASSIST_MODE key
+    }
+
+    service_response = {
+        "response": {
+            "response_type": "error",
+            "speech": {"plain": {"speech": "Sorry, I can't do that"}},
+        }
+    }
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = "en"
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(return_value=service_response)
+    agent.hass = mock_hass
+
+    result = await agent._process_with_existing(agent_cfg, _make_input("Something"))
+
+    assert result is not None
+    assert result.response.speech["plain"]["speech"] == "Sorry, I can't do that"
+
+
+# ---------------------------------------------------------------------------
+# Test 83 — async_process: debug log uses character count, not user text (privacy)
+# ---------------------------------------------------------------------------
+
+
+async def test_async_process_logs_char_count_not_user_text(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: Any
+) -> None:
+    """async_process debug log records character count, not the user text (PII protection)."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    user_text = "This is a private message"
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.neuralbridge.conversation"):
+        await agent.async_process(_make_input(user_text))
+
+    assert user_text not in caplog.text
+    assert f"{len(user_text)} chars" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Test 84 — _maybe_add_to_chat_log: no-op when no active ChatLog in context
+# ---------------------------------------------------------------------------
+
+
+def test_maybe_add_to_chat_log_noop_when_no_active_chat_log(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """_maybe_add_to_chat_log is a no-op when current_chat_log.get() returns None."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    result = agent._create_result("Hello")
+
+    mock_current = MagicMock()
+    mock_current.get.return_value = None
+    mock_module = MagicMock()
+    mock_module.current_chat_log = mock_current
+
+    with patch.dict("sys.modules", {"homeassistant.components.conversation.chat_log": mock_module}):
+        agent._maybe_add_to_chat_log(result)
+
+    mock_module.AssistantContent.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 85 — _maybe_add_to_chat_log: adds AssistantContent to the active ChatLog
+# ---------------------------------------------------------------------------
+
+
+def test_maybe_add_to_chat_log_adds_assistant_content(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """_maybe_add_to_chat_log adds AssistantContent to the active ChatLog."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    result = agent._create_result("Hi there")
+
+    mock_chat_log_obj = MagicMock()
+    mock_current = MagicMock()
+    mock_current.get.return_value = mock_chat_log_obj
+    mock_assistant_content_cls = MagicMock()
+    mock_module = MagicMock()
+    mock_module.current_chat_log = mock_current
+    mock_module.AssistantContent = mock_assistant_content_cls
+
+    with patch.dict("sys.modules", {"homeassistant.components.conversation.chat_log": mock_module}):
+        agent._maybe_add_to_chat_log(result)
+
+    mock_chat_log_obj.async_add_assistant_content_without_tools.assert_called_once()
+    mock_assistant_content_cls.assert_called_once_with(agent_id=agent.entity_id, content="Hi there")
+
+
+# ---------------------------------------------------------------------------
+# Test 86 — async_process: delegates to _compute_result and _maybe_add_to_chat_log
+# ---------------------------------------------------------------------------
+
+
+async def test_async_process_calls_maybe_add_to_chat_log(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """async_process passes its computed result to _maybe_add_to_chat_log."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+
+    with patch.object(agent, "_maybe_add_to_chat_log") as mock_add:
+        result = await agent.async_process(_make_input("test"))
+
+    mock_add.assert_called_once_with(result)
+
+
+# ===========================================================================
+# Helper factory for LOCAL_HA agents (used in router-decision tests below)
+# ===========================================================================
+
+
+def _make_local_ha_agent(
+    priority: int = 30,
+    agent_id: str = "local-ha-1",
+    name: str = "Local HA",
+) -> dict[str, Any]:
+    """Return a minimal LOCAL_HA agent config dict."""
+    return {
+        "id": agent_id,
+        CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA,
+        CONF_AGENT_ENABLED: True,
+        CONF_AGENT_NAME: name,
+        CONF_PRIORITY: priority,
+    }
+
+
+# ===========================================================================
+# RouterDecision dataclass behaviour (Tests 87-89)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Test 87 — RouterDecision: immutable (setattr raises AttributeError)
+# ---------------------------------------------------------------------------
+
+
+def test_router_decision_is_immutable() -> None:
+    """Setting any attribute on a RouterDecision raises AttributeError."""
+    decision = RouterDecision(local_ha=True, complexity=50)
+
+    with pytest.raises(AttributeError):
+        decision.local_ha = False  # type: ignore[misc]
+
+    with pytest.raises(AttributeError):
+        decision.complexity = 99  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Test 88 — RouterDecision: equality
+# ---------------------------------------------------------------------------
+
+
+def test_router_decision_equality() -> None:
+    """Two RouterDecision instances with the same fields are equal."""
+    assert RouterDecision(local_ha=True, complexity=5) == RouterDecision(
+        local_ha=True, complexity=5
+    )
+    assert RouterDecision(local_ha=False, complexity=50) != RouterDecision(
+        local_ha=True, complexity=50
+    )
+    assert RouterDecision(local_ha=True, complexity=1) != RouterDecision(
+        local_ha=True, complexity=2
+    )
+    # Call __eq__ directly to verify NotImplemented is returned for non-RouterDecision
+    sentinel = RouterDecision(local_ha=True, complexity=10).__eq__("not a decision")
+    assert sentinel is NotImplemented
+
+
+# ---------------------------------------------------------------------------
+# Test 88b — RouterDecision: __hash__ works (usable in sets/dicts)
+# ---------------------------------------------------------------------------
+
+
+def test_router_decision_hashable() -> None:
+    """RouterDecision can be used in sets and as dict keys."""
+    d1 = RouterDecision(local_ha=True, complexity=5)
+    d2 = RouterDecision(local_ha=True, complexity=5)
+    d3 = RouterDecision(local_ha=False, complexity=10)
+
+    decision_set = {d1, d2, d3}
+    assert len(decision_set) == 2  # d1 and d2 are equal, so only 2 unique
+    assert d1 in decision_set
+
+
+# ---------------------------------------------------------------------------
+# Test 89 — RouterDecision: repr contains both fields
+# ---------------------------------------------------------------------------
+
+
+def test_router_decision_repr() -> None:
+    """RouterDecision repr includes local_ha and complexity values."""
+    decision = RouterDecision(local_ha=True, complexity=42)
+    text = repr(decision)
+
+    assert "local_ha=True" in text
+    assert "complexity=42" in text
+
+
+# ===========================================================================
+# _parse_router_response (Tests 90-101)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Test 90 — _parse_router_response: valid JSON PASS → RouterDecision
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_valid_json_pass() -> None:
+    """Valid JSON with complexity>0 returns a RouterDecision."""
+    result = _parse_router_response('{"local_ha": false, "complexity": 30}')
+
+    assert result is not None
+    assert result.local_ha is False
+    assert result.complexity == 30
+
+
+# ---------------------------------------------------------------------------
+# Test 91 — _parse_router_response: local_ha=true → promoted flag set
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_local_ha_true() -> None:
+    """JSON with local_ha=true returns RouterDecision with local_ha=True."""
+    result = _parse_router_response('{"local_ha": true, "complexity": 5}')
+
+    assert result is not None
+    assert result.local_ha is True
+    assert result.complexity == 5
+
+
+# ---------------------------------------------------------------------------
+# Test 92 — _parse_router_response: complexity=0 → RouterDecision(complexity=0) block marker
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_complexity_zero_returns_block_decision() -> None:
+    """complexity=0 in the JSON is the block signal; _parse_router_response returns RouterDecision(complexity=0)."""
+    result = _parse_router_response('{"local_ha": false, "complexity": 0}')
+
+    assert result is not None
+    assert isinstance(result, RouterDecision)
+    assert result.complexity == 0
+    assert result.local_ha is False
+
+
+# ---------------------------------------------------------------------------
+# Test 93 — _parse_router_response: markdown fences stripped
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_markdown_fences_stripped() -> None:
+    """JSON wrapped in ```json ... ``` markdown fences is parsed correctly."""
+    raw = '```json\n{"local_ha": false, "complexity": 20}\n```'
+    result = _parse_router_response(raw)
+
+    assert result is not None
+    assert result.complexity == 20
+
+
+# ---------------------------------------------------------------------------
+# Test 94 — _parse_router_response: malformed JSON → None
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_malformed_json_returns_none() -> None:
+    """Invalid JSON returns None without raising."""
+    assert _parse_router_response("not json at all") is None
+    assert _parse_router_response("{broken") is None
+    assert _parse_router_response("") is None
+    # Has valid {..} delimiters but invalid JSON content inside
+    assert _parse_router_response("{broken json}") is None
+
+
+# ---------------------------------------------------------------------------
+# Test 95 — _parse_router_response: missing complexity key → None
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_missing_complexity_returns_none() -> None:
+    """JSON missing the 'complexity' key returns None."""
+    assert _parse_router_response('{"local_ha": true}') is None
+
+
+# ---------------------------------------------------------------------------
+# Test 96 — _parse_router_response: missing local_ha key → None
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_missing_local_ha_returns_none() -> None:
+    """JSON missing the 'local_ha' key returns None."""
+    assert _parse_router_response('{"complexity": 40}') is None
+
+
+# ---------------------------------------------------------------------------
+# Test 97 — _parse_router_response: complexity clamped above 100 → 100
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_complexity_clamped_high() -> None:
+    """complexity > 100 is clamped to 100."""
+    result = _parse_router_response('{"local_ha": false, "complexity": 200}')
+
+    assert result is not None
+    assert result.complexity == 100
+
+
+# ---------------------------------------------------------------------------
+# Test 98 — _parse_router_response: negative non-zero complexity → clamped to 1
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_complexity_clamped_low_nonzero() -> None:
+    """Negative complexity (not zero) is clamped to 1, not treated as block."""
+    result = _parse_router_response('{"local_ha": false, "complexity": -10}')
+
+    assert result is not None
+    assert result.complexity == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 99 — _parse_router_response: response with no JSON object → None
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_no_json_object_returns_none() -> None:
+    """Plain text with no '{' returns None."""
+    assert _parse_router_response("PASS") is None
+    assert _parse_router_response("BLOCK this request") is None
+
+
+# ---------------------------------------------------------------------------
+# Test 100 — _parse_router_response: non-dict JSON (list) → None
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_non_dict_json_returns_none() -> None:
+    """JSON array of primitives (no inner object) returns None."""
+    assert _parse_router_response("[1, 2, 3]") is None
+    assert _parse_router_response("[]") is None
+
+
+# ---------------------------------------------------------------------------
+# Test 101 — _parse_router_response: extra JSON fields are ignored
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_extra_fields_ignored() -> None:
+    """Extra unknown fields in the JSON do not cause a failure."""
+    result = _parse_router_response(
+        '{"local_ha": true, "complexity": 15, "explanation": "Home automation task"}'
+    )
+
+    assert result is not None
+    assert result.local_ha is True
+    assert result.complexity == 15
+
+
+# ===========================================================================
+# _apply_router_decision (Tests 102-104)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Test 102 — _apply_router_decision: local_ha=True promotes LOCAL_HA agents to front
+# ---------------------------------------------------------------------------
+
+
+def test_apply_router_decision_local_ha_promotes_local_agents() -> None:
+    """With local_ha=True, LOCAL_HA agents are moved to the front of the list."""
+    local = _make_local_ha_agent(priority=30, agent_id="ha-local")
+    ollama = _make_ollama_agent(priority=50, agent_id="ollama-cloud")
+    processing_agents = [ollama, local]
+
+    decision = RouterDecision(local_ha=True, complexity=10)
+    result = _apply_router_decision(decision, processing_agents)
+
+    assert result[0]["id"] == "ha-local", "LOCAL_HA agent should be promoted to first position"
+
+
+# ---------------------------------------------------------------------------
+# Test 103 — _apply_router_decision: local_ha=False excludes LOCAL_HA agents
+# ---------------------------------------------------------------------------
+
+
+def test_apply_router_decision_local_ha_false_excludes_local_agents() -> None:
+    """With local_ha=False, LOCAL_HA agents are removed from the list."""
+    local = _make_local_ha_agent(agent_id="ha-local")
+    ollama = _make_ollama_agent(agent_id="ollama-cloud")
+    processing_agents = [local, ollama]
+
+    decision = RouterDecision(local_ha=False, complexity=70)
+    result = _apply_router_decision(decision, processing_agents)
+
+    ids = [a["id"] for a in result]
+    assert "ha-local" not in ids
+    assert "ollama-cloud" in ids
+
+
+# ---------------------------------------------------------------------------
+# Test 104 — _apply_router_decision: local_ha=False with no LOCAL_HA agents
+# ---------------------------------------------------------------------------
+
+
+def test_apply_router_decision_local_ha_false_no_local_agents() -> None:
+    """With local_ha=False and no LOCAL_HA agents, the list is returned unchanged."""
+    ollama1 = _make_ollama_agent(priority=50, agent_id="a1")
+    ollama2 = _make_ollama_agent(priority=40, agent_id="a2")
+    processing_agents = [ollama1, ollama2]
+
+    decision = RouterDecision(local_ha=False, complexity=50)
+    result = _apply_router_decision(decision, processing_agents)
+
+    assert len(result) == 2
+    assert result[0]["id"] == "a1"
+    assert result[1]["id"] == "a2"
+
+
+# ===========================================================================
+# CONF_IS_ROUTER agent-split in _compute_result (Tests 105-106)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Test 105 — _compute_result: agent with is_router=True is treated as router
+# ---------------------------------------------------------------------------
+
+
+async def test_compute_result_uses_is_router_flag_for_split(hass: HomeAssistant) -> None:
+    """Agent with CONF_IS_ROUTER=True is routed to router_agents, not processing_agents."""
+    router_agent = {
+        **_make_ollama_agent(priority=5, agent_id="my-router"),
+        CONF_IS_ROUTER: True,
+    }
+    processing_agent = _make_ollama_agent(priority=10, agent_id="processor")
+    entry = _entry_with_agents(router_agent, processing_agent)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    decision = RouterDecision(local_ha=False, complexity=50)
+
+    with (
+        patch.object(
+            conv_agent, "_check_with_routers", new_callable=AsyncMock, return_value=decision
+        ) as mock_router,
+        patch.object(
+            conv_agent,
+            "_try_agent_with_tracking",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        await conv_agent.async_process(_make_input("hello"))
+
+    # The router was called — verify the routers list contained our is_router agent
+    call_args = mock_router.call_args
+    routers_passed = call_args[0][1]  # second positional arg is router_agents
+    router_ids = [a["id"] for a in routers_passed]
+    assert "my-router" in router_ids
+    assert "processor" not in router_ids
+
+
+# ---------------------------------------------------------------------------
+# Test 106 — _compute_result: router block (None) returns blocked response
+# ---------------------------------------------------------------------------
+
+
+async def test_compute_result_router_none_returns_blocked_response(
+    hass: HomeAssistant,
+) -> None:
+    """When _check_with_routers returns None, async_process returns the block response."""
+    router_agent = {
+        **_make_ollama_agent(priority=0, agent_id="blocking-router"),
+        CONF_IS_ROUTER: True,
+    }
+    entry = _entry_with_agents(router_agent, _make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    with patch.object(conv_agent, "_check_with_routers", new_callable=AsyncMock, return_value=None):
+        result = await conv_agent.async_process(_make_input("bad content"))
+
+    speech = result.response.speech["plain"]["speech"].lower()
+    assert "cannot process" in speech
+
+
+# ===========================================================================
+# _check_with_routers edge cases (Tests 107-108)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Test 107 — _check_with_routers: empty router list returns fail-open RouterDecision
+# ---------------------------------------------------------------------------
+
+
+async def test_check_with_routers_empty_list_returns_fail_open(
+    hass: HomeAssistant,
+) -> None:
+    """With no routers, _check_with_routers returns the fail-open default RouterDecision."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    result = await conv_agent._check_with_routers(_make_input("hello"), [])
+
+    assert result is not None
+    assert isinstance(result, RouterDecision)
+    assert result.complexity == DEFAULT_ROUTER_COMPLEXITY
+
+
+# ---------------------------------------------------------------------------
+# Test 108 — _check_with_routers: all routers return fail-open on error → RouterDecision
+# ---------------------------------------------------------------------------
+
+
+async def test_check_with_routers_all_fail_open_returns_decision(
+    hass: HomeAssistant,
+) -> None:
+    """When every router returns a fail-open RouterDecision, the last one is returned."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    fail_open = RouterDecision(local_ha=False, complexity=DEFAULT_ROUTER_COMPLEXITY)
+
+    with patch.object(
+        conv_agent,
+        "_classify_with_router",
+        new_callable=AsyncMock,
+        return_value=fail_open,
+    ):
+        result = await conv_agent._check_with_routers(
+            _make_input("some text"), [_make_router_config("r1"), _make_router_config("r2")]
+        )
+
+    assert result is not None
+    assert result.complexity == DEFAULT_ROUTER_COMPLEXITY
+
+
+# ---------------------------------------------------------------------------
+# Test 109 — _apply_router_decision: skip-routing sentinel passes all agents through
+# ---------------------------------------------------------------------------
+
+
+def test_apply_router_decision_skip_routing_passes_all_agents() -> None:
+    """ROUTER_SKIP_ROUTING_COMPLEXITY sentinel returns all agents unchanged."""
+    local = {CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA, "id": "local"}
+    ollama = {CONF_AGENT_TYPE: AGENT_TYPE_OLLAMA, "id": "ollama"}
+    skip_decision = RouterDecision(local_ha=False, complexity=ROUTER_SKIP_ROUTING_COMPLEXITY)
+
+    result = _apply_router_decision(skip_decision, [local, ollama])
+
+    assert result == [local, ollama]
+
+
+# ---------------------------------------------------------------------------
+# Test 110 — _router_fallback: default_complexity returns mid-range RouterDecision
+# ---------------------------------------------------------------------------
+
+
+def test_router_fallback_default_complexity(hass: HomeAssistant) -> None:
+    """_router_fallback with default_complexity returns RouterDecision(50)."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    result = conv_agent._router_fallback(ROUTER_FALLBACK_DEFAULT_COMPLEXITY)
+
+    assert result is not None
+    assert isinstance(result, RouterDecision)
+    assert result.complexity == DEFAULT_ROUTER_COMPLEXITY
+
+
+# ---------------------------------------------------------------------------
+# Test 111 — _router_fallback: skip_routing returns ROUTER_SKIP_ROUTING_COMPLEXITY
+# ---------------------------------------------------------------------------
+
+
+def test_router_fallback_skip_routing(hass: HomeAssistant) -> None:
+    """_router_fallback with skip_routing returns RouterDecision with sentinel complexity."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    result = conv_agent._router_fallback(ROUTER_FALLBACK_SKIP_ROUTING)
+
+    assert result is not None
+    assert isinstance(result, RouterDecision)
+    assert result.complexity == ROUTER_SKIP_ROUTING_COMPLEXITY
+
+
+# ---------------------------------------------------------------------------
+# Test 112 — _router_fallback: block returns None
+# ---------------------------------------------------------------------------
+
+
+def test_router_fallback_block_returns_none(hass: HomeAssistant) -> None:
+    """_router_fallback with block returns None (block signal)."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    result = conv_agent._router_fallback(ROUTER_FALLBACK_BLOCK)
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 113 — _classify_with_router: AGENT_TYPE_EXISTING with valid entity + good response
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_existing_entity_success(
+    hass: HomeAssistant,
+) -> None:
+    """AGENT_TYPE_EXISTING router with a valid entity + JSON response returns RouterDecision."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = {
+        "id": "existing-router",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_NAME: "Cloud Router",
+        CONF_PRIORITY: 0,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: 5,
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+    }
+    json_response = '{"local_ha": false, "complexity": 42}'
+
+    with patch.object(
+        conv_agent,
+        "_call_existing_agent_for_routing",
+        new_callable=AsyncMock,
+        return_value=json_response,
+    ):
+        result = await conv_agent._classify_with_router(router, "what is 2+2?")
+
+    assert result is not None
+    assert isinstance(result, RouterDecision)
+    assert result.local_ha is False
+    assert result.complexity == 42
+
+
+# ---------------------------------------------------------------------------
+# Test 114 — _classify_with_router: AGENT_TYPE_EXISTING returns empty → fallback
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_existing_empty_response_fallback(
+    hass: HomeAssistant,
+) -> None:
+    """AGENT_TYPE_EXISTING router returning empty string falls back to default complexity."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = {
+        "id": "existing-router-empty",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_NAME: "Cloud Router",
+        CONF_PRIORITY: 0,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: 5,
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+    }
+
+    with patch.object(
+        conv_agent,
+        "_call_existing_agent_for_routing",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        result = await conv_agent._classify_with_router(router, "hello")
+
+    assert result is not None
+    assert result.complexity == DEFAULT_ROUTER_COMPLEXITY
+
+
+# ---------------------------------------------------------------------------
+# Test 115 — _classify_with_router: fallback=block on error returns None
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_fallback_block_returns_none(
+    hass: HomeAssistant,
+) -> None:
+    """Router failure with fallback=block returns None (blocks the request)."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = {
+        "id": "block-fallback-router",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_NAME: "Strict Router",
+        CONF_PRIORITY: 0,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: 5,
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_BLOCK,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+    }
+
+    with patch.object(
+        conv_agent,
+        "_call_existing_agent_for_routing",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        result = await conv_agent._classify_with_router(router, "some query")
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 116 — _classify_with_router: fallback=skip_routing on error returns sentinel
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_fallback_skip_routing_returns_sentinel(
+    hass: HomeAssistant,
+) -> None:
+    """Router failure with fallback=skip_routing returns ROUTER_SKIP_ROUTING_COMPLEXITY."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = {
+        "id": "skip-fallback-router",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_NAME: "Lenient Router",
+        CONF_PRIORITY: 0,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: 5,
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_SKIP_ROUTING,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+    }
+
+    with patch.object(
+        conv_agent,
+        "_call_existing_agent_for_routing",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        result = await conv_agent._classify_with_router(router, "some query")
+
+    assert result is not None
+    assert result.complexity == ROUTER_SKIP_ROUTING_COMPLEXITY
+
+
+# ---------------------------------------------------------------------------
+# Test 117 — _classify_with_router: log_level=complexity_only logs the score
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_log_complexity_only(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """log_level=complexity_only emits an INFO log with the complexity score."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = {
+        "id": "log-complexity-router",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_NAME: "Verbose Router",
+        CONF_PRIORITY: 0,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: 5,
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_COMPLEXITY,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+    }
+
+    with (
+        patch.object(
+            conv_agent,
+            "_call_existing_agent_for_routing",
+            new_callable=AsyncMock,
+            return_value='{"local_ha": false, "complexity": 30}',
+        ),
+        caplog.at_level(logging.INFO, logger="custom_components.neuralbridge.conversation"),
+    ):
+        await conv_agent._classify_with_router(router, "some query")
+
+    assert "complexity score" in caplog.text.lower() or "30" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Test 118 — _classify_with_router: log_level=debug_info logs the decision
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_log_debug_info(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """log_level=debug_info emits a DEBUG log with the routing decision."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = {
+        "id": "log-debug-router",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_NAME: "Debug Router",
+        CONF_PRIORITY: 0,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: 5,
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_DEBUG,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+    }
+
+    with (
+        patch.object(
+            conv_agent,
+            "_call_existing_agent_for_routing",
+            new_callable=AsyncMock,
+            return_value='{"local_ha": true, "complexity": 15}',
+        ),
+        caplog.at_level(logging.DEBUG, logger="custom_components.neuralbridge.conversation"),
+    ):
+        await conv_agent._classify_with_router(router, "turn on lights")
+
+    assert "decision" in caplog.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Test 119 — _classify_with_router: log_level=debug_with_query logs the query
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_log_debug_with_query(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """log_level=debug_with_query emits a DEBUG log containing the query text."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = {
+        "id": "log-query-router",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_NAME: "Trace Router",
+        CONF_PRIORITY: 0,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: 5,
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_DEBUG_QUERY,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+    }
+
+    with (
+        patch.object(
+            conv_agent,
+            "_call_existing_agent_for_routing",
+            new_callable=AsyncMock,
+            return_value='{"local_ha": false, "complexity": 20}',
+        ),
+        caplog.at_level(logging.DEBUG, logger="custom_components.neuralbridge.conversation"),
+    ):
+        await conv_agent._classify_with_router(router, "unique-query-marker")
+
+    assert "unique-query-marker" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Test 120 — _classify_with_router: custom prompt is sent to the back-end
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_uses_custom_prompt(
+    hass: HomeAssistant,
+) -> None:
+    """When CONF_ROUTER_CUSTOM_PROMPT is set, it is used instead of the default prompt."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    custom = 'Reply ONLY: {"local_ha": false, "complexity": 1}. User: {user_text}'
+    router = {
+        "id": "custom-prompt-router",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_NAME: "Custom Router",
+        CONF_PRIORITY: 0,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: 5,
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        CONF_ROUTER_CUSTOM_PROMPT: custom,
+    }
+
+    captured_prompt: list[str] = []
+
+    async def capture_call(entity_id: str, prompt: str, timeout: int) -> str | None:
+        captured_prompt.append(prompt)
+        return '{"local_ha": false, "complexity": 1}'
+
+    with patch.object(conv_agent, "_call_existing_agent_for_routing", side_effect=capture_call):
+        await conv_agent._classify_with_router(router, "hello world")
+
+    assert len(captured_prompt) == 1
+    assert "{user_text}" not in captured_prompt[0]  # placeholder was expanded
+    assert "hello world" in captured_prompt[0]
+    assert "Reply ONLY" in captured_prompt[0]
+
+
+# ---------------------------------------------------------------------------
+# Test 121 — _classify_with_router: unknown agent type records failure + fallback
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_unknown_type_records_failure(
+    hass: HomeAssistant,
+) -> None:
+    """Unknown router agent type records a failure and applies the fallback."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = {
+        "id": "unknown-type-router",
+        CONF_AGENT_TYPE: "totally_unknown",
+        CONF_AGENT_NAME: "Mystery Router",
+        CONF_PRIORITY: 0,
+        CONF_TIMEOUT: 5,
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+    }
+
+    result = await conv_agent._classify_with_router(router, "some text")
+
+    assert result is not None
+    assert result.complexity == DEFAULT_ROUTER_COMPLEXITY
+    stats = conv_agent._statistics.get_agent_stats("unknown-type-router")
+    assert stats is not None
+    assert stats.failures == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 122 — _call_existing_agent_for_routing: entity not in states → None
+# ---------------------------------------------------------------------------
+
+
+async def test_call_existing_agent_entity_not_found(hass: HomeAssistant) -> None:
+    """_call_existing_agent_for_routing returns None if the entity state is absent."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    # hass.states won't have this entity
+    result = await conv_agent._call_existing_agent_for_routing(
+        "conversation.nonexistent", "classify this", 5
+    )
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 123 — _call_existing_agent_for_routing: service call times out → None
+# ---------------------------------------------------------------------------
+
+
+async def test_call_existing_agent_timeout(hass: HomeAssistant) -> None:
+    """_call_existing_agent_for_routing returns None when the service call times out."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    mock_hass = MagicMock()
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(side_effect=asyncio.TimeoutError)
+    conv_agent.hass = mock_hass
+
+    result = await conv_agent._call_existing_agent_for_routing("conversation.gemini", "classify", 1)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 124 — _call_existing_agent_for_routing: service call raises exception → None
+# ---------------------------------------------------------------------------
+
+
+async def test_call_existing_agent_exception(hass: HomeAssistant) -> None:
+    """_call_existing_agent_for_routing returns None when the service call raises."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    mock_hass = MagicMock()
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(side_effect=RuntimeError("service error"))
+    conv_agent.hass = mock_hass
+
+    result = await conv_agent._call_existing_agent_for_routing("conversation.gemini", "classify", 5)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 125 — _call_existing_agent_for_routing: service returns speech → text
+# ---------------------------------------------------------------------------
+
+
+async def test_call_existing_agent_success(hass: HomeAssistant) -> None:
+    """_call_existing_agent_for_routing extracts speech from the service response."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    service_response = {
+        "response": {"speech": {"plain": {"speech": '{"local_ha": false, "complexity": 10}'}}}
+    }
+    mock_hass = MagicMock()
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(return_value=service_response)
+    conv_agent.hass = mock_hass
+
+    result = await conv_agent._call_existing_agent_for_routing(
+        "conversation.gemini", "some prompt", 5
+    )
+    assert result == '{"local_ha": false, "complexity": 10}'
+
+
+# ---------------------------------------------------------------------------
+# Test 126 — _call_existing_agent_for_routing: empty speech → None
+# ---------------------------------------------------------------------------
+
+
+async def test_call_existing_agent_empty_speech(hass: HomeAssistant) -> None:
+    """_call_existing_agent_for_routing returns None when speech text is empty."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    service_response = {"response": {"speech": {"plain": {"speech": ""}}}}
+    mock_hass = MagicMock()
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(return_value=service_response)
+    conv_agent.hass = mock_hass
+
+    result = await conv_agent._call_existing_agent_for_routing(
+        "conversation.gemini", "some prompt", 5
+    )
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 127 — _call_existing_agent_for_routing: no response key → None
+# ---------------------------------------------------------------------------
+
+
+async def test_call_existing_agent_no_response_key(hass: HomeAssistant) -> None:
+    """_call_existing_agent_for_routing returns None when service returns no response key."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    mock_hass = MagicMock()
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(return_value={})
+    conv_agent.hass = mock_hass
+
+    result = await conv_agent._call_existing_agent_for_routing("conversation.gemini", "prompt", 5)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 128 — _classify_with_router: AGENT_TYPE_EXISTING unparseable JSON → fallback
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_existing_unparseable_json_fallback(
+    hass: HomeAssistant,
+) -> None:
+    """AGENT_TYPE_EXISTING router returning unparseable JSON applies configured fallback."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = {
+        "id": "parse-fail-router",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_NAME: "Bad JSON Router",
+        CONF_PRIORITY: 0,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: 5,
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+    }
+
+    with patch.object(
+        conv_agent,
+        "_call_existing_agent_for_routing",
+        new_callable=AsyncMock,
+        return_value="not valid json at all",
+    ):
+        result = await conv_agent._classify_with_router(router, "any query")
+
+    assert result is not None
+    assert result.complexity == DEFAULT_ROUTER_COMPLEXITY
+
+
+# ---------------------------------------------------------------------------
+# Test 129 — async_process: skip_routing sentinel lets all agents run in order
+# ---------------------------------------------------------------------------
+
+
+async def test_async_process_skip_routing_uses_all_agents(hass: HomeAssistant) -> None:
+    """When routing fallback=skip_routing fires, all processing agents are tried."""
+    local = _make_local_ha_agent(priority=5, agent_id="local-skip")
+    ollama = _make_ollama_agent(priority=50, agent_id="ollama-skip")
+    router = {
+        "id": "skip-router",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_IS_ROUTER: True,
+        CONF_AGENT_NAME: "Skip Router",
+        CONF_PRIORITY: 0,
+        CONF_AGENT_ENABLED: True,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: 5,
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_SKIP_ROUTING,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+    }
+    entry = _entry_with_agents(local, ollama, router)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    # Router returns skip sentinel
+    skip_decision = RouterDecision(local_ha=False, complexity=ROUTER_SKIP_ROUTING_COMPLEXITY)
+
+    with (
+        patch.object(
+            conv_agent, "_check_with_routers", new_callable=AsyncMock, return_value=skip_decision
+        ),
+        patch.object(
+            conv_agent,
+            "_try_processing_agents",
+            new_callable=AsyncMock,
+        ) as mock_try,
+    ):
+        ok_response = intent.IntentResponse(language="en")
+        ok_response.async_set_speech("ok")
+        mock_try.return_value = ConversationResult(response=ok_response, conversation_id=None)
+        await conv_agent.async_process(_make_input("some query"))
+
+    # Assert both agents were passed (skip means all pass through)
+    call_agents = mock_try.call_args[0][0]
+    agent_ids = [a["id"] for a in call_agents]
+    assert "local-skip" in agent_ids
+    assert "ollama-skip" in agent_ids

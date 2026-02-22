@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Set up NeuralBridge",
-        "description": "NeuralBridge provides priority-based AI agent routing for Home Assistant's Assist pipeline.\n\nAfter setup, you can add AI agents with different priorities through the integration options.\n\n**Priority System:**\n- Priority 0: Router/Filter agents (e.g. TinyLlama, Qwen for classification)\n- Priority 1–100: Processing agents (lower numbers are tried first)\n\nClick Submit to continue."
+        "description": "NeuralBridge provides priority-based AI agent routing for Home Assistant's Assist pipeline.\n\nAfter setup, you can add AI agents with different priorities through the integration options.\n\n**Priority System:**\n- Routing Agents: Classify and route requests (added via \"Add Routing Agent\")\n- Priority 1\u2013100: Processing agents (lower numbers are tried first)\n\nClick Submit to continue."
       }
     },
     "error": {
@@ -18,11 +18,24 @@
       "init": {
         "title": "Manage NeuralBridge",
         "menu_options": {
+          "default_prompt": "Configure Default Prompt",
           "add_agent": "Add New Agent",
+          "configure_routing_agent": "Configure Routing Agent",
           "manage_agents": "Manage Existing Agents",
           "configure_guard_rails": "Configure Guard Rails",
           "advanced_settings": "Advanced Settings",
-          "language_settings": "Language Settings"
+          "language_settings": "Language Settings",
+          "done": "Close"
+        }
+      },
+      "default_prompt": {
+        "title": "Configure Default Prompt",
+        "description": "This prompt is sent to all Ollama agents that do not have their own per-agent system prompt configured.",
+        "data": {
+          "default_prompt": "Default System Prompt"
+        },
+        "data_description": {
+          "default_prompt": "Instructions given to Ollama agents at the start of every conversation. Agents with their own system prompt will use that instead."
         }
       },
       "add_agent": {
@@ -84,6 +97,7 @@
           "priority": "Priority (0–100)",
           "timeout": "Timeout",
           "agent_cache_enabled": "Enable Response Cache",
+          "assist_mode": "Assist Mode",
           "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent"
         },
         "data_description": {
@@ -91,6 +105,7 @@
           "priority": "Priority for this agent (typically higher priority for local intent matching)",
           "timeout": "Maximum time to wait for a response from this agent",
           "agent_cache_enabled": "Cache responses from this agent.",
+          "assist_mode": "Only accept responses where HA successfully executed a home control intent (action_done). Non-intent responses fall through to lower-priority agents, enabling hybrid home control + LLM routing.",
           "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent"
         }
       },
@@ -101,11 +116,28 @@
           "agent_id": "Select Agent"
         }
       },
-      "manage_agent_action": {
-        "title": "Agent: {agent_name}",
-        "description": "Choose an action for this agent.",
+      "configure_routing_agent": {
+        "title": "Configure Routing Agent",
+        "description": "Select an installed Home Assistant conversation agent to act as the routing classifier. Only one routing agent is allowed.\n\n{routing_agent_info}",
         "data": {
-          "action": "Action"
+          "agent_name": "Agent Name",
+          "enabled": "Agent Enabled",
+          "entity_id": "Conversation Agent",
+          "timeout": "Routing Timeout",
+          "router_log_level": "Logging Level",
+          "router_custom_prompt": "Custom Classification Prompt",
+          "router_fallback": "Fallback Behaviour",
+          "delete_agent": "Delete Routing Agent"
+        },
+        "data_description": {
+          "agent_name": "A friendly name for the routing agent (e.g. 'Router')",
+          "enabled": "Toggle to enable or disable the routing agent without removing it",
+          "entity_id": "Select any installed Home Assistant conversation agent to use as the router (Gemini, Claude, ChatGPT, etc.)",
+          "timeout": "Maximum time to wait for a routing decision (keep short to avoid stalling the pipeline)",
+          "router_log_level": "Controls how much routing detail is written to the Home Assistant log",
+          "router_custom_prompt": "Override the built-in JSON classification prompt. Leave blank to use the default prompt. Must instruct the agent to return JSON with \"local_ha\" (bool) and \"complexity\" (0\u2013100) fields.",
+          "router_fallback": "What to do when the routing agent errors, times out, or returns an unparseable response",
+          "delete_agent": "Check this box and submit to permanently delete the routing agent (you will be asked to confirm)"
         }
       },
       "edit_agent_ollama": {
@@ -114,22 +146,26 @@
         "data": {
           "agent_name": "Agent Name",
           "priority": "Priority (0–100)",
+          "enabled": "Agent Enabled",
           "ollama_url": "Ollama URL",
           "ollama_model": "Model Name",
           "timeout": "Timeout",
           "system_prompt": "System Prompt",
           "agent_cache_enabled": "Enable Response Cache",
-          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent"
+          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "delete_agent": "Delete this Agent"
         },
         "data_description": {
           "agent_name": "A friendly name for this agent (e.g. 'Qwen Router', 'Llama3 Main')",
           "priority": "Priority 0 for router/filter, 1–100 for processing (lower = higher priority)",
+          "enabled": "Toggle to enable or disable this agent without removing it",
           "ollama_url": "The base URL of your Ollama instance",
           "ollama_model": "The Ollama model name (e.g. 'qwen2.5:0.5b', 'llama3:8b')",
           "timeout": "Maximum time to wait for a response from this agent",
           "system_prompt": "Optional system-level instructions prepended to every conversation. Leave blank for none.",
           "agent_cache_enabled": "Cache responses from this agent. Disable to always get a fresh response.",
-          "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent"
+          "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent",
+          "delete_agent": "Check this box and submit to permanently delete this agent (you will be asked to confirm)"
         }
       },
       "edit_agent_existing": {
@@ -138,18 +174,22 @@
         "data": {
           "agent_name": "Agent Name",
           "priority": "Priority (0–100)",
+          "enabled": "Agent Enabled",
           "entity_id": "Conversation Agent",
           "timeout": "Timeout",
           "agent_cache_enabled": "Enable Response Cache",
-          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent"
+          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "delete_agent": "Delete this Agent"
         },
         "data_description": {
           "agent_name": "A friendly name for this agent",
           "priority": "Priority 0 for router/filter, 1–100 for processing (lower = higher priority)",
+          "enabled": "Toggle to enable or disable this agent without removing it",
           "entity_id": "Select an existing conversation agent from your Home Assistant",
           "timeout": "Maximum time to wait for a response from this agent",
           "agent_cache_enabled": "Cache responses from this agent. Disable to always get a fresh response.",
-          "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent"
+          "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent",
+          "delete_agent": "Check this box and submit to permanently delete this agent (you will be asked to confirm)"
         }
       },
       "edit_agent_local": {
@@ -158,27 +198,45 @@
         "data": {
           "agent_name": "Agent Name",
           "priority": "Priority (0–100)",
+          "enabled": "Agent Enabled",
           "timeout": "Timeout",
           "agent_cache_enabled": "Enable Response Cache",
-          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent"
+          "assist_mode": "Assist Mode",
+          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "delete_agent": "Delete this Agent"
         },
         "data_description": {
           "agent_name": "A friendly name for this agent",
           "priority": "Priority for this agent (typically higher priority for local intent matching)",
+          "enabled": "Toggle to enable or disable this agent without removing it",
           "timeout": "Maximum time to wait for a response from this agent",
           "agent_cache_enabled": "Cache responses from this agent.",
-          "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent"
+          "assist_mode": "Only accept responses where HA successfully executed a home control intent (action_done). Non-intent responses fall through to lower-priority agents, enabling hybrid home control + LLM routing.",
+          "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent",
+          "delete_agent": "Check this box and submit to permanently delete this agent (you will be asked to confirm)"
+        }
+      },
+      "confirm_delete_agent": {
+        "title": "Delete Agent: {agent_name}",
+        "description": "Are you sure you want to permanently delete **{agent_name}**? This cannot be undone.",
+        "data": {
+          "confirm": "Yes, delete this agent"
+        },
+        "data_description": {
+          "confirm": "Toggle on and submit to confirm deletion, or leave off and submit to cancel"
         }
       },
       "advanced_settings": {
         "title": "Advanced Settings",
-        "description": "Configure the global response cache. Cached responses are returned instantly, bypassing all agents.",
+        "description": "Configure global NeuralBridge settings including home control and response caching.",
         "data": {
+          "enable_home_control": "Enable Home Control",
           "response_cache_enabled": "Enable Response Cache",
           "response_cache_ttl": "Cache TTL",
           "purge_cache_now": "Purge Cache Now"
         },
         "data_description": {
+          "enable_home_control": "Allow NeuralBridge to control Home Assistant devices. When enabled, the Assist UI shows 'This assistant can control your home'. Add a Home Assistant sub-agent at a low priority number to handle device commands, with LLM agents at higher priorities for general questions.",
           "response_cache_enabled": "Cache agent responses to avoid repeated calls for identical inputs.",
           "response_cache_ttl": "How long (in seconds) a cached response remains valid before expiring.",
           "purge_cache_now": "Immediately discard all currently cached responses. Useful after changing agent configurations."
@@ -186,6 +244,14 @@
       },
       "configure_guard_rails": {
         "title": "Configure Guard Rails",
+        "menu_options": {
+          "guard_rails_settings": "Guard Rails Settings",
+          "configure_guard_rail_rules": "Configure Guard Rail Rules",
+          "back_to_main": "Back"
+        }
+      },
+      "guard_rails_settings": {
+        "title": "Guard Rails Settings",
         "description": "{info}",
         "data": {
           "guard_rail_enabled": "Enable Guard Rails",
@@ -213,7 +279,8 @@
       "cannot_connect": "Failed to connect to Ollama. Check the URL and ensure Ollama is running.",
       "model_not_found": "The specified model was not found in your Ollama instance. Please check the model name or pull it with 'ollama pull'.",
       "invalid_url_scheme": "Invalid URL scheme. Only http:// and https:// are supported.",
-      "no_router_agent": "No router agent (priority 0) is configured. Add a lightweight local agent (e.g. TinyLlama, Qwen) with priority 0 before enabling guard rails.",
+      "entity_not_found": "The selected conversation agent was not found. Ensure the integration is loaded and the entity is available.",
+      "no_router_agent": "No routing agent is configured. Use \"Configure Routing Agent\" to select a conversation agent before enabling guard rails.",
       "unknown": "An unexpected error occurred. Check the logs for details."
     }
   },

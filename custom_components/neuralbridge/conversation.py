@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from homeassistant.components.conversation import (
     ConversationEntity,
+    ConversationEntityFeature,
     ConversationInput,
     ConversationResult,
 )
@@ -21,11 +23,14 @@ from .const import (
     AGENT_TYPE_EXISTING,
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
+    CONF_AGENT_ASSIST_MODE,
     CONF_AGENT_CACHE_ENABLED,
     CONF_AGENT_ENABLED,
     CONF_AGENT_NAME,
     CONF_AGENT_TYPE,
     CONF_AGENTS,
+    CONF_DEFAULT_PROMPT,
+    CONF_ENABLE_HOME_CONTROL,
     CONF_ENTITY_ID,
     CONF_GUARD_RAIL_ACTION,
     CONF_GUARD_RAIL_AI_THRESHOLD,
@@ -34,21 +39,29 @@ from .const import (
     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
     CONF_GUARD_RAIL_RULES,
     CONF_GUARD_RAIL_USE_DETOXIFY,
+    CONF_IS_ROUTER,
     CONF_LANGUAGE,
     CONF_MAX_RETRIES,
     CONF_OLLAMA_MODEL,
     CONF_OLLAMA_URL,
     CONF_PRIORITY,
     CONF_RETRY_BASE_DELAY,
+    CONF_ROUTER_CUSTOM_PROMPT,
+    CONF_ROUTER_FALLBACK,
+    CONF_ROUTER_LOG_LEVEL,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
+    DATA_CIRCUIT_BREAKER,
     DATA_RESPONSE_CACHE,
     DATA_SESSION_MEMORY,
     DATA_STATISTICS,
+    DEFAULT_AGENT_ASSIST_MODE,
     DEFAULT_AGENT_CACHE_ENABLED,
     DEFAULT_AGENT_ENABLED,
     DEFAULT_CIRCUIT_BREAKER_COOLDOWN,
     DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
+    DEFAULT_DEFAULT_PROMPT,
+    DEFAULT_ENABLE_HOME_CONTROL,
     DEFAULT_GUARD_RAIL_ACTION,
     DEFAULT_GUARD_RAIL_AI_THRESHOLD,
     DEFAULT_GUARD_RAIL_DETOXIFY_THRESHOLD,
@@ -60,6 +73,11 @@ from .const import (
     DEFAULT_RESPONSE_CACHE_ENABLED,
     DEFAULT_RESPONSE_CACHE_TTL,
     DEFAULT_RETRY_BASE_DELAY,
+    DEFAULT_ROUTER_COMPLEXITY,
+    DEFAULT_ROUTER_CUSTOM_PROMPT,
+    DEFAULT_ROUTER_FALLBACK,
+    DEFAULT_ROUTER_LOG_LEVEL,
+    DEFAULT_ROUTER_TIMEOUT,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     DOMAIN,
@@ -73,6 +91,14 @@ from .const import (
     MSG_NO_AGENTS_CONFIGURED,
     PRIORITY_ROUTER,
     ROUTER_CLASSIFICATION_PROMPT,
+    ROUTER_FALLBACK_BLOCK,
+    ROUTER_FALLBACK_SKIP_ROUTING,
+    ROUTER_LOG_LEVEL_COMPLEXITY,
+    ROUTER_LOG_LEVEL_DEBUG,
+    ROUTER_LOG_LEVEL_DEBUG_QUERY,
+    ROUTER_RESPONSE_KEY_COMPLEXITY,
+    ROUTER_RESPONSE_KEY_LOCAL_HA,
+    ROUTER_SKIP_ROUTING_COMPLEXITY,
     SIGNAL_STATS_UPDATED,
 )
 from .guard_rail import GuardRailCache, GuardRailChecker
@@ -88,6 +114,157 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Router decision dataclass
+# ---------------------------------------------------------------------------
+
+
+class RouterDecision:
+    """Immutable classification result produced by a router agent.
+
+    Attributes:
+        local_ha:   True when the request is a home-automation / device-control
+                    command that should be handled by a LOCAL_HA agent.
+        complexity: Integer 1-100 indicating estimated request complexity.
+                    Higher values suggest cloud-capable agents are preferred.
+    """
+
+    __slots__ = ("complexity", "local_ha")
+
+    # Class-level annotations required for mypy __slots__ attribute resolution
+    complexity: int
+    local_ha: bool
+
+    def __init__(self, local_ha: bool, complexity: int) -> None:
+        """Initialise a RouterDecision.
+
+        Args:
+            local_ha:   Whether the request targets local home-automation.
+            complexity: Estimated complexity score (1-100).
+        """
+        object.__setattr__(self, "local_ha", local_ha)
+        object.__setattr__(self, "complexity", complexity)
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AttributeError("RouterDecision is immutable")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, RouterDecision):
+            return NotImplemented
+        return self.local_ha == other.local_ha and self.complexity == other.complexity
+
+    def __hash__(self) -> int:
+        return hash((self.local_ha, self.complexity))
+
+    def __repr__(self) -> str:
+        return f"RouterDecision(local_ha={self.local_ha!r}, complexity={self.complexity!r})"
+
+
+# ---------------------------------------------------------------------------
+# Module-level routing helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_router_response(raw: str) -> RouterDecision | None:
+    """Parse a JSON router-agent response into a RouterDecision.
+
+    Strips optional Markdown code fences, extracts the first ``{...}`` block,
+    then parses it.  Returns ``None`` when:
+
+    * The response cannot be parsed as JSON.
+    * ``complexity`` is 0 — the router signal to block the request.
+
+    A ``complexity`` outside 1-100 is clamped to that range (after ruling out 0).
+
+    Args:
+        raw: The raw string returned by the Ollama router model.
+
+    Returns:
+        A RouterDecision if the response is valid and not a block signal, else None.
+    """
+
+    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        # Remove opening fence
+        lines = lines[1:]
+        # Remove closing fence if present
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    # Find the first {...} block
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        _LOGGER.debug("Router response contains no JSON object")
+        return None
+
+    json_text = text[start : end + 1]
+    try:
+        data = json.loads(json_text)
+    except (json.JSONDecodeError, ValueError) as err:
+        _LOGGER.debug("Router response JSON parse error: %s", err)
+        return None
+
+    if not isinstance(data, dict):  # pragma: no cover
+        _LOGGER.debug("Router response JSON is not an object")  # pragma: no cover
+        return None  # pragma: no cover
+
+    raw_complexity = data.get(ROUTER_RESPONSE_KEY_COMPLEXITY)
+    if not isinstance(raw_complexity, (int, float)) or ROUTER_RESPONSE_KEY_LOCAL_HA not in data:
+        _LOGGER.debug("Router response missing required 'complexity' or 'local_ha' field")
+        return None
+
+    complexity = int(raw_complexity)
+
+    # complexity == 0 is the router BLOCK signal; preserved for caller to handle
+    if complexity == 0:
+        return RouterDecision(local_ha=False, complexity=0)
+
+    # Clamp to 1-100
+    complexity = max(1, min(100, complexity))
+
+    local_ha = bool(data[ROUTER_RESPONSE_KEY_LOCAL_HA])
+
+    return RouterDecision(local_ha=local_ha, complexity=complexity)
+
+
+def _apply_router_decision(
+    decision: RouterDecision,
+    processing_agents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Filter and reorder processing agents based on the router decision.
+
+    When ``decision.local_ha`` is ``True``, LOCAL_HA agents are promoted to the
+    front of the list so they are tried first.  When ``False``, LOCAL_HA agents
+    are excluded entirely because the router determined the request does not
+    require home-automation handling.
+
+    A ``decision.complexity`` of ``ROUTER_SKIP_ROUTING_COMPLEXITY`` (-1) is a
+    special sentinel meaning "skip routing" — all processing agents are returned
+    unchanged in their original priority order.
+
+    Args:
+        decision:          The RouterDecision produced by the router agent.
+        processing_agents: Priority-sorted list of processing agent configs.
+
+    Returns:
+        Filtered and/or reordered list of processing agent configs.
+    """
+    if decision.complexity == ROUTER_SKIP_ROUTING_COMPLEXITY:
+        # Fallback=skip_routing — bypass agent filtering, try everything
+        return list(processing_agents)
+    if decision.local_ha:
+        # Promote LOCAL_HA agents to front; keep original order within each group
+        local = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) == AGENT_TYPE_LOCAL_HA]
+        others = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) != AGENT_TYPE_LOCAL_HA]
+        return local + others
+    # Exclude LOCAL_HA agents — request is not a home-automation command
+    return [a for a in processing_agents if a.get(CONF_AGENT_TYPE) != AGENT_TYPE_LOCAL_HA]
 
 
 async def async_setup_entry(
@@ -113,12 +290,15 @@ class NeuralBridgeAgent(ConversationEntity):
         self._guard_rail_checker: GuardRailChecker | None = None
         self._guard_rail_rules_snapshot: dict[str, list[str]] | None = None
         self._guard_rail_cache = GuardRailCache()
-        self._circuit_breaker = CircuitBreaker(
-            failure_threshold=DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
-            cooldown_seconds=DEFAULT_CIRCUIT_BREAKER_COOLDOWN,
-        )
         # Shared objects created by __init__.py and stored in hass.data
         entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+        self._circuit_breaker: CircuitBreaker = entry_data.get(
+            DATA_CIRCUIT_BREAKER,
+            CircuitBreaker(
+                failure_threshold=DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
+                cooldown_seconds=DEFAULT_CIRCUIT_BREAKER_COOLDOWN,
+            ),
+        )
         self._statistics: AgentStatistics = entry_data.get(DATA_STATISTICS, AgentStatistics())
         self._response_cache: ResponseCache = entry_data.get(
             DATA_RESPONSE_CACHE,
@@ -150,6 +330,17 @@ class NeuralBridgeAgent(ConversationEntity):
         """
         return "*"
 
+    @property
+    def supported_features(self) -> ConversationEntityFeature:
+        """Return supported features.
+
+        Declares home-control capability when the global 'Enable Home Control'
+        toggle is on, causing HA to show 'This assistant can control your home'.
+        """
+        if self._get_config().get(CONF_ENABLE_HOME_CONTROL, DEFAULT_ENABLE_HOME_CONTROL):
+            return ConversationEntityFeature.CONTROL
+        return ConversationEntityFeature(0)
+
     def _get_config(self) -> dict[str, Any]:
         """Return a merged view of data + options from the config entry.
 
@@ -164,8 +355,23 @@ class NeuralBridgeAgent(ConversationEntity):
 
     async def async_process(self, user_input: ConversationInput) -> ConversationResult:
         """Process a user input through the priority-based routing system."""
-        _LOGGER.debug("Processing input: %s", user_input.text)
+        _LOGGER.debug("Processing input: %d chars", len(user_input.text))
+        result = await self._compute_result(user_input)
+        self._maybe_add_to_chat_log(result)
+        return result
 
+    async def _compute_result(self, user_input: ConversationInput) -> ConversationResult:
+        """Compute the conversation result for the given user input.
+
+        Implements priority-based routing: confirmation check → cache →
+        router agents → processing agents.
+
+        Args:
+            user_input: The user's conversation input.
+
+        Returns:
+            The ConversationResult to return to the caller.
+        """
         # Step 1: Handle confirmation response for a pending guard rail check
         confirmation_result = await self._handle_confirmation_check(user_input)
         if confirmation_result is not None:
@@ -191,20 +397,59 @@ class NeuralBridgeAgent(ConversationEntity):
             )
 
         sorted_agents = sorted(agents, key=lambda x: x.get(CONF_PRIORITY, 50))
-        router_agents = [a for a in sorted_agents if a.get(CONF_PRIORITY) == PRIORITY_ROUTER]
-        processing_agents = [a for a in sorted_agents if a.get(CONF_PRIORITY, 0) > PRIORITY_ROUTER]
+        # Identify router agents: first-class is_router flag; falls back to priority==0
+        router_agents = [
+            a
+            for a in sorted_agents
+            if a.get(CONF_IS_ROUTER, False) or a.get(CONF_PRIORITY) == PRIORITY_ROUTER
+        ]
+        processing_agents = [
+            a
+            for a in sorted_agents
+            if not (a.get(CONF_IS_ROUTER, False) or a.get(CONF_PRIORITY) == PRIORITY_ROUTER)
+        ]
 
         if router_agents:
-            should_process = await self._check_with_routers(user_input, router_agents)
-            if not should_process:
-                _LOGGER.debug("Router agents determined input should not be processed")
+            decision = await self._check_with_routers(user_input, router_agents)
+            if decision is None:
+                _LOGGER.debug("Router agents blocked the request")
                 return self._create_error_result(
                     self._localized("responses", "router_blocked"),
                     user_input.conversation_id,
                 )
+            processing_agents = _apply_router_decision(decision, processing_agents)
 
         # Step 6: Try processing agents in priority order
         return await self._try_processing_agents(processing_agents, user_input)
+
+    def _maybe_add_to_chat_log(self, result: ConversationResult) -> None:
+        """Add the assistant response to the active ChatLog if one exists.
+
+        In Home Assistant 2025.2+, the conversation framework maintains a ChatLog
+        to track the conversation history.  Our response must be recorded as an
+        AssistantContent entry so HA does not generate a WARNING that includes
+        the user's message text (PII).
+
+        This is a no-op on HA versions that do not ship the ChatLog module.
+
+        Args:
+            result: The ConversationResult containing the response to record.
+        """
+        try:
+            from homeassistant.components.conversation.chat_log import (  # noqa: PLC0415
+                AssistantContent,
+                current_chat_log,
+            )
+        except ImportError:
+            return
+
+        if (chat_log := current_chat_log.get()) is None:
+            return
+
+        speech = self._extract_response_text(result)
+        chat_log.async_add_assistant_content_without_tools(
+            AssistantContent(agent_id=self.entity_id, content=speech or None)
+        )
 
     async def _handle_confirmation_check(
         self, user_input: ConversationInput
@@ -428,86 +673,309 @@ class NeuralBridgeAgent(ConversationEntity):
 
     async def _check_with_routers(
         self, user_input: ConversationInput, router_agents: list[dict[str, Any]]
-    ) -> bool:
-        """Check with router/filter agents whether the input should be processed.
+    ) -> RouterDecision | None:
+        """Query router agents for a routing decision.
 
-        Each router agent is asked to classify the input as PASS or BLOCK.
-        The first BLOCK response causes the method to return False immediately.
-        Falls back to True (PASS) if no router is able to classify.
+        Each router agent is asked to classify the input via the JSON prompt.
+        The first agent that returns ``None`` (block signal) causes the method
+        to return ``None`` immediately, short-circuiting remaining routers.
+        Falls back to a default :class:`RouterDecision` if every router errors
+        out, so that a broken router never silences the assistant (fail-open).
 
         Args:
             user_input: The user's conversation input.
-            router_agents: List of priority-0 agent configurations.
+            router_agents: List of router agent configurations.
 
         Returns:
-            True if input should proceed; False to block it.
+            A RouterDecision if the request should proceed (with optional hints),
+            or None to block the request.
         """
+        last_decision: RouterDecision | None = RouterDecision(
+            local_ha=False, complexity=DEFAULT_ROUTER_COMPLEXITY
+        )
+        all_errors = True
         for router_config in router_agents:
             _LOGGER.debug("Checking with router: %s", router_config.get(CONF_AGENT_NAME))
-            should_pass = await self._classify_with_router(router_config, user_input.text)
-            if not should_pass:
+            decision = await self._classify_with_router(router_config, user_input.text)
+            if decision is None:
                 _LOGGER.info(
                     "Router agent '%s' blocked the request",
                     router_config.get(CONF_AGENT_NAME),
                 )
-                return False
-        return True
+                return None
+            # A non-None decision means the router produced a valid classification
+            all_errors = False
+            last_decision = decision
 
-    async def _classify_with_router(self, router_config: dict[str, Any], user_text: str) -> bool:
-        """Ask a router (priority-0) Ollama agent to classify user text.
+        # If every router errored (all_errors still True), last_decision is the
+        # fail-open default; otherwise it is the last successful classification.
+        _ = all_errors  # variable consumed implicitly via last_decision logic above
+        return last_decision
 
-        Sends a one-shot classification prompt via ``OllamaClient.generate()``
-        and looks for ``BLOCK`` in the response.  Any failure — wrong agent type,
-        missing configuration, network error, or empty response — defaults to
-        ``True`` (fail-open) so a broken router never silences the assistant.
+    async def _classify_with_router(
+        self, router_config: dict[str, Any], user_text: str
+    ) -> RouterDecision | None:
+        """Ask a router agent to classify user text via a JSON prompt.
+
+        Supports both Ollama-based and Home Assistant conversation agent routers.
+        The classification prompt is sent to the agent and the JSON response is
+        parsed into a :class:`RouterDecision`.
+
+        Logging verbosity is controlled by ``CONF_ROUTER_LOG_LEVEL``:
+
+        * ``none`` — only warnings and errors.
+        * ``complexity_only`` — also log the complexity score.
+        * ``debug_info`` — log the full routing decision.
+        * ``debug_with_query`` — additionally log the query text (⚠ logs PII).
+
+        Failure modes (wrong agent type, missing config, network error, empty or
+        unparseable response) are handled according to ``CONF_ROUTER_FALLBACK``.
+
+        Only a ``complexity == 0`` JSON response is treated as an explicit block
+        signal, regardless of the fallback setting.
 
         Args:
             router_config: Configuration dict for the router agent.
             user_text: The raw user input text to classify.
 
         Returns:
-            True if the input should be processed (PASS), False to block it.
+            A RouterDecision on success or fallback, None to block the request.
         """
-        if router_config.get(CONF_AGENT_TYPE) != AGENT_TYPE_OLLAMA:
-            _LOGGER.debug(
-                "Non-Ollama router agent '%s' — defaulting to PASS",
-                router_config.get(CONF_AGENT_NAME),
-            )
-            return True
-
         agent_id: str = router_config.get("id", "")
-        ollama_url: str = router_config.get(CONF_OLLAMA_URL, "")
-        ollama_model: str = router_config.get(CONF_OLLAMA_MODEL, "")
-        timeout: int = router_config.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+        agent_name: str = router_config.get(CONF_AGENT_NAME, "Unknown")
+        log_level: str = router_config.get(CONF_ROUTER_LOG_LEVEL, DEFAULT_ROUTER_LOG_LEVEL)
+        fallback: str = router_config.get(CONF_ROUTER_FALLBACK, DEFAULT_ROUTER_FALLBACK)
 
-        if not ollama_url or not ollama_model:
-            _LOGGER.warning(
-                "Router agent '%s' is missing URL or model — defaulting to PASS",
-                router_config.get(CONF_AGENT_NAME),
-            )
-            return True
+        self._statistics.record_request(agent_id, agent_name)
 
-        if agent_id not in self._ollama_clients:
-            self._ollama_clients[agent_id] = OllamaClient(ollama_url, ollama_model, timeout)
+        custom_prompt: str = (
+            router_config.get(CONF_ROUTER_CUSTOM_PROMPT, DEFAULT_ROUTER_CUSTOM_PROMPT) or ""
+        ).strip()
+        prompt_template = custom_prompt if custom_prompt else ROUTER_CLASSIFICATION_PROMPT
+        prompt = prompt_template.replace("{user_text}", user_text)
 
-        client = self._ollama_clients[agent_id]
-        prompt = ROUTER_CLASSIFICATION_PROMPT.format(user_text=user_text)
-        response = await client.generate(prompt)
+        if log_level == ROUTER_LOG_LEVEL_DEBUG_QUERY:
+            _LOGGER.debug("Router '%s' classifying query: %s", agent_name, user_text)
+
+        start_time = time.monotonic()
+        response = await self._call_router_backend(router_config, prompt)
+        elapsed_ms = (time.monotonic() - start_time) * 1000
 
         if not response:
-            _LOGGER.warning(
-                "Router agent '%s' returned no response — defaulting to PASS",
-                router_config.get(CONF_AGENT_NAME),
-            )
-            return True
+            _LOGGER.warning("Router '%s' returned no response — applying fallback", agent_name)
+            return self._record_router_failure_and_fallback(agent_id, fallback)
 
-        decision = response.strip().upper()
-        _LOGGER.debug(
-            "Router agent '%s' decision: %s",
-            router_config.get(CONF_AGENT_NAME),
-            decision[:10],  # Truncate; avoids echoing full user text in verbose model output
+        parsed = _parse_router_response(response)
+        if parsed is None:
+            _LOGGER.warning(
+                "Router '%s' returned unparseable response — applying fallback", agent_name
+            )
+            return self._record_router_failure_and_fallback(agent_id, fallback)
+
+        self._statistics.record_success(agent_id, elapsed_ms)
+        if parsed.complexity == 0:
+            self._statistics.record_block(agent_id)
+            self._dispatch_stats_updated()
+            return None
+
+        self._log_router_decision(log_level, agent_name, parsed)
+        self._dispatch_stats_updated()
+        return parsed
+
+    def _dispatch_stats_updated(self) -> None:
+        """Fire the stats-updated dispatcher signal for this config entry."""
+        async_dispatcher_send(
+            self.hass,
+            SIGNAL_STATS_UPDATED.format(entry_id=self._config_entry.entry_id),
         )
-        return "BLOCK" not in decision
+
+    def _record_router_failure_and_fallback(
+        self, agent_id: str, fallback: str
+    ) -> RouterDecision | None:
+        """Record a routing failure, fire the stats signal, and return the fallback.
+
+        Args:
+            agent_id: The unique ID of the router agent that failed.
+            fallback: One of the ``ROUTER_FALLBACK_*`` constants.
+
+        Returns:
+            A :class:`RouterDecision` for fail-open / skip-routing fallbacks, or
+            ``None`` when ``fallback == ROUTER_FALLBACK_BLOCK``.
+        """
+        self._statistics.record_failure(agent_id)
+        self._dispatch_stats_updated()
+        return self._router_fallback(fallback)
+
+    def _log_router_decision(self, log_level: str, agent_name: str, parsed: RouterDecision) -> None:
+        """Emit a routing-decision log at the configured verbosity level.
+
+        Args:
+            log_level: One of the ``ROUTER_LOG_LEVEL_*`` constants.
+            agent_name: Display name of the router agent (for log messages).
+            parsed: The :class:`RouterDecision` returned by the router.
+        """
+        if log_level == ROUTER_LOG_LEVEL_COMPLEXITY:
+            _LOGGER.info("Router '%s' complexity score: %d", agent_name, parsed.complexity)
+        elif log_level in (ROUTER_LOG_LEVEL_DEBUG, ROUTER_LOG_LEVEL_DEBUG_QUERY):
+            _LOGGER.debug(
+                "Router '%s' decision: local_ha=%s complexity=%d",
+                agent_name,
+                parsed.local_ha,
+                parsed.complexity,
+            )
+
+    async def _call_router_backend(self, router_config: dict[str, Any], prompt: str) -> str | None:
+        """Invoke the appropriate router back-end and return the raw response text.
+
+        Routes to the Ollama client for ``AGENT_TYPE_OLLAMA`` configs, or
+        to the HA conversation service for ``AGENT_TYPE_EXISTING`` /
+        ``AGENT_TYPE_LOCAL_HA`` configs.  Returns ``None`` for unknown types
+        or missing required configuration.
+
+        Args:
+            router_config: Configuration dict for the router agent.
+            prompt: The fully-formatted classification prompt.
+
+        Returns:
+            The raw text response from the router back-end, or None on error.
+        """
+        agent_type: str = router_config.get(CONF_AGENT_TYPE, "")
+        agent_name: str = router_config.get(CONF_AGENT_NAME, "Unknown")
+        agent_id: str = router_config.get("id", "")
+        timeout: int = router_config.get(CONF_TIMEOUT, DEFAULT_ROUTER_TIMEOUT)
+
+        if agent_type == AGENT_TYPE_OLLAMA:
+            return await self._call_ollama_router(
+                router_config, prompt, agent_id, agent_name, timeout
+            )
+
+        if agent_type in (AGENT_TYPE_EXISTING, AGENT_TYPE_LOCAL_HA):
+            entity_id: str = router_config.get(CONF_ENTITY_ID, "")
+            if not entity_id:
+                _LOGGER.warning(
+                    "Router '%s' has no entity_id configured — applying fallback", agent_name
+                )
+                return None
+            return await self._call_existing_agent_for_routing(entity_id, prompt, timeout)
+
+        _LOGGER.debug(
+            "Router '%s' has unknown type '%s' — applying fallback", agent_name, agent_type
+        )
+        return None
+
+    async def _call_ollama_router(
+        self,
+        router_config: dict[str, Any],
+        prompt: str,
+        agent_id: str,
+        agent_name: str,
+        timeout: int,
+    ) -> str | None:
+        """Call the Ollama back-end for a routing classification.
+
+        Args:
+            router_config: Configuration dict for the Ollama router agent.
+            prompt: The fully-formatted classification prompt.
+            agent_id: Unique ID for the Ollama client cache key.
+            agent_name: Display name used in warning messages.
+            timeout: Request timeout in seconds.
+
+        Returns:
+            The raw text response, or None if URL/model are not configured.
+        """
+        ollama_url: str = router_config.get(CONF_OLLAMA_URL, "")
+        ollama_model: str = router_config.get(CONF_OLLAMA_MODEL, "")
+        if not ollama_url or not ollama_model:
+            _LOGGER.warning(
+                "Router '%s' (Ollama) is missing URL or model — applying fallback", agent_name
+            )
+            return None
+        if agent_id not in self._ollama_clients:
+            self._ollama_clients[agent_id] = OllamaClient(ollama_url, ollama_model, timeout)
+        return await self._ollama_clients[agent_id].generate(prompt)
+
+    def _router_fallback(self, fallback: str) -> RouterDecision | None:
+        """Return the fallback RouterDecision (or None to block) based on the config.
+
+        Called when a router agent errors, times out, or returns an unparseable
+        response.  Statistics and dispatcher signals should already have been
+        sent by the caller before invoking this method.
+
+        Args:
+            fallback: One of the ``ROUTER_FALLBACK_*`` constants.
+
+        Returns:
+            A RouterDecision for fail-open or skip-routing fallbacks, or
+            ``None`` when ``fallback == ROUTER_FALLBACK_BLOCK``.
+        """
+        if fallback == ROUTER_FALLBACK_SKIP_ROUTING:
+            return RouterDecision(local_ha=False, complexity=ROUTER_SKIP_ROUTING_COMPLEXITY)
+        if fallback == ROUTER_FALLBACK_BLOCK:
+            return None
+        return RouterDecision(local_ha=False, complexity=DEFAULT_ROUTER_COMPLEXITY)
+
+    async def _call_existing_agent_for_routing(
+        self, entity_id: str, prompt: str, timeout: int
+    ) -> str | None:
+        """Send the classification prompt to an installed HA conversation agent.
+
+        The agent is called via the ``conversation.process`` service with the
+        formatted classification prompt as the user message.  The text of the
+        first speech response is returned for JSON parsing.
+
+        Args:
+            entity_id: The conversation entity to call (e.g.
+                       ``conversation.google_generative_ai_conversation_1``).
+            prompt: The fully-formatted classification prompt text.
+            timeout: Maximum seconds to wait for a response.
+
+        Returns:
+            The response speech text, or None on error/timeout.
+        """
+        if not self.hass.states.get(entity_id):
+            _LOGGER.warning("Routing agent entity %s not found", entity_id)
+            return None
+
+        try:
+            async with asyncio.timeout(timeout):
+                response = await self.hass.services.async_call(
+                    CONVERSATION_DOMAIN,
+                    "process",
+                    {
+                        "text": prompt,
+                        "agent_id": entity_id,
+                        # Fresh conversation each time — routing must be stateless
+                        "conversation_id": None,
+                    },
+                    blocking=True,
+                    return_response=True,
+                )
+        except asyncio.TimeoutError:
+            _LOGGER.warning("Routing agent %s timed out after %d seconds", entity_id, timeout)
+            return None
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.error("Error calling routing agent %s: %s", entity_id, err)
+            return None
+
+        return self._extract_speech_from_response(response)
+
+    def _extract_speech_from_response(self, response: Any) -> str | None:
+        """Extract the speech text from a ``conversation.process`` service call response.
+
+        Traverses ``response["response"]["speech"]["plain"]["speech"]``.
+        Returns the speech text if present and non-empty, otherwise ``None``.
+
+        Args:
+            response: The raw return value from ``hass.services.async_call``.
+
+        Returns:
+            The speech text string, or None if absent, empty, or malformed.
+        """
+        try:
+            speech_text = response["response"]["speech"]["plain"]["speech"]
+            return str(speech_text) if speech_text else None
+        except (KeyError, TypeError, AttributeError):
+            return None
 
     async def _try_agent(
         self, agent_config: dict[str, Any], user_input: ConversationInput
@@ -576,7 +1044,11 @@ class NeuralBridgeAgent(ConversationEntity):
         ollama_url = agent_config.get(CONF_OLLAMA_URL)
         ollama_model = agent_config.get(CONF_OLLAMA_MODEL)
         timeout = agent_config.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
-        system_prompt: str = agent_config.get(CONF_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT)
+        agent_prompt: str = agent_config.get(CONF_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT)
+        global_default: str = self._config_entry.data.get(
+            CONF_DEFAULT_PROMPT, DEFAULT_DEFAULT_PROMPT
+        )
+        system_prompt: str = agent_prompt if agent_prompt else global_default
 
         if not isinstance(ollama_url, str) or not isinstance(ollama_model, str):
             return None
@@ -646,6 +1118,23 @@ class NeuralBridgeAgent(ConversationEntity):
                 return None
 
             response_section: Any = response["response"]
+
+            # In assist mode, only accept responses where HA successfully executed an
+            # intent (response_type == "action_done").  Any other response type means
+            # HA didn't understand the request, so we return None and let the router
+            # continue to the next lower-priority agent (e.g. Ollama / Gemini).
+            assist_mode = agent_config.get(CONF_AGENT_ASSIST_MODE, DEFAULT_AGENT_ASSIST_MODE)
+            if assist_mode:
+                response_type = str(response_section.get("response_type", ""))
+                if response_type != "action_done":
+                    _LOGGER.debug(
+                        "Agent %s assist mode: response_type '%s' is not action_done, "
+                        "falling through to next agent",
+                        entity_id,
+                        response_type,
+                    )
+                    return None
+
             speech_text = str(response_section.get("speech", {}).get("plain", {}).get("speech", ""))
             if speech_text:
                 return self._create_result(speech_text, user_input.conversation_id)

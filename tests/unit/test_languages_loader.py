@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import yaml
 
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+
 import custom_components.neuralbridge.languages_loader as ll
 from custom_components.neuralbridge.languages_loader import (
     _load_language_file,
+    _preload_all_sync,
     _resolve_keys,
+    _state,
+    async_preload_all_languages,
     get_language_data,
     get_string,
     list_available_languages,
@@ -197,7 +204,10 @@ class TestListAvailableLanguages:
         """Returns [] when the languages directory does not exist."""
         nonexistent = tmp_path / "no_languages"
 
-        with patch("custom_components.neuralbridge.languages_loader._LANGUAGES_DIR", nonexistent):
+        with (
+            patch("custom_components.neuralbridge.languages_loader._LANGUAGES_DIR", nonexistent),
+            patch.dict(_state, {"languages_list_cache": None}),
+        ):
             result = list_available_languages()
 
         assert result == []
@@ -210,6 +220,7 @@ class TestListAvailableLanguages:
         with (
             patch("custom_components.neuralbridge.languages_loader._LANGUAGES_DIR", tmp_path),
             patch.dict(ll._cache, {}, clear=True),
+            patch.dict(_state, {"languages_list_cache": None}),
         ):
             result = list_available_languages()
 
@@ -225,9 +236,105 @@ class TestListAvailableLanguages:
         with (
             patch("custom_components.neuralbridge.languages_loader._LANGUAGES_DIR", tmp_path),
             patch.dict(ll._cache, {}, clear=True),
+            patch.dict(_state, {"languages_list_cache": None}),
         ):
             result = list_available_languages()
 
         assert len(result) == 1
         assert result[0]["code"] == "nolang"
         assert result[0]["name"] == "nolang"
+
+    def test_returns_cache_when_populated(self) -> None:
+        """Returns the cached list immediately without any filesystem I/O."""
+        cached = [{"code": "xx", "name": "Cached Lang"}]
+        with patch.dict(_state, {"languages_list_cache": cached}):
+            result = list_available_languages()
+        assert result is cached
+
+
+# ---------------------------------------------------------------------------
+# _preload_all_sync
+# ---------------------------------------------------------------------------
+
+
+class TestPreloadAllSync:
+    """Tests for _preload_all_sync."""
+
+    def test_returns_empty_when_dir_missing(self, tmp_path: Path) -> None:
+        """Returns empty data and list when the languages directory does not exist."""
+        nonexistent = tmp_path / "no_dir"
+        with patch.object(ll, "_LANGUAGES_DIR", nonexistent):
+            language_data, languages_list = _preload_all_sync()
+        assert language_data == {}
+        assert languages_list == []
+
+    def test_loads_yaml_files_into_language_data(self, tmp_path: Path) -> None:
+        """Returns parsed YAML data for every file found in the languages directory."""
+        lang_file = tmp_path / "test_lang.yaml"
+        lang_file.write_text("language:\n  name: Test Language\n", encoding="utf-8")
+        with patch.object(ll, "_LANGUAGES_DIR", tmp_path):
+            language_data, _ = _preload_all_sync()
+        assert "test_lang" in language_data
+        assert language_data["test_lang"]["language"]["name"] == "Test Language"
+
+    def test_builds_correct_languages_list(self, tmp_path: Path) -> None:
+        """Returns the correct code/name metadata list."""
+        lang_file = tmp_path / "test_lang.yaml"
+        lang_file.write_text("language:\n  name: Test Language\n", encoding="utf-8")
+        with patch.object(ll, "_LANGUAGES_DIR", tmp_path):
+            _, languages_list = _preload_all_sync()
+        assert len(languages_list) == 1
+        assert languages_list[0]["code"] == "test_lang"
+        assert languages_list[0]["name"] == "Test Language"
+
+    def test_uses_code_as_name_when_missing(self, tmp_path: Path) -> None:
+        """Uses the language code as the display name when language.name is absent."""
+        lang_file = tmp_path / "nolang.yaml"
+        lang_file.write_text("responses:\n  greeting: Hi\n", encoding="utf-8")
+        with patch.object(ll, "_LANGUAGES_DIR", tmp_path):
+            _, languages_list = _preload_all_sync()
+        assert languages_list[0]["name"] == "nolang"
+
+
+# ---------------------------------------------------------------------------
+# async_preload_all_languages
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncPreloadAllLanguages:
+    """Tests for async_preload_all_languages."""
+
+    async def test_populates_cache_and_languages_list(
+        self, hass: HomeAssistant, tmp_path: Path
+    ) -> None:
+        """Populates _cache and _state['languages_list_cache'] via executor job."""
+        lang_file = tmp_path / "test_lang.yaml"
+        lang_file.write_text("language:\n  name: Test Language\n", encoding="utf-8")
+
+        with (
+            patch.object(ll, "_LANGUAGES_DIR", tmp_path),
+            patch.dict(ll._cache, {}, clear=True),
+            patch.dict(_state, {"languages_list_cache": None}),
+        ):
+            await async_preload_all_languages(hass)
+
+            assert "test_lang" in ll._cache
+            assert _state["languages_list_cache"] is not None
+            assert _state["languages_list_cache"][0]["code"] == "test_lang"
+
+    async def test_list_available_languages_returns_cache_after_preload(
+        self, hass: HomeAssistant, tmp_path: Path
+    ) -> None:
+        """After preloading, list_available_languages returns the cached list."""
+        lang_file = tmp_path / "my_lang.yaml"
+        lang_file.write_text("language:\n  name: My Language\n", encoding="utf-8")
+
+        with (
+            patch.object(ll, "_LANGUAGES_DIR", tmp_path),
+            patch.dict(ll._cache, {}, clear=True),
+            patch.dict(_state, {"languages_list_cache": None}),
+        ):
+            await async_preload_all_languages(hass)
+            result = list_available_languages()
+
+        assert any(lang["code"] == "my_lang" for lang in result)

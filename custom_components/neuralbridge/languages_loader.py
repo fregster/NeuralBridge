@@ -26,17 +26,24 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml  # type: ignore[import-untyped]
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
 _LANGUAGES_DIR: Path = Path(__file__).parent / "languages"
 _DEFAULT_LANGUAGE: str = "en_gb"
 
-# Module-level cache: lower-cased language_code -> loaded YAML dict (empty on error)
+# Module-level caches.
+# _cache maps language_code -> loaded YAML dict.
+# _state holds the languages-list cache in a mutable dict so it can be updated
+# from async_preload_all_languages without a module-level `global` statement.
 _cache: dict[str, dict[str, Any]] = {}
+_state: dict[str, list[dict[str, str]] | None] = {"languages_list_cache": None}
 
 
 def _load_language_file(language_code: str) -> dict[str, Any]:
@@ -60,6 +67,51 @@ def _load_language_file(language_code: str) -> dict[str, Any]:
     except (OSError, yaml.YAMLError) as err:
         _LOGGER.error("NeuralBridge: failed to load language file %s: %s", file_path, err)
         return {}
+
+
+def _preload_all_sync() -> tuple[dict[str, dict[str, Any]], list[dict[str, str]]]:
+    """Load every language file from disk and build the available-languages list.
+
+    Intended to be called from an executor thread via
+    :func:`async_preload_all_languages`.  Performs all blocking filesystem I/O
+    (directory glob + YAML reads) in one pass so the event loop stays unblocked.
+
+    Returns:
+        A tuple of ``(language_data, languages_list)`` where *language_data* maps
+        each language code to its parsed YAML dict and *languages_list* is the
+        same metadata list returned by :func:`list_available_languages`.
+    """
+    language_data: dict[str, dict[str, Any]] = {}
+    languages_list: list[dict[str, str]] = []
+
+    if not _LANGUAGES_DIR.is_dir():
+        _LOGGER.warning("NeuralBridge: languages directory not found: %s", _LANGUAGES_DIR)
+        return language_data, languages_list
+
+    for yaml_file in sorted(_LANGUAGES_DIR.glob("*.yaml")):
+        code = yaml_file.stem
+        data = _load_language_file(code)
+        language_data[code] = data
+        lang_info = data.get("language", {})
+        name: str = lang_info.get("name", code) if isinstance(lang_info, dict) else code
+        languages_list.append({"code": code, "name": name if isinstance(name, str) else code})
+
+    return language_data, languages_list
+
+
+async def async_preload_all_languages(hass: HomeAssistant) -> None:
+    """Pre-load every language file into the module cache via an executor thread.
+
+    Call this once from ``async_setup_entry`` so that all subsequent synchronous
+    calls to :func:`get_string` and :func:`list_available_languages` are served
+    from in-memory cache and never block the event loop.
+
+    Args:
+        hass: Home Assistant instance used to schedule the executor job.
+    """
+    language_data, languages_list = await hass.async_add_executor_job(_preload_all_sync)
+    _cache.update(language_data)
+    _state["languages_list_cache"] = languages_list
 
 
 def get_language_data(language_code: str) -> dict[str, Any]:
@@ -155,10 +207,18 @@ def get_string(language_code: str, *keys: str, default: str = "") -> str:
 def list_available_languages() -> list[dict[str, str]]:
     """Return metadata for every language file found in the ``languages/`` directory.
 
+    If :func:`async_preload_all_languages` has already run, returns the cached
+    list without any filesystem I/O.  Otherwise performs a blocking directory
+    scan and file reads (acceptable only before the integration is set up).
+
     Returns:
         List of dicts, each containing ``"code"`` (file stem) and ``"name"``
         (display name from the YAML ``language.name`` key).  Sorted by file name.
     """
+    cached = _state["languages_list_cache"]
+    if cached is not None:
+        return cached
+
     if not _LANGUAGES_DIR.is_dir():
         _LOGGER.warning("NeuralBridge: languages directory not found: %s", _LANGUAGES_DIR)
         return []

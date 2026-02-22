@@ -17,17 +17,21 @@ from custom_components.neuralbridge.const import (
     AGENT_TYPE_EXISTING,
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
+    CONF_AGENT_ASSIST_MODE,
     CONF_AGENT_CACHE_ENABLED,
     CONF_AGENT_ENABLED,
     CONF_AGENT_NAME,
     CONF_AGENT_TYPE,
     CONF_AGENTS,
+    CONF_DEFAULT_PROMPT,
+    CONF_ENABLE_HOME_CONTROL,
     CONF_ENTITY_ID,
     CONF_GUARD_RAIL_ACTION,
     CONF_GUARD_RAIL_AI_THRESHOLD,
     CONF_GUARD_RAIL_ENABLED,
     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
     CONF_GUARD_RAIL_RULES,
+    CONF_IS_ROUTER,
     CONF_LANGUAGE,
     CONF_MAX_RETRIES,
     CONF_OLLAMA_MODEL,
@@ -36,10 +40,15 @@ from custom_components.neuralbridge.const import (
     CONF_RESPONSE_CACHE_ENABLED,
     CONF_RESPONSE_CACHE_TTL,
     CONF_RETRY_BASE_DELAY,
+    CONF_ROUTER_CUSTOM_PROMPT,
+    CONF_ROUTER_FALLBACK,
+    CONF_ROUTER_LOG_LEVEL,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DATA_RESPONSE_CACHE,
     DEFAULT_AGENT_CACHE_ENABLED,
+    DEFAULT_DEFAULT_PROMPT,
+    DEFAULT_ENABLE_HOME_CONTROL,
     DEFAULT_GUARD_RAIL_ACTION,
     DEFAULT_GUARD_RAIL_AI_THRESHOLD,
     DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
@@ -47,12 +56,20 @@ from custom_components.neuralbridge.const import (
     DEFAULT_OLLAMA_URL,
     DEFAULT_RESPONSE_CACHE_ENABLED,
     DEFAULT_RESPONSE_CACHE_TTL,
+    DEFAULT_ROUTER_CUSTOM_PROMPT,
+    DEFAULT_ROUTER_FALLBACK,
+    DEFAULT_ROUTER_LOG_LEVEL,
+    DEFAULT_ROUTER_TIMEOUT,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     DOMAIN,
     GUARD_RAIL_ACTION_BLOCK,
     GUARD_RAIL_CATEGORY_HARMFUL,
     GUARD_RAIL_CATEGORY_PRIVACY,
+    PRIORITY_ROUTER,
+    ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+    ROUTER_FALLBACK_SKIP_ROUTING,
+    ROUTER_LOG_LEVEL_NONE,
 )
 
 if TYPE_CHECKING:
@@ -78,7 +95,8 @@ def _make_handler(
     mock_config_entry: MockConfigEntry, hass: HomeAssistant
 ) -> NeuralBridgeOptionsFlowHandler:
     """Create a NeuralBridgeOptionsFlowHandler with hass and flow attrs injected."""
-    handler = NeuralBridgeOptionsFlowHandler(mock_config_entry)
+    handler = NeuralBridgeOptionsFlowHandler()
+    handler._config_entry = mock_config_entry  # Injected by HA flow manager in production
     handler.hass = hass
     # flow_id and handler are normally set by the HA flow manager; provide
     # sentinel values so async_show_form / async_show_menu don't raise.
@@ -331,17 +349,19 @@ async def test_user_step_creates_entry(hass: HomeAssistant) -> None:
 async def test_options_flow_init_shows_menu(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
-    """async_step_init returns a MENU result with the 6 expected options."""
+    """async_step_init returns a MENU result with all expected options."""
     handler = _make_handler(mock_config_entry, hass)
     result = await handler.async_step_init()
     assert result["type"] == FlowResultType.MENU
     assert set(result["menu_options"]) == {
+        "default_prompt",
         "add_agent",
+        "configure_routing_agent",
         "manage_agents",
         "configure_guard_rails",
-        "configure_guard_rail_rules",
         "advanced_settings",
         "language_settings",
+        "done",
     }
 
 
@@ -562,186 +582,45 @@ async def test_manage_agents_with_agents_shows_dropdown(hass: HomeAssistant) -> 
 
 
 # ---------------------------------------------------------------------------
-# Test 20 — manage_agents: submitting selection routes to action step
+# Test 20 — manage_agents: submitting selection routes directly to edit step
 # ---------------------------------------------------------------------------
 
 
-async def test_manage_agents_selection_routes_to_action(hass: HomeAssistant) -> None:
-    """Selecting an agent stores its id and forwards to manage_agent_action."""
+async def test_manage_agents_selection_routes_to_edit(hass: HomeAssistant) -> None:
+    """Selecting an agent stores its id and routes directly to the edit step."""
     agent = _ollama_agent()
     entry = _entry_with_agents(hass, [agent])
     handler = _make_handler(entry, hass)
-
-    with patch.object(
-        handler, "async_step_manage_agent_action", new_callable=AsyncMock
-    ) as mock_action:
-        mock_action.return_value = {"type": FlowResultType.FORM, "step_id": "manage_agent_action"}
-        await handler.async_step_manage_agents({"agent_id": agent["id"]})
-
-    assert handler._agent_data["_selected_agent_id"] == agent["id"]
-    mock_action.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# Test 21 — manage_agent_action: form shown for enabled agent
-# ---------------------------------------------------------------------------
-
-
-async def test_manage_agent_action_shows_form_enabled(hass: HomeAssistant) -> None:
-    """Form for an enabled agent includes edit, disable, and delete options."""
-    agent = _ollama_agent(**{CONF_AGENT_ENABLED: True})
-    entry = _entry_with_agents(hass, [agent])
-    handler = _make_handler(entry, hass)
-    handler._agent_data["_selected_agent_id"] = agent["id"]
-
-    result = await handler.async_step_manage_agent_action()
-    assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "manage_agent_action"
-
-
-# ---------------------------------------------------------------------------
-# Test 22 — manage_agent_action: form shown for disabled agent
-# ---------------------------------------------------------------------------
-
-
-async def test_manage_agent_action_shows_form_disabled(hass: HomeAssistant) -> None:
-    """Form for a disabled agent shows the 'Enable' toggle variant."""
-    agent = _ollama_agent(**{CONF_AGENT_ENABLED: False})
-    entry = _entry_with_agents(hass, [agent])
-    handler = _make_handler(entry, hass)
-    handler._agent_data["_selected_agent_id"] = agent["id"]
-
-    result = await handler.async_step_manage_agent_action()
-    assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "manage_agent_action"
-
-
-# ---------------------------------------------------------------------------
-# Test 23 — manage_agent_action: form shown when agent not found (fallback labels)
-# ---------------------------------------------------------------------------
-
-
-async def test_manage_agent_action_form_missing_agent(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry
-) -> None:
-    """When agent_id matches nothing, form shows with 'Unknown' placeholder."""
-    handler = _make_handler(mock_config_entry, hass)
-    handler._agent_data["_selected_agent_id"] = "nonexistent"
-
-    result = await handler.async_step_manage_agent_action()
-    assert result["type"] == FlowResultType.FORM
-    assert result["description_placeholders"]["agent_name"] == "Unknown"
-
-
-# ---------------------------------------------------------------------------
-# Test 24 — manage_agent_action: toggle disables enabled agent
-# ---------------------------------------------------------------------------
-
-
-async def test_manage_agent_action_toggle_disables(hass: HomeAssistant) -> None:
-    """Toggling an enabled agent sets CONF_AGENT_ENABLED to False."""
-    agent = _ollama_agent(**{CONF_AGENT_ENABLED: True})
-    entry = _entry_with_agents(hass, [agent])
-    handler = _make_handler(entry, hass)
-    handler._agent_data["_selected_agent_id"] = agent["id"]
-
-    with patch.object(
-        handler,
-        "async_create_entry",
-        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
-    ):
-        await handler.async_step_manage_agent_action({"action": "toggle"})
-
-    assert entry.data[CONF_AGENTS][0][CONF_AGENT_ENABLED] is False
-
-
-# ---------------------------------------------------------------------------
-# Test 25 — manage_agent_action: toggle enables disabled agent
-# ---------------------------------------------------------------------------
-
-
-async def test_manage_agent_action_toggle_enables(hass: HomeAssistant) -> None:
-    """Toggling a disabled agent sets CONF_AGENT_ENABLED to True."""
-    agent = _ollama_agent(**{CONF_AGENT_ENABLED: False})
-    entry = _entry_with_agents(hass, [agent])
-    handler = _make_handler(entry, hass)
-    handler._agent_data["_selected_agent_id"] = agent["id"]
-
-    with patch.object(
-        handler,
-        "async_create_entry",
-        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
-    ):
-        await handler.async_step_manage_agent_action({"action": "toggle"})
-
-    assert entry.data[CONF_AGENTS][0][CONF_AGENT_ENABLED] is True
-
-
-# ---------------------------------------------------------------------------
-# Test 26 — manage_agent_action: delete removes agent
-# ---------------------------------------------------------------------------
-
-
-async def test_manage_agent_action_delete(hass: HomeAssistant) -> None:
-    """Delete action removes the selected agent from entry.data."""
-    agent = _ollama_agent()
-    entry = _entry_with_agents(hass, [agent])
-    handler = _make_handler(entry, hass)
-    handler._agent_data["_selected_agent_id"] = agent["id"]
-
-    with patch.object(
-        handler,
-        "async_create_entry",
-        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
-    ):
-        await handler.async_step_manage_agent_action({"action": "delete"})
-
-    assert entry.data[CONF_AGENTS] == []
-
-
-# ---------------------------------------------------------------------------
-# Test 27 — manage_agent_action: edit routes to _route_to_edit_step
-# ---------------------------------------------------------------------------
-
-
-async def test_manage_agent_action_edit_dispatches_to_route(hass: HomeAssistant) -> None:
-    """Edit action calls _route_to_edit_step instead of creating an entry."""
-    agent = _ollama_agent()
-    entry = _entry_with_agents(hass, [agent])
-    handler = _make_handler(entry, hass)
-    handler._agent_data["_selected_agent_id"] = agent["id"]
 
     with patch.object(handler, "_route_to_edit_step", new_callable=AsyncMock) as mock_route:
         mock_route.return_value = {"type": FlowResultType.FORM, "step_id": "edit_agent_ollama"}
-        await handler.async_step_manage_agent_action({"action": "edit"})
+        await handler.async_step_manage_agents({"agent_id": agent["id"]})
 
+    assert handler._agent_data["_selected_agent_id"] == agent["id"]
     mock_route.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
-# Test 28 — _route_to_edit_step: missing agent returns create_entry
+# Test 21 — _route_to_edit_step: missing agent returns to main menu
 # ---------------------------------------------------------------------------
 
 
 async def test_route_to_edit_step_missing_agent(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
-    """When selected agent is not found, _route_to_edit_step returns create_entry."""
+    """When selected agent is not found, _route_to_edit_step returns to main menu."""
+    mock_config_entry.add_to_hass(hass)
     handler = _make_handler(mock_config_entry, hass)
     handler._agent_data["_selected_agent_id"] = "ghost-id"
 
-    with patch.object(
-        handler,
-        "async_create_entry",
-        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
-    ) as mock_create:
-        await handler._route_to_edit_step()
+    result = await handler._route_to_edit_step()
 
-    mock_create.assert_called_once()
+    assert result["type"] == FlowResultType.MENU
+    assert result["step_id"] == "init"
 
 
 # ---------------------------------------------------------------------------
-# Test 29 — _route_to_edit_step: Ollama type routes to edit_agent_ollama
+# Test 22 — _route_to_edit_step: Ollama type routes to edit_agent_ollama
 # ---------------------------------------------------------------------------
 
 
@@ -761,7 +640,7 @@ async def test_route_to_edit_step_ollama(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 30 — _route_to_edit_step: Existing type routes to edit_agent_existing
+# Test 23 — _route_to_edit_step: Existing type routes to edit_agent_existing
 # ---------------------------------------------------------------------------
 
 
@@ -782,7 +661,7 @@ async def test_route_to_edit_step_existing(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 31 — _route_to_edit_step: Local HA type routes to edit_agent_local
+# Test 24 — _route_to_edit_step: Local HA type routes to edit_agent_local
 # ---------------------------------------------------------------------------
 
 
@@ -801,7 +680,7 @@ async def test_route_to_edit_step_local(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 32 — edit_agent_ollama: shows pre-populated form
+# Test 25 — edit_agent_ollama: shows pre-populated form
 # ---------------------------------------------------------------------------
 
 
@@ -818,7 +697,7 @@ async def test_edit_agent_ollama_shows_form(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 33 — edit_agent_ollama: validation error re-shows form
+# Test 26 — edit_agent_ollama: validation error re-shows form
 # ---------------------------------------------------------------------------
 
 
@@ -850,7 +729,7 @@ async def test_edit_agent_ollama_validation_error(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 34 — edit_agent_ollama: success updates agent in place
+# Test 27 — edit_agent_ollama: success updates agent in place
 # ---------------------------------------------------------------------------
 
 
@@ -896,7 +775,7 @@ async def test_edit_agent_ollama_success(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 35 — edit_agent_ollama: other agents preserved
+# Test 28 — edit_agent_ollama: other agents preserved
 # ---------------------------------------------------------------------------
 
 
@@ -935,7 +814,71 @@ async def test_edit_agent_ollama_other_agents_preserved(hass: HomeAssistant) -> 
 
 
 # ---------------------------------------------------------------------------
-# Test 36 — edit_agent_existing: shows pre-populated form
+# Test 29 — edit_agent_ollama: enabled field saved when explicitly set
+# ---------------------------------------------------------------------------
+
+
+async def test_edit_agent_ollama_saves_enabled_false(hass: HomeAssistant) -> None:
+    """Editing Ollama agent with CONF_AGENT_ENABLED=False disables the agent."""
+    agent = _ollama_agent(**{CONF_AGENT_ENABLED: True})
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = dict(agent)
+
+    with (
+        patch.object(
+            handler, "_validate_ollama_connection", new_callable=AsyncMock, return_value=None
+        ),
+        patch.object(
+            handler,
+            "async_create_entry",
+            return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+        ),
+    ):
+        await handler.async_step_edit_agent_ollama(
+            {
+                CONF_AGENT_NAME: agent[CONF_AGENT_NAME],
+                CONF_PRIORITY: agent[CONF_PRIORITY],
+                CONF_OLLAMA_URL: DEFAULT_OLLAMA_URL,
+                CONF_OLLAMA_MODEL: "llama3:8b",
+                CONF_AGENT_ENABLED: False,
+            }
+        )
+
+    assert entry.data[CONF_AGENTS][0][CONF_AGENT_ENABLED] is False
+
+
+# ---------------------------------------------------------------------------
+# Test 30 — edit_agent_ollama: delete_agent=True routes to confirmation step
+# ---------------------------------------------------------------------------
+
+
+async def test_edit_agent_ollama_delete_routes_to_confirm(hass: HomeAssistant) -> None:
+    """Submitting with delete_agent=True routes to the confirm_delete_agent step."""
+    agent = _ollama_agent()
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = dict(agent)
+
+    with patch.object(
+        handler, "async_step_confirm_delete_agent", new_callable=AsyncMock
+    ) as mock_confirm:
+        mock_confirm.return_value = {"type": FlowResultType.FORM, "step_id": "confirm_delete_agent"}
+        await handler.async_step_edit_agent_ollama(
+            {
+                CONF_AGENT_NAME: agent[CONF_AGENT_NAME],
+                CONF_PRIORITY: agent[CONF_PRIORITY],
+                CONF_OLLAMA_URL: DEFAULT_OLLAMA_URL,
+                CONF_OLLAMA_MODEL: "llama3:8b",
+                "delete_agent": True,
+            }
+        )
+
+    mock_confirm.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test 31 — edit_agent_existing: shows pre-populated form
 # ---------------------------------------------------------------------------
 
 
@@ -952,7 +895,7 @@ async def test_edit_agent_existing_shows_form(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 37 — edit_agent_existing: success updates agent in place
+# Test 32 — edit_agent_existing: success updates agent in place
 # ---------------------------------------------------------------------------
 
 
@@ -989,7 +932,64 @@ async def test_edit_agent_existing_success(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 38 — edit_agent_local: shows pre-populated form
+# Test 33 — edit_agent_existing: enabled field saved when explicitly set
+# ---------------------------------------------------------------------------
+
+
+async def test_edit_agent_existing_saves_enabled_false(hass: HomeAssistant) -> None:
+    """Editing existing agent with CONF_AGENT_ENABLED=False disables the agent."""
+    agent = _existing_agent(**{CONF_AGENT_ENABLED: True})
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = dict(agent)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_edit_agent_existing(
+            {
+                CONF_AGENT_NAME: agent[CONF_AGENT_NAME],
+                CONF_PRIORITY: agent[CONF_PRIORITY],
+                CONF_ENTITY_ID: agent[CONF_ENTITY_ID],
+                CONF_AGENT_ENABLED: False,
+            }
+        )
+
+    assert entry.data[CONF_AGENTS][0][CONF_AGENT_ENABLED] is False
+
+
+# ---------------------------------------------------------------------------
+# Test 34 — edit_agent_existing: delete_agent=True routes to confirmation step
+# ---------------------------------------------------------------------------
+
+
+async def test_edit_agent_existing_delete_routes_to_confirm(hass: HomeAssistant) -> None:
+    """Submitting with delete_agent=True routes to the confirm_delete_agent step."""
+    agent = _existing_agent()
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = dict(agent)
+
+    with patch.object(
+        handler, "async_step_confirm_delete_agent", new_callable=AsyncMock
+    ) as mock_confirm:
+        mock_confirm.return_value = {"type": FlowResultType.FORM, "step_id": "confirm_delete_agent"}
+        await handler.async_step_edit_agent_existing(
+            {
+                CONF_AGENT_NAME: agent[CONF_AGENT_NAME],
+                CONF_PRIORITY: agent[CONF_PRIORITY],
+                CONF_ENTITY_ID: agent[CONF_ENTITY_ID],
+                "delete_agent": True,
+            }
+        )
+
+    mock_confirm.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test 35 — edit_agent_local: shows pre-populated form
 # ---------------------------------------------------------------------------
 
 
@@ -1006,7 +1006,7 @@ async def test_edit_agent_local_shows_form(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 39 — edit_agent_local: success updates agent in place
+# Test 36 — edit_agent_local: success updates agent in place
 # ---------------------------------------------------------------------------
 
 
@@ -1043,7 +1043,127 @@ async def test_edit_agent_local_success(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 40 — advanced_settings: shows form
+# Test 37 — edit_agent_local: enabled field saved when explicitly set
+# ---------------------------------------------------------------------------
+
+
+async def test_edit_agent_local_saves_enabled_false(hass: HomeAssistant) -> None:
+    """Editing local agent with CONF_AGENT_ENABLED=False disables the agent."""
+    agent = _local_agent(**{CONF_AGENT_ENABLED: True})
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = dict(agent)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_edit_agent_local(
+            {
+                CONF_AGENT_NAME: agent[CONF_AGENT_NAME],
+                CONF_PRIORITY: agent[CONF_PRIORITY],
+                CONF_AGENT_ENABLED: False,
+            }
+        )
+
+    assert entry.data[CONF_AGENTS][0][CONF_AGENT_ENABLED] is False
+
+
+# ---------------------------------------------------------------------------
+# Test 38 — edit_agent_local: delete_agent=True routes to confirmation step
+# ---------------------------------------------------------------------------
+
+
+async def test_edit_agent_local_delete_routes_to_confirm(hass: HomeAssistant) -> None:
+    """Submitting with delete_agent=True routes to the confirm_delete_agent step."""
+    agent = _local_agent()
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = dict(agent)
+
+    with patch.object(
+        handler, "async_step_confirm_delete_agent", new_callable=AsyncMock
+    ) as mock_confirm:
+        mock_confirm.return_value = {"type": FlowResultType.FORM, "step_id": "confirm_delete_agent"}
+        await handler.async_step_edit_agent_local(
+            {
+                CONF_AGENT_NAME: agent[CONF_AGENT_NAME],
+                CONF_PRIORITY: agent[CONF_PRIORITY],
+                "delete_agent": True,
+            }
+        )
+
+    mock_confirm.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test 39 — confirm_delete_agent: shows form with agent name placeholder
+# ---------------------------------------------------------------------------
+
+
+async def test_confirm_delete_agent_shows_form(hass: HomeAssistant) -> None:
+    """async_step_confirm_delete_agent without input shows the confirmation form."""
+    agent = _ollama_agent()
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = dict(agent)
+
+    result = await handler.async_step_confirm_delete_agent()
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "confirm_delete_agent"
+    assert result["description_placeholders"]["agent_name"] == agent[CONF_AGENT_NAME]
+
+
+# ---------------------------------------------------------------------------
+# Test 40 — confirm_delete_agent: confirm=True deletes the agent
+# ---------------------------------------------------------------------------
+
+
+async def test_confirm_delete_agent_confirmed_deletes(hass: HomeAssistant) -> None:
+    """When confirm=True the agent is removed from entry.data."""
+    agent = _ollama_agent()
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = dict(agent)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_confirm_delete_agent({"confirm": True})
+
+    assert entry.data[CONF_AGENTS] == []
+
+
+# ---------------------------------------------------------------------------
+# Test 41 — confirm_delete_agent: confirm=False cancels deletion
+# ---------------------------------------------------------------------------
+
+
+async def test_confirm_delete_agent_not_confirmed_keeps_agent(hass: HomeAssistant) -> None:
+    """When confirm=False the agent is preserved and flow returns to main menu."""
+    agent = _ollama_agent()
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = dict(agent)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        result = await handler.async_step_confirm_delete_agent({"confirm": False})
+
+    assert len(entry.data[CONF_AGENTS]) == 1
+    assert result["type"] == FlowResultType.MENU
+    assert result["step_id"] == "init"
+
+
+# ---------------------------------------------------------------------------
+# Test 42 — advanced_settings: shows form
 # ---------------------------------------------------------------------------
 
 
@@ -1058,7 +1178,7 @@ async def test_advanced_settings_shows_form(
 
 
 # ---------------------------------------------------------------------------
-# Test 41 — advanced_settings: saves cache config
+# Test 43 — advanced_settings: saves cache config
 # ---------------------------------------------------------------------------
 
 
@@ -1087,7 +1207,7 @@ async def test_advanced_settings_saves_config(
 
 
 # ---------------------------------------------------------------------------
-# Test 42 — advanced_settings: purge cache calls invalidate()
+# Test 44 — advanced_settings: purge cache calls invalidate()
 # ---------------------------------------------------------------------------
 
 
@@ -1120,7 +1240,7 @@ async def test_advanced_settings_purges_cache(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 43 — advanced_settings: no purge skips invalidate()
+# Test 45 — advanced_settings: no purge skips invalidate()
 # ---------------------------------------------------------------------------
 
 
@@ -1152,7 +1272,38 @@ async def test_advanced_settings_configures_without_purge(hass: HomeAssistant) -
 
 
 # ---------------------------------------------------------------------------
-# Test 44 — advanced_settings: no cache object in hass.data is safe
+# Test 45b — advanced_settings: TTL=0 is accepted (effectively disables caching)
+# ---------------------------------------------------------------------------
+
+
+async def test_advanced_settings_ttl_zero_accepted(hass: HomeAssistant) -> None:
+    """TTL=0 is a valid value that causes cached entries to expire immediately."""
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options={})
+    entry.add_to_hass(hass)
+    mock_cache = MagicMock()
+    mock_cache.invalidate.return_value = 0
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][entry.entry_id] = {DATA_RESPONSE_CACHE: mock_cache}
+    handler = _make_handler(entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_advanced_settings(
+            {
+                CONF_RESPONSE_CACHE_ENABLED: True,
+                CONF_RESPONSE_CACHE_TTL: 0,
+                "purge_cache_now": False,
+            }
+        )
+
+    mock_cache.configure.assert_called_once_with(enabled=True, ttl_seconds=0)
+
+
+# ---------------------------------------------------------------------------
+# Test 46 — advanced_settings: no cache object in hass.data is safe
 # ---------------------------------------------------------------------------
 
 
@@ -1180,22 +1331,42 @@ async def test_advanced_settings_no_cache_object(
 
 
 # ---------------------------------------------------------------------------
-# Test 45 — configure_guard_rails: shows form
+# Test 47 — configure_guard_rails: shows sub-menu
 # ---------------------------------------------------------------------------
 
 
-async def test_configure_guard_rails_shows_form(
+async def test_configure_guard_rails_shows_menu(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
-    """async_step_configure_guard_rails without input shows the form."""
+    """async_step_configure_guard_rails shows the guard rails sub-menu."""
     handler = _make_handler(mock_config_entry, hass)
     result = await handler.async_step_configure_guard_rails()
-    assert result["type"] == FlowResultType.FORM
+    assert result["type"] == FlowResultType.MENU
     assert result["step_id"] == "configure_guard_rails"
+    assert set(result["menu_options"]) == {
+        "guard_rails_settings",
+        "configure_guard_rail_rules",
+        "back_to_main",
+    }
 
 
 # ---------------------------------------------------------------------------
-# Test 46 — configure_guard_rails: disabled saves without router check
+# Test 48 — guard_rails_settings: shows form
+# ---------------------------------------------------------------------------
+
+
+async def test_guard_rails_settings_shows_form(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """async_step_guard_rails_settings without input shows the form."""
+    handler = _make_handler(mock_config_entry, hass)
+    result = await handler.async_step_guard_rails_settings()
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "guard_rails_settings"
+
+
+# ---------------------------------------------------------------------------
+# Test 49 — guard_rails_settings: disabled saves without router check
 # ---------------------------------------------------------------------------
 
 
@@ -1211,7 +1382,7 @@ async def test_configure_guard_rails_disabled(
         "async_create_entry",
         return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
     ):
-        await handler.async_step_configure_guard_rails(
+        await handler.async_step_guard_rails_settings(
             {
                 CONF_GUARD_RAIL_ENABLED: False,
                 CONF_GUARD_RAIL_ACTION: DEFAULT_GUARD_RAIL_ACTION,
@@ -1223,7 +1394,7 @@ async def test_configure_guard_rails_disabled(
 
 
 # ---------------------------------------------------------------------------
-# Test 47 — configure_guard_rails: enabled with router agent saves
+# Test 50 — guard_rails_settings: enabled with router agent saves
 # ---------------------------------------------------------------------------
 
 
@@ -1238,7 +1409,7 @@ async def test_configure_guard_rails_enabled_with_router(hass: HomeAssistant) ->
         "async_create_entry",
         return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
     ):
-        await handler.async_step_configure_guard_rails(
+        await handler.async_step_guard_rails_settings(
             {
                 CONF_GUARD_RAIL_ENABLED: True,
                 CONF_GUARD_RAIL_ACTION: GUARD_RAIL_ACTION_BLOCK,
@@ -1251,7 +1422,7 @@ async def test_configure_guard_rails_enabled_with_router(hass: HomeAssistant) ->
 
 
 # ---------------------------------------------------------------------------
-# Test 48 — configure_guard_rails: enabled without router shows error
+# Test 51 — guard_rails_settings: enabled without router shows error
 # ---------------------------------------------------------------------------
 
 
@@ -1261,7 +1432,7 @@ async def test_configure_guard_rails_enabled_no_router(
     """Enabling guard rails with no priority-0 agent re-shows the form with an error."""
     handler = _make_handler(mock_config_entry, hass)
 
-    result = await handler.async_step_configure_guard_rails(
+    result = await handler.async_step_guard_rails_settings(
         {
             CONF_GUARD_RAIL_ENABLED: True,
             CONF_GUARD_RAIL_ACTION: DEFAULT_GUARD_RAIL_ACTION,
@@ -1270,12 +1441,27 @@ async def test_configure_guard_rails_enabled_no_router(
     )
 
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "configure_guard_rails"
+    assert result["step_id"] == "guard_rails_settings"
     assert result.get("errors", {}).get("base") == "no_router_agent"
 
 
 # ---------------------------------------------------------------------------
-# Test 49 — language_settings: shows form
+# Test 52 — back_to_main: returns to init menu
+# ---------------------------------------------------------------------------
+
+
+async def test_back_to_main_returns_to_init(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """async_step_back_to_main redirects to the main options menu."""
+    handler = _make_handler(mock_config_entry, hass)
+    result = await handler.async_step_back_to_main()
+    assert result["type"] == FlowResultType.MENU
+    assert result["step_id"] == "init"
+
+
+# ---------------------------------------------------------------------------
+# Test 53 — language_settings: shows form
 # ---------------------------------------------------------------------------
 
 
@@ -1296,7 +1482,7 @@ async def test_language_settings_shows_form(
 
 
 # ---------------------------------------------------------------------------
-# Test 50 — language_settings: saves selected language
+# Test 54 — language_settings: saves selected language
 # ---------------------------------------------------------------------------
 
 
@@ -1326,7 +1512,7 @@ def test_async_get_options_flow_returns_handler(
 
 
 # ---------------------------------------------------------------------------
-# Test 52 — configure_guard_rail_rules: shows form
+# Test 56 — configure_guard_rail_rules: shows form
 # ---------------------------------------------------------------------------
 
 
@@ -1341,7 +1527,7 @@ async def test_configure_guard_rail_rules_show_form(
 
 
 # ---------------------------------------------------------------------------
-# Test 53 — configure_guard_rail_rules: saves valid patterns
+# Test 57 — configure_guard_rail_rules: saves valid patterns
 # ---------------------------------------------------------------------------
 
 
@@ -1374,7 +1560,7 @@ async def test_configure_guard_rail_rules_save_valid_patterns(
 
 
 # ---------------------------------------------------------------------------
-# Test 54 — configure_guard_rail_rules: invalid regex returns error
+# Test 58 — configure_guard_rail_rules: invalid regex returns error
 # ---------------------------------------------------------------------------
 
 
@@ -1398,7 +1584,7 @@ async def test_configure_guard_rail_rules_invalid_regex(
 
 
 # ---------------------------------------------------------------------------
-# Test 55 — configure_guard_rail_rules: empty fields save empty lists
+# Test 59 — configure_guard_rail_rules: empty fields save empty lists
 # ---------------------------------------------------------------------------
 
 
@@ -1428,7 +1614,7 @@ async def test_configure_guard_rail_rules_save_empty(
 
 
 # ---------------------------------------------------------------------------
-# Test 56 — advanced_settings: form includes retry fields
+# Test 60 — advanced_settings: form includes retry fields
 # ---------------------------------------------------------------------------
 
 
@@ -1446,7 +1632,7 @@ async def test_advanced_settings_includes_retry_fields(
 
 
 # ---------------------------------------------------------------------------
-# Test 57 — advanced_settings: saves retry config
+# Test 61 — advanced_settings: saves retry config
 # ---------------------------------------------------------------------------
 
 
@@ -1474,3 +1660,569 @@ async def test_advanced_settings_saves_retry_config(
 
     assert mock_config_entry.data[CONF_MAX_RETRIES] == 3
     assert abs(mock_config_entry.data[CONF_RETRY_BASE_DELAY] - 2.0) < 0.001
+
+
+# ---------------------------------------------------------------------------
+# Test 62 — default_prompt: shows form pre-populated with current value
+# ---------------------------------------------------------------------------
+
+
+async def test_default_prompt_shows_form(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """async_step_default_prompt without input shows a multiline text form."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    result = await handler.async_step_default_prompt()
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "default_prompt"
+
+
+# ---------------------------------------------------------------------------
+# Test 63 — default_prompt: saves prompt and returns to main menu
+# ---------------------------------------------------------------------------
+
+
+async def test_default_prompt_saves_and_returns_to_menu(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Submitting a new default prompt saves it to entry.data and returns the menu."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+    custom_prompt = "You are a terse robot."
+
+    result = await handler.async_step_default_prompt({CONF_DEFAULT_PROMPT: custom_prompt})
+
+    assert mock_config_entry.data[CONF_DEFAULT_PROMPT] == custom_prompt
+    assert result["type"] == FlowResultType.MENU
+    assert result["step_id"] == "init"
+
+
+# ---------------------------------------------------------------------------
+# Test 64 — default_prompt: no stored value shows built-in default text
+# ---------------------------------------------------------------------------
+
+
+async def test_default_prompt_uses_builtin_default(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Form pre-populates with DEFAULT_DEFAULT_PROMPT when none is stored."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    result = await handler.async_step_default_prompt()
+
+    schema = result["data_schema"].schema
+    field = next(k for k in schema if str(k) == CONF_DEFAULT_PROMPT)
+    assert field.default() == DEFAULT_DEFAULT_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Test 65 — async_step_done: closes the options flow
+# ---------------------------------------------------------------------------
+
+
+async def test_options_flow_done_closes_flow(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """async_step_done returns a CREATE_ENTRY result to close the options flow."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    result = await handler.async_step_done()
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+
+# ---------------------------------------------------------------------------
+# Test 66 — advanced_settings: saves enable_home_control toggle
+# ---------------------------------------------------------------------------
+
+
+async def test_advanced_settings_saves_enable_home_control(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Submitting advanced_settings persists CONF_ENABLE_HOME_CONTROL to entry.data."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_advanced_settings(
+            {
+                CONF_ENABLE_HOME_CONTROL: False,
+                CONF_RESPONSE_CACHE_ENABLED: True,
+                CONF_RESPONSE_CACHE_TTL: 300,
+                "purge_cache_now": False,
+            }
+        )
+
+    assert mock_config_entry.data[CONF_ENABLE_HOME_CONTROL] is False
+
+
+# ---------------------------------------------------------------------------
+# Test 67 — advanced_settings: enable_home_control defaults to True when absent
+# ---------------------------------------------------------------------------
+
+
+async def test_advanced_settings_home_control_defaults_true(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """CONF_ENABLE_HOME_CONTROL defaults to DEFAULT_ENABLE_HOME_CONTROL when not submitted."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        # Submit without CONF_ENABLE_HOME_CONTROL key
+        await handler.async_step_advanced_settings(
+            {
+                CONF_RESPONSE_CACHE_ENABLED: True,
+                CONF_RESPONSE_CACHE_TTL: 300,
+                "purge_cache_now": False,
+            }
+        )
+
+    assert mock_config_entry.data[CONF_ENABLE_HOME_CONTROL] is DEFAULT_ENABLE_HOME_CONTROL
+
+
+# ---------------------------------------------------------------------------
+# Test 68 — configure_local: assist_mode saved in agent config
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_local_saves_assist_mode(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """async_step_configure_local persists CONF_AGENT_ASSIST_MODE in the agent config."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_configure_local(
+            {
+                CONF_AGENT_NAME: "HA Local",
+                CONF_PRIORITY: 10,
+                CONF_TIMEOUT: DEFAULT_TIMEOUT,
+                CONF_AGENT_ASSIST_MODE: True,
+            }
+        )
+
+    agents = mock_config_entry.data.get(CONF_AGENTS, [])
+    assert len(agents) == 1
+    assert agents[0][CONF_AGENT_ASSIST_MODE] is True
+
+
+# ---------------------------------------------------------------------------
+# Test 69 — configure_local: assist_mode=False saved correctly
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_local_saves_assist_mode_false(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """async_step_configure_local saves CONF_AGENT_ASSIST_MODE=False when submitted."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_configure_local(
+            {
+                CONF_AGENT_NAME: "HA Local",
+                CONF_PRIORITY: 10,
+                CONF_TIMEOUT: DEFAULT_TIMEOUT,
+                CONF_AGENT_ASSIST_MODE: False,
+            }
+        )
+
+    agents = mock_config_entry.data.get(CONF_AGENTS, [])
+    assert len(agents) == 1
+    assert agents[0][CONF_AGENT_ASSIST_MODE] is False
+
+
+# ---------------------------------------------------------------------------
+# Test 70 — edit_agent_local: assist_mode updated on save
+# ---------------------------------------------------------------------------
+
+
+async def test_edit_agent_local_saves_assist_mode(hass: HomeAssistant) -> None:
+    """async_step_edit_agent_local persists updated CONF_AGENT_ASSIST_MODE."""
+    agent = _local_agent()
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = dict(agent)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_edit_agent_local(
+            {
+                CONF_AGENT_NAME: "HA Local",
+                CONF_PRIORITY: 10,
+                CONF_TIMEOUT: DEFAULT_TIMEOUT,
+                CONF_AGENT_CACHE_ENABLED: True,
+                CONF_AGENT_ASSIST_MODE: False,
+                CONF_GUARD_RAIL_ENABLED_FOR_AGENT: False,
+            }
+        )
+
+    updated = entry.data[CONF_AGENTS][0]
+    assert updated[CONF_AGENT_ASSIST_MODE] is False
+
+
+# ===========================================================================
+# Tests 71-78: configure_routing_agent step
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Test 71 — configure_routing_agent: no existing router shows add form
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_routing_agent_shows_add_form(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """configure_routing_agent shows the form when no routing agent exists."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    result = await handler.async_step_configure_routing_agent(None)
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "configure_routing_agent"
+    # In add mode the schema should NOT contain the delete_agent or enabled fields
+    schema_keys = {k.schema if hasattr(k, "schema") else k for k in result["data_schema"].schema}
+    assert "delete_agent" not in schema_keys
+    assert CONF_AGENT_ENABLED not in schema_keys
+
+
+# ---------------------------------------------------------------------------
+# Test 72 — configure_routing_agent: existing router shows edit form with extra fields
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_routing_agent_shows_edit_form_with_extra_fields(
+    hass: HomeAssistant,
+) -> None:
+    """configure_routing_agent shows enabled and delete_agent fields when editing."""
+    router = {
+        "id": "router-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_IS_ROUTER: True,
+        CONF_AGENT_NAME: "Cloud Router",
+        CONF_PRIORITY: PRIORITY_ROUTER,
+        CONF_AGENT_ENABLED: True,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: DEFAULT_ROUTER_TIMEOUT,
+        CONF_ROUTER_LOG_LEVEL: DEFAULT_ROUTER_LOG_LEVEL,
+        CONF_ROUTER_CUSTOM_PROMPT: DEFAULT_ROUTER_CUSTOM_PROMPT,
+        CONF_ROUTER_FALLBACK: DEFAULT_ROUTER_FALLBACK,
+    }
+    entry = _entry_with_agents(hass, [router])
+    handler = _make_handler(entry, hass)
+
+    result = await handler.async_step_configure_routing_agent(None)
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "configure_routing_agent"
+    schema_keys = {k.schema if hasattr(k, "schema") else k for k in result["data_schema"].schema}
+    assert "delete_agent" in schema_keys
+    assert CONF_AGENT_ENABLED in schema_keys
+
+
+# ---------------------------------------------------------------------------
+# Test 73 — configure_routing_agent: empty entity_id returns entity_not_found
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_routing_agent_empty_entity_id_error(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Submitting with an empty entity_id shows entity_not_found error."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    result = await handler.async_step_configure_routing_agent(
+        {
+            CONF_AGENT_NAME: "My Router",
+            CONF_ENTITY_ID: "",
+            CONF_TIMEOUT: DEFAULT_ROUTER_TIMEOUT,
+            CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+            CONF_ROUTER_CUSTOM_PROMPT: "",
+            CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        }
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result.get("errors", {}).get("base") == "entity_not_found"
+
+
+# ---------------------------------------------------------------------------
+# Test 74 — configure_routing_agent: entity not in hass.states returns error
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_routing_agent_entity_not_in_states_error(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Submitting with an entity_id not in hass.states shows entity_not_found error."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+    # "conversation.nonexistent" is not registered with hass
+
+    result = await handler.async_step_configure_routing_agent(
+        {
+            CONF_AGENT_NAME: "My Router",
+            CONF_ENTITY_ID: "conversation.nonexistent",
+            CONF_TIMEOUT: DEFAULT_ROUTER_TIMEOUT,
+            CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+            CONF_ROUTER_CUSTOM_PROMPT: "",
+            CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        }
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result.get("errors", {}).get("base") == "entity_not_found"
+
+
+# ---------------------------------------------------------------------------
+# Test 75 — configure_routing_agent: valid add saves agent with CONF_IS_ROUTER=True
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_routing_agent_valid_add_saves_router(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """A valid submission adds a routing agent with CONF_IS_ROUTER=True."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+    # Register the entity in hass.states so validation passes
+    hass.states.async_set("conversation.gemini", "idle")
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_configure_routing_agent(
+            {
+                CONF_AGENT_NAME: "Cloud Router",
+                CONF_ENTITY_ID: "conversation.gemini",
+                CONF_TIMEOUT: DEFAULT_ROUTER_TIMEOUT,
+                CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+                CONF_ROUTER_CUSTOM_PROMPT: "",
+                CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+            }
+        )
+
+    agents = mock_config_entry.data.get(CONF_AGENTS, [])
+    assert len(agents) == 1
+    router = agents[0]
+    assert router[CONF_IS_ROUTER] is True
+    assert router[CONF_AGENT_TYPE] == AGENT_TYPE_EXISTING
+    assert router[CONF_AGENT_NAME] == "Cloud Router"
+    assert router[CONF_ENTITY_ID] == "conversation.gemini"
+    assert router[CONF_AGENT_CACHE_ENABLED] is False
+    assert router[CONF_GUARD_RAIL_ENABLED_FOR_AGENT] is False
+
+
+# ---------------------------------------------------------------------------
+# Test 76 — configure_routing_agent: edit mode valid submit updates in place
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_routing_agent_edit_updates_in_place(hass: HomeAssistant) -> None:
+    """Editing an existing router updates it in place without appending new entry."""
+    router = {
+        "id": "router-edit-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_IS_ROUTER: True,
+        CONF_AGENT_NAME: "Old Name",
+        CONF_PRIORITY: PRIORITY_ROUTER,
+        CONF_AGENT_ENABLED: True,
+        CONF_ENTITY_ID: "conversation.old_gemini",
+        CONF_TIMEOUT: DEFAULT_ROUTER_TIMEOUT,
+        CONF_ROUTER_LOG_LEVEL: DEFAULT_ROUTER_LOG_LEVEL,
+        CONF_ROUTER_CUSTOM_PROMPT: DEFAULT_ROUTER_CUSTOM_PROMPT,
+        CONF_ROUTER_FALLBACK: DEFAULT_ROUTER_FALLBACK,
+        CONF_AGENT_CACHE_ENABLED: False,
+        CONF_GUARD_RAIL_ENABLED_FOR_AGENT: False,
+    }
+    entry = _entry_with_agents(hass, [router])
+    handler = _make_handler(entry, hass)
+    # Simulate coming from manage_agents
+    handler._agent_data["_editing_agent"] = dict(router)
+    hass.states.async_set("conversation.new_gemini", "idle")
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_configure_routing_agent(
+            {
+                CONF_AGENT_NAME: "New Name",
+                CONF_AGENT_ENABLED: True,
+                CONF_ENTITY_ID: "conversation.new_gemini",
+                CONF_TIMEOUT: 10,
+                CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+                CONF_ROUTER_CUSTOM_PROMPT: "custom",
+                CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_SKIP_ROUTING,
+                "delete_agent": False,
+            }
+        )
+
+    agents = entry.data[CONF_AGENTS]
+    # Still only one agent — the original was updated, not a new one appended
+    assert len(agents) == 1
+    updated = agents[0]
+    assert updated["id"] == "router-edit-1"
+    assert updated[CONF_AGENT_NAME] == "New Name"
+    assert updated[CONF_ENTITY_ID] == "conversation.new_gemini"
+    assert updated[CONF_ROUTER_FALLBACK] == ROUTER_FALLBACK_SKIP_ROUTING
+
+
+# ---------------------------------------------------------------------------
+# Test 77 — configure_routing_agent: delete_agent=True routes to confirm_delete
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_routing_agent_delete_routes_to_confirm(
+    hass: HomeAssistant,
+) -> None:
+    """Setting delete_agent=True in edit mode triggers the confirm_delete_agent step."""
+    router = {
+        "id": "router-del-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_IS_ROUTER: True,
+        CONF_AGENT_NAME: "Doomed Router",
+        CONF_PRIORITY: PRIORITY_ROUTER,
+        CONF_AGENT_ENABLED: True,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: DEFAULT_ROUTER_TIMEOUT,
+        CONF_ROUTER_LOG_LEVEL: DEFAULT_ROUTER_LOG_LEVEL,
+        CONF_ROUTER_CUSTOM_PROMPT: DEFAULT_ROUTER_CUSTOM_PROMPT,
+        CONF_ROUTER_FALLBACK: DEFAULT_ROUTER_FALLBACK,
+        CONF_AGENT_CACHE_ENABLED: False,
+        CONF_GUARD_RAIL_ENABLED_FOR_AGENT: False,
+    }
+    entry = _entry_with_agents(hass, [router])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = dict(router)
+
+    result = await handler.async_step_configure_routing_agent(
+        {
+            CONF_AGENT_NAME: "Doomed Router",
+            CONF_AGENT_ENABLED: True,
+            CONF_ENTITY_ID: "conversation.gemini",
+            CONF_TIMEOUT: DEFAULT_ROUTER_TIMEOUT,
+            CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+            CONF_ROUTER_CUSTOM_PROMPT: "",
+            CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+            "delete_agent": True,
+        }
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "confirm_delete_agent"
+
+
+# ---------------------------------------------------------------------------
+# Test 78 — _route_to_edit_step: is_router agent routes to configure_routing_agent
+# ---------------------------------------------------------------------------
+
+
+async def test_route_to_edit_step_router_calls_configure_routing_agent(
+    hass: HomeAssistant,
+) -> None:
+    """_route_to_edit_step dispatches to configure_routing_agent for a routing agent."""
+    router = {
+        "id": "route-router-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_IS_ROUTER: True,
+        CONF_AGENT_NAME: "Route Test Router",
+        CONF_PRIORITY: PRIORITY_ROUTER,
+        CONF_AGENT_ENABLED: True,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: DEFAULT_ROUTER_TIMEOUT,
+        CONF_ROUTER_LOG_LEVEL: DEFAULT_ROUTER_LOG_LEVEL,
+        CONF_ROUTER_CUSTOM_PROMPT: DEFAULT_ROUTER_CUSTOM_PROMPT,
+        CONF_ROUTER_FALLBACK: DEFAULT_ROUTER_FALLBACK,
+        CONF_AGENT_CACHE_ENABLED: False,
+        CONF_GUARD_RAIL_ENABLED_FOR_AGENT: False,
+    }
+    entry = _entry_with_agents(hass, [router])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_selected_agent_id"] = "route-router-1"
+
+    result = await handler._route_to_edit_step()
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "configure_routing_agent"
+
+
+# ---------------------------------------------------------------------------
+# Test 79 — configure_routing_agent: delete from main menu (no _editing_agent pre-set)
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_routing_agent_delete_from_menu_sets_editing_agent(
+    hass: HomeAssistant,
+) -> None:
+    """delete_agent=True via main menu (no _editing_agent pre-loaded) still routes
+    to confirm_delete_agent and populates _editing_agent automatically."""
+    router = {
+        "id": "router-menu-del",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_IS_ROUTER: True,
+        CONF_AGENT_NAME: "Main Menu Router",
+        CONF_PRIORITY: PRIORITY_ROUTER,
+        CONF_AGENT_ENABLED: True,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: DEFAULT_ROUTER_TIMEOUT,
+        CONF_ROUTER_LOG_LEVEL: DEFAULT_ROUTER_LOG_LEVEL,
+        CONF_ROUTER_CUSTOM_PROMPT: DEFAULT_ROUTER_CUSTOM_PROMPT,
+        CONF_ROUTER_FALLBACK: DEFAULT_ROUTER_FALLBACK,
+        CONF_AGENT_CACHE_ENABLED: False,
+        CONF_GUARD_RAIL_ENABLED_FOR_AGENT: False,
+    }
+    entry = _entry_with_agents(hass, [router])
+    handler = _make_handler(entry, hass)
+    # Intentionally do NOT set _editing_agent — simulates navigation from main menu
+
+    result = await handler.async_step_configure_routing_agent(
+        {
+            CONF_AGENT_NAME: "Main Menu Router",
+            CONF_AGENT_ENABLED: True,
+            CONF_ENTITY_ID: "conversation.gemini",
+            CONF_TIMEOUT: DEFAULT_ROUTER_TIMEOUT,
+            CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+            CONF_ROUTER_CUSTOM_PROMPT: "",
+            CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+            "delete_agent": True,
+        }
+    )
+
+    # _editing_agent should have been auto-populated
+    assert handler._agent_data.get("_editing_agent") is not None
+    assert handler._agent_data["_editing_agent"]["id"] == "router-menu-del"
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "confirm_delete_agent"
