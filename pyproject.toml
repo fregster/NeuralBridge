@@ -91,6 +91,10 @@ module = ["better_profanity.*", "detoxify.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = "homeassistant.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
 module = "homeassistant.components.conversation.chat_log"
 ignore_missing_imports = true
 
