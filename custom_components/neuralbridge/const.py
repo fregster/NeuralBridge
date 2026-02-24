@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from .prompts_loader import load_prompt
+
 DOMAIN: Final = "neuralbridge"
 
 # Language / i18n
@@ -28,6 +30,7 @@ CONF_TIMEOUT: Final = "timeout"
 AGENT_TYPE_OLLAMA: Final = "ollama"
 AGENT_TYPE_EXISTING: Final = "existing_integration"
 AGENT_TYPE_LOCAL_HA: Final = "home_assistant"
+AGENT_TYPE_WEB_SEARCH: Final = "web_search"
 
 # Default values
 DEFAULT_PRIORITY: Final = 50
@@ -51,7 +54,10 @@ MSG_ALL_AGENTS_FAILED: Final = "All agents failed to process the request"
 MSG_NO_AGENTS_CONFIGURED: Final = "No agents configured"
 
 # Response messages
-FALLBACK_RESPONSE: Final = "I'm having trouble connecting to my AI agents right now."
+FALLBACK_RESPONSE: Final = (
+    "I'm having trouble connecting to my AI agents right now. "
+    "Try rephrasing your request or check your agent settings."
+)
 NO_AGENTS_RESPONSE: Final = (
     "No AI agents are configured. Please add agents in the integration settings."
 )
@@ -111,16 +117,20 @@ DEFAULT_AGENT_ENABLED: Final = True
 CONF_SYSTEM_PROMPT: Final = "system_prompt"
 DEFAULT_SYSTEM_PROMPT: Final = ""
 
-# Global default prompt — used as fallback when an Ollama agent has no per-agent system prompt
+# Global default prompt — used as fallback when an Ollama agent has no per-agent system prompt.
+# Edit custom_components/neuralbridge/prompts/default_agent.txt to customise.
 CONF_DEFAULT_PROMPT: Final = "default_prompt"
-DEFAULT_DEFAULT_PROMPT: Final = (
-    "You are a voice assistant for Home Assistant.\n"
-    "Answer questions about the world truthfully.\n"
-    "Answer in the style of a witty British butler, answer only in plain text; "
-    "keep it simple, to the point, and avoid swearing.\n\n"
-    "Answer with time in 24-hour format and state the current timezone "
-    "(For example British Summer Time or GMT).\n\n"
-    "When saying a date use the format day month year eg 5th of January 2025."
+DEFAULT_DEFAULT_PROMPT: Final = load_prompt(
+    "default_agent.txt",
+    fallback=(
+        "You are a voice assistant for Home Assistant.\n"
+        "Answer questions about the world truthfully.\n"
+        "Answer in the style of a witty British butler, answer only in plain text; "
+        "keep it simple, to the point, and avoid swearing.\n\n"
+        "Answer with time in 24-hour format and state the current timezone "
+        "(For example British Summer Time or GMT).\n\n"
+        "When saying a date use the format day month year eg 5th of January 2025."
+    ),
 )
 
 # Response cache (global)
@@ -141,6 +151,7 @@ DATA_STATISTICS: Final = "statistics"
 DATA_RESPONSE_CACHE: Final = "response_cache"
 DATA_SESSION_MEMORY: Final = "session_memory"
 DATA_CIRCUIT_BREAKER: Final = "circuit_breaker"
+DATA_ENTITY_CONTEXT: Final = "entity_context_cache"
 
 # Service names
 SERVICE_CLEAR_CONVERSATION: Final = "clear_conversation"
@@ -161,23 +172,32 @@ DEFAULT_RETRY_BASE_DELAY: Final = 1.0  # seconds
 
 # Router agent JSON classification prompt
 # Sent to is_router Ollama agents to classify and route incoming requests.
-# Returns a JSON object with local_ha and complexity fields.
-# Use .format(user_text=...) when building the final prompt.
-ROUTER_CLASSIFICATION_PROMPT: Final = (
-    "You are a smart home request classifier.\n"
-    "Analyse the user message and respond with ONLY a valid JSON object — no other text.\n"
-    "The JSON must contain exactly these two fields:\n"
-    '  "local_ha": boolean — true if this is a home automation or device control request, '
-    "false for general questions or knowledge queries.\n"
-    '  "complexity": integer — 1 (simple/factual) to 100 (complex reasoning). '
-    "Use 0 to signal that the request should be BLOCKED.\n"
-    "Respond with complexity 0 ONLY for harmful, illegal, abusive, or clearly "
-    "inappropriate requests.\n"
-    "Examples:\n"
-    '  Home control: {"local_ha": true, "complexity": 5}\n'
-    '  General question: {"local_ha": false, "complexity": 30}\n'
-    '  Block: {"local_ha": false, "complexity": 0}\n\n'
-    "User message: {user_text}"
+# Returns a JSON object with local_ha, web_search, and complexity fields.
+# Use .replace("{user_text}", user_text) when building the final prompt.
+# Edit custom_components/neuralbridge/prompts/router_classification.txt to customise.
+ROUTER_CLASSIFICATION_PROMPT: Final = load_prompt(
+    "router_classification.txt",
+    fallback=(
+        "You are a smart home request classifier.\n"
+        "Analyse the user message and respond with ONLY a valid JSON object — no other text.\n"
+        "The JSON must contain exactly these three fields:\n"
+        '  "local_ha": boolean — true if this is a home automation or device control request, '
+        "false for general questions or knowledge queries.\n"
+        '  "web_search": boolean — true if the answer requires real-time or current information '
+        "(e.g. news, current leaders, live sport scores, today's weather, financial data, "
+        "recent events). False for static knowledge or home control.\n"
+        '  "complexity": integer — 1 (simple/factual) to 100 (complex reasoning). '
+        "Use 0 to signal that the request should be BLOCKED.\n"
+        "Respond with complexity 0 ONLY for harmful, illegal, abusive, or clearly "
+        "inappropriate requests.\n"
+        "When web_search is true, local_ha should be false.\n"
+        "Examples:\n"
+        '  Home control: {"local_ha": true, "web_search": false, "complexity": 5}\n'
+        '  General knowledge: {"local_ha": false, "web_search": false, "complexity": 30}\n'
+        '  Current news/data: {"local_ha": false, "web_search": true, "complexity": 40}\n'
+        '  Block: {"local_ha": false, "web_search": false, "complexity": 0}\n\n'
+        "User message: {user_text}"
+    ),
 )
 
 # JSON response key names expected in a router agent's classification response
@@ -216,3 +236,21 @@ DEFAULT_ROUTER_CUSTOM_PROMPT: Final = ""
 # Internal sentinel complexity value used by _apply_router_decision to signal
 # "skip routing entirely — pass all processing agents through unchanged".
 ROUTER_SKIP_ROUTING_COMPLEXITY: Final = -1
+
+# Web search provider keys
+SEARCH_PROVIDER_BRAVE: Final = "brave"
+SEARCH_PROVIDERS: Final[list[str]] = [SEARCH_PROVIDER_BRAVE]
+
+# Web search agent configuration keys
+CONF_SEARCH_PROVIDER: Final = "search_provider"
+CONF_SEARCH_API_KEY: Final = "search_api_key"
+CONF_SEARCH_RESULT_COUNT: Final = "search_result_count"
+CONF_SEARCH_MAX_SNIPPET_LEN: Final = "search_max_snippet_len"
+
+# Web search defaults
+DEFAULT_SEARCH_RESULT_COUNT: Final = 5
+DEFAULT_SEARCH_MAX_SNIPPET_LEN: Final = 200
+DEFAULT_SEARCH_TIMEOUT: Final = 15  # seconds — network round-trip is slower than local LLM
+
+# Router response key for web search routing
+ROUTER_RESPONSE_KEY_WEB_SEARCH: Final = "web_search"

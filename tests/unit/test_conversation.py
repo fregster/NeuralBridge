@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextvars import ContextVar
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,6 +24,7 @@ from custom_components.neuralbridge.const import (
     AGENT_TYPE_EXISTING,
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
+    AGENT_TYPE_WEB_SEARCH,
     CONF_AGENT_ASSIST_MODE,
     CONF_AGENT_CACHE_ENABLED,
     CONF_AGENT_ENABLED,
@@ -44,6 +46,9 @@ from custom_components.neuralbridge.const import (
     CONF_ROUTER_CUSTOM_PROMPT,
     CONF_ROUTER_FALLBACK,
     CONF_ROUTER_LOG_LEVEL,
+    CONF_SEARCH_API_KEY,
+    CONF_SEARCH_PROVIDER,
+    CONF_SEARCH_RESULT_COUNT,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DATA_CIRCUIT_BREAKER,
@@ -64,6 +69,7 @@ from custom_components.neuralbridge.const import (
     ROUTER_LOG_LEVEL_DEBUG_QUERY,
     ROUTER_LOG_LEVEL_NONE,
     ROUTER_SKIP_ROUTING_COMPLEXITY,
+    SEARCH_PROVIDER_BRAVE,
     SIGNAL_STATS_UPDATED,
 )
 from custom_components.neuralbridge.conversation import (
@@ -73,6 +79,7 @@ from custom_components.neuralbridge.conversation import (
     _parse_router_response,
     async_setup_entry,
 )
+from custom_components.neuralbridge.entity_context import EntityContextCache
 from custom_components.neuralbridge.guard_rail import GuardRailResult
 
 # ---------------------------------------------------------------------------
@@ -1126,7 +1133,7 @@ async def test_check_with_routers_block_stops_at_first_router(hass: HomeAssistan
 
     call_count = 0
 
-    def always_block(router_config: dict, user_text: str) -> None:
+    def always_block(router_config: dict, user_text: str, area_context: str | None = None) -> None:
         nonlocal call_count
         call_count += 1
 
@@ -1372,6 +1379,65 @@ async def test_classify_with_router_reuses_existing_client(hass: HomeAssistant) 
 
 
 # ---------------------------------------------------------------------------
+# Test 47b — _classify_with_router: entity context appended to prompt
+# ---------------------------------------------------------------------------
+
+
+async def test_classify_with_router_appends_entity_context(hass: HomeAssistant) -> None:
+    """Entity context summary is appended to the classification prompt when non-empty."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config(agent_id="ctx-router")
+
+    mock_cache = MagicMock(spec=EntityContextCache)
+    mock_cache.get_summary.return_value = "Available smart home entities:\n- weather: Met.no"
+    conv_agent._entity_context_cache = mock_cache
+
+    captured_prompt: list[str] = []
+
+    async def _capture_generate(prompt: str, **_kwargs: object) -> str:
+        captured_prompt.append(prompt)
+        return '{"local_ha": true, "complexity": 8}'
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient.generate",
+        side_effect=_capture_generate,
+    ):
+        result = await conv_agent._classify_with_router(router, "What is the weather?")
+
+    assert result is not None
+    assert result.local_ha is True
+    assert len(captured_prompt) == 1
+    assert "Available smart home entities:" in captured_prompt[0]
+    assert "Met.no" in captured_prompt[0]
+
+
+async def test_classify_with_router_skips_empty_entity_context(hass: HomeAssistant) -> None:
+    """No entity context is appended to the prompt when the summary is empty."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config(agent_id="no-ctx-router")
+
+    mock_cache = MagicMock(spec=EntityContextCache)
+    mock_cache.get_summary.return_value = ""
+    conv_agent._entity_context_cache = mock_cache
+
+    captured_prompt: list[str] = []
+
+    async def _capture_generate(prompt: str, **_kwargs: object) -> str:
+        captured_prompt.append(prompt)
+        return '{"local_ha": false, "complexity": 30}'
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient.generate",
+        side_effect=_capture_generate,
+    ):
+        await conv_agent._classify_with_router(router, "What is 2+2?")
+
+    assert "Available smart home entities:" not in captured_prompt[0]
+
+
+# ---------------------------------------------------------------------------
 # Test 48 — async_setup_entry creates and registers agent entity
 # ---------------------------------------------------------------------------
 
@@ -1472,6 +1538,103 @@ async def test_process_with_existing_service_raises_returns_none(
     result = await agent._process_with_existing(agent_cfg, _make_input())
 
     assert result is None
+
+
+async def test_process_with_existing_empty_speech_returns_none(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """_process_with_existing returns None when the response speech text is empty."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    agent_cfg = {CONF_ENTITY_ID: "conversation.test", CONF_AGENT_NAME: "Test"}
+
+    # Response has valid structure but empty speech text.
+    service_response = {"response": {"speech": {"plain": {"speech": ""}}}}
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = hass.config.language
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(return_value=service_response)
+    agent.hass = mock_hass
+
+    result = await agent._process_with_existing(agent_cfg, _make_input())
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 52b — _process_with_existing: ChatLog is isolated during sub-call
+# ---------------------------------------------------------------------------
+# When HA 2025.2+ is in use, the built-in HA conversation agent writes the
+# response to the shared ChatLog as part of its own async_process.  Because
+# _process_with_existing shares the same asyncio context, that write would land
+# in the *outer* ChatLog and cause the response text to appear twice in the Assist
+# UI.  The fix temporarily sets current_chat_log to None before the service call
+# and restores the original value afterwards.
+
+
+async def test_process_with_existing_chat_log_isolated_during_sub_call(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """current_chat_log is set to None for the sub-agent service call and restored.
+
+    In HA 2025.2+ the built-in HA conversation agent can write its response to the
+    shared ChatLog as part of its own async_process.  Because _process_with_existing
+    runs in the same asyncio context the write would land in the *outer* ChatLog,
+    causing the response text to be added twice and appearing doubled in Assist UI.
+
+    The fix temporarily sets current_chat_log to None for the duration of the service
+    call (isolating the sub-agent) then restores the original value so
+    _maybe_add_to_chat_log can add the response exactly once.
+    """
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    agent_cfg = {CONF_ENTITY_ID: "conversation.builtin", CONF_AGENT_NAME: "BuiltIn"}
+
+    # A sentinel object that represents the "outer" ChatLog instance.
+    outer_chat_log = MagicMock(name="outer_chat_log")
+
+    # Use a real ContextVar to simulate current_chat_log.
+    fake_current_chat_log: ContextVar[Any] = ContextVar("current_chat_log", default=None)
+    outer_token = fake_current_chat_log.set(outer_chat_log)
+
+    # Track what current_chat_log.get() returns at the moment the service is called.
+    chat_log_value_during_call: list[Any] = []
+
+    service_response = {"response": {"speech": {"plain": {"speech": "hello"}}}}
+
+    async def mock_service_call(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        chat_log_value_during_call.append(fake_current_chat_log.get())
+        return service_response
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = hass.config.language
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = mock_service_call
+    agent.hass = mock_hass
+
+    # Patch the chat_log module inside conversation.py to use our fake ContextVar.
+    fake_chat_log_module = MagicMock()
+    fake_chat_log_module.current_chat_log = fake_current_chat_log
+
+    with patch.dict(
+        "sys.modules",
+        {"homeassistant.components.conversation.chat_log": fake_chat_log_module},
+    ):
+        result = await agent._process_with_existing(agent_cfg, _make_input("Hi"))
+
+    # The sub-agent service call must have seen None (isolated from outer ChatLog).
+    assert len(chat_log_value_during_call) == 1
+    assert chat_log_value_during_call[0] is None, (
+        "ChatLog was not isolated: sub-agent saw a non-None ChatLog and "
+        "could produce duplicate response text in Assist UI"
+    )
+    # The result is still correctly returned.
+    assert result is not None
+    assert result.response.speech["plain"]["speech"] == "hello"
+    # The outer ChatLog is restored — _maybe_add_to_chat_log can re-add correctly.
+    assert fake_current_chat_log.get() == outer_chat_log
+
+    # Clean up the ContextVar (restore its value to the pre-test state).
+    fake_current_chat_log.reset(outer_token)
 
 
 # ---------------------------------------------------------------------------
@@ -3395,3 +3558,760 @@ async def test_async_process_skip_routing_uses_all_agents(hass: HomeAssistant) -
     agent_ids = [a["id"] for a in call_agents]
     assert "local-skip" in agent_ids
     assert "ollama-skip" in agent_ids
+
+
+# ---------------------------------------------------------------------------
+# Helpers for web search tests
+# ---------------------------------------------------------------------------
+
+
+def _make_web_search_agent(
+    priority: int = 40,
+    agent_id: str = "ws-agent-1",
+    name: str = "Web Search",
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """Return a minimal web search agent config dict."""
+    return {
+        "id": agent_id,
+        CONF_AGENT_TYPE: AGENT_TYPE_WEB_SEARCH,
+        CONF_AGENT_ENABLED: enabled,
+        CONF_AGENT_NAME: name,
+        CONF_PRIORITY: priority,
+        CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE,
+        CONF_SEARCH_API_KEY: "brave-test-key",
+        CONF_SEARCH_RESULT_COUNT: 3,
+        CONF_TIMEOUT: 10,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Test 130 — RouterDecision with web_search field
+# ---------------------------------------------------------------------------
+
+
+def test_router_decision_web_search_defaults_false() -> None:
+    """RouterDecision.web_search defaults to False when not supplied."""
+    decision = RouterDecision(local_ha=False, complexity=50)
+    assert decision.web_search is False
+
+
+def test_router_decision_web_search_can_be_true() -> None:
+    """RouterDecision stores web_search=True correctly."""
+    decision = RouterDecision(local_ha=False, complexity=40, web_search=True)
+    assert decision.web_search is True
+
+
+def test_router_decision_equality_includes_web_search() -> None:
+    """Two RouterDecisions with different web_search values are not equal."""
+    d1 = RouterDecision(local_ha=False, complexity=40, web_search=True)
+    d2 = RouterDecision(local_ha=False, complexity=40, web_search=False)
+    assert d1 != d2
+
+
+def test_router_decision_hash_includes_web_search() -> None:
+    """RouterDecision hash differs when web_search differs."""
+    d1 = RouterDecision(local_ha=False, complexity=40, web_search=True)
+    d2 = RouterDecision(local_ha=False, complexity=40, web_search=False)
+    assert hash(d1) != hash(d2)
+
+
+def test_router_decision_repr_includes_web_search() -> None:
+    """RouterDecision repr includes all three fields."""
+    d = RouterDecision(local_ha=True, complexity=30, web_search=True)
+    r = repr(d)
+    assert "web_search=True" in r
+    assert "local_ha=True" in r
+    assert "complexity=30" in r
+
+
+def test_router_decision_immutability_web_search() -> None:
+    """RouterDecision with web_search cannot be mutated."""
+    d = RouterDecision(local_ha=False, complexity=50, web_search=True)
+    with pytest.raises(AttributeError):
+        d.web_search = False  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Test 131 — _parse_router_response with web_search field
+# ---------------------------------------------------------------------------
+
+
+def test_parse_router_response_with_web_search_true() -> None:
+    """web_search: true in JSON is parsed into RouterDecision.web_search=True."""
+    raw = '{"local_ha": false, "web_search": true, "complexity": 40}'
+    result = _parse_router_response(raw)
+    assert result is not None
+    assert result.web_search is True
+    assert result.local_ha is False
+    assert result.complexity == 40
+
+
+def test_parse_router_response_without_web_search_defaults_false() -> None:
+    """Absent web_search key defaults RouterDecision.web_search to False."""
+    raw = '{"local_ha": false, "complexity": 30}'
+    result = _parse_router_response(raw)
+    assert result is not None
+    assert result.web_search is False
+
+
+def test_parse_router_response_web_search_false_explicit() -> None:
+    """Explicit web_search: false is stored as False."""
+    raw = '{"local_ha": true, "web_search": false, "complexity": 5}'
+    result = _parse_router_response(raw)
+    assert result is not None
+    assert result.web_search is False
+    assert result.local_ha is True
+
+
+# ---------------------------------------------------------------------------
+# Test 132 — _apply_router_decision web_search routing
+# ---------------------------------------------------------------------------
+
+
+def test_apply_router_decision_web_search_promotes_web_agents() -> None:
+    """web_search=True moves WEB_SEARCH agents to the front."""
+    local = {**_make_local_ha_agent(priority=10, agent_id="local"), CONF_AGENT_ENABLED: True}
+    ollama = {**_make_ollama_agent(priority=30, agent_id="ollama"), CONF_AGENT_ENABLED: True}
+    web = {**_make_web_search_agent(priority=50, agent_id="ws"), CONF_AGENT_ENABLED: True}
+
+    decision = RouterDecision(local_ha=False, complexity=40, web_search=True)
+    ordered = _apply_router_decision(decision, [local, ollama, web])
+
+    assert ordered[0]["id"] == "ws"
+
+
+def test_apply_router_decision_web_search_also_includes_other_agents() -> None:
+    """After promotion, non-web-search agents are still included."""
+    local = {**_make_local_ha_agent(priority=10, agent_id="local"), CONF_AGENT_ENABLED: True}
+    ollama = {**_make_ollama_agent(priority=30, agent_id="ollama"), CONF_AGENT_ENABLED: True}
+    web = {**_make_web_search_agent(priority=50, agent_id="ws"), CONF_AGENT_ENABLED: True}
+
+    decision = RouterDecision(local_ha=False, complexity=40, web_search=True)
+    ordered = _apply_router_decision(decision, [local, ollama, web])
+
+    ids = [a["id"] for a in ordered]
+    assert "ollama" in ids
+    assert "local" in ids
+
+
+def test_apply_router_decision_web_search_multiple_web_agents_ordered() -> None:
+    """Multiple WEB_SEARCH agents are promoted and keep their relative order."""
+    ws1 = {**_make_web_search_agent(priority=20, agent_id="ws1"), CONF_AGENT_ENABLED: True}
+    ws2 = {**_make_web_search_agent(priority=60, agent_id="ws2"), CONF_AGENT_ENABLED: True}
+    ollama = {**_make_ollama_agent(priority=40, agent_id="ol"), CONF_AGENT_ENABLED: True}
+
+    decision = RouterDecision(local_ha=False, complexity=40, web_search=True)
+    ordered = _apply_router_decision(decision, [ws1, ollama, ws2])
+
+    assert ordered[0]["id"] == "ws1"
+    assert ordered[1]["id"] == "ws2"
+
+
+def test_apply_router_decision_no_web_search_flag_does_not_promote() -> None:
+    """web_search=False keeps normal local_ha routing logic."""
+    local = {**_make_local_ha_agent(priority=10, agent_id="local"), CONF_AGENT_ENABLED: True}
+    web = {**_make_web_search_agent(priority=50, agent_id="ws"), CONF_AGENT_ENABLED: True}
+
+    decision = RouterDecision(local_ha=True, complexity=5, web_search=False)
+    ordered = _apply_router_decision(decision, [local, web])
+
+    # local_ha=True promotes LOCAL_HA agents; web search not at front
+    assert ordered[0]["id"] == "local"
+
+
+# ---------------------------------------------------------------------------
+# Test 133 — _try_agent dispatches to _process_with_web_search
+# ---------------------------------------------------------------------------
+
+
+async def test_try_agent_dispatches_to_web_search(hass: HomeAssistant) -> None:
+    """_try_agent calls _process_with_web_search for AGENT_TYPE_WEB_SEARCH."""
+    entry = _entry_with_agents(_make_web_search_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    agent_config = _make_web_search_agent()
+
+    ok_response = intent.IntentResponse(language="en")
+    ok_response.async_set_speech("search result")
+    expected = ConversationResult(response=ok_response, conversation_id=None)
+
+    with patch.object(
+        conv_agent,
+        "_process_with_web_search",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ) as mock_ws:
+        result, timed_out = await conv_agent._try_agent(agent_config, _make_input("latest news"))
+
+    mock_ws.assert_called_once()
+    assert result is expected
+    assert timed_out is False
+
+
+# ---------------------------------------------------------------------------
+# Test 134 — _process_with_web_search
+# ---------------------------------------------------------------------------
+
+
+async def test_process_with_web_search_success_returns_result(hass: HomeAssistant) -> None:
+    """_process_with_web_search returns a ConversationResult on success."""
+    entry = _entry_with_agents(_make_web_search_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    agent_config = _make_web_search_agent()
+
+    with patch("custom_components.neuralbridge.conversation.WebSearchClient") as mock_cls:
+        mock_client = MagicMock()
+        mock_client.search_and_summarise = AsyncMock(return_value="Here is what I found: ...")
+        mock_cls.return_value = mock_client
+
+        result = await conv_agent._process_with_web_search(agent_config, _make_input("news"))
+
+    assert result is not None
+    speech = result.response.speech.get("plain", {}).get("speech", "")
+    assert "Here is what I found" in speech
+
+
+async def test_process_with_web_search_no_results_returns_none(hass: HomeAssistant) -> None:
+    """_process_with_web_search returns None when search returns no summary."""
+    entry = _entry_with_agents(_make_web_search_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    agent_config = _make_web_search_agent()
+
+    with patch("custom_components.neuralbridge.conversation.WebSearchClient") as mock_cls:
+        mock_client = MagicMock()
+        mock_client.search_and_summarise = AsyncMock(return_value=None)
+        mock_cls.return_value = mock_client
+
+        result = await conv_agent._process_with_web_search(agent_config, _make_input("q"))
+
+    assert result is None
+
+
+async def test_process_with_web_search_caches_client_by_agent_id(hass: HomeAssistant) -> None:
+    """A WebSearchClient is created once per agent_id and reused."""
+    entry = _entry_with_agents(_make_web_search_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    agent_config = _make_web_search_agent(agent_id="ws-cache-test")
+
+    with patch("custom_components.neuralbridge.conversation.WebSearchClient") as mock_cls:
+        mock_client = MagicMock()
+        mock_client.search_and_summarise = AsyncMock(return_value="result")
+        mock_cls.return_value = mock_client
+
+        await conv_agent._process_with_web_search(agent_config, _make_input("q1"))
+        await conv_agent._process_with_web_search(agent_config, _make_input("q2"))
+
+    # Constructor called only once despite two calls
+    assert mock_cls.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 135 — async_process routes to web search agent via router
+# ---------------------------------------------------------------------------
+
+
+async def test_async_process_web_search_agent_handles_timely_query(
+    hass: HomeAssistant,
+) -> None:
+    """When router sets web_search=True the web search agent is promoted and called."""
+    ws_agent = _make_web_search_agent(priority=50, agent_id="ws-integration")
+    entry = _entry_with_agents(ws_agent)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    web_decision = RouterDecision(local_ha=False, complexity=40, web_search=True)
+    ok_response = intent.IntentResponse(language="en")
+    ok_response.async_set_speech("The PM is Jane Smith.")
+    ws_result = ConversationResult(response=ok_response, conversation_id=None)
+
+    with (
+        patch.object(
+            conv_agent,
+            "_check_with_routers",
+            new_callable=AsyncMock,
+            return_value=web_decision,
+        ),
+        patch.object(
+            conv_agent,
+            "_try_agent_with_tracking",
+            new_callable=AsyncMock,
+            return_value=ws_result,
+        ) as mock_try,
+    ):
+        result = await conv_agent.async_process(
+            _make_input("Who is the current UK prime minister?")
+        )
+
+    mock_try.assert_called_once()
+    first_agent = mock_try.call_args[0][0]
+    assert first_agent[CONF_AGENT_TYPE] == AGENT_TYPE_WEB_SEARCH
+    speech = result.response.speech.get("plain", {}).get("speech", "")
+    assert "Jane Smith" in speech
+
+
+# ===========================================================================
+# Feature: Area-aware routing (_get_device_area)
+# ===========================================================================
+
+
+def test_get_device_area_returns_none_for_none_device_id(hass: HomeAssistant) -> None:
+    """_get_device_area returns None when device_id is None."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    assert agent._get_device_area(None) is None
+
+
+def test_get_device_area_returns_none_for_unknown_device(hass: HomeAssistant) -> None:
+    """_get_device_area returns None when the device_id is not in the registry."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    with patch("custom_components.neuralbridge.conversation.dr.async_get") as mock_dr:
+        mock_dr.return_value.async_get.return_value = None
+        result = agent._get_device_area("unknown-device-id")
+
+    assert result is None
+
+
+def test_get_device_area_returns_none_for_device_without_area(hass: HomeAssistant) -> None:
+    """_get_device_area returns None when the device has no area_id."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    mock_device = MagicMock()
+    mock_device.area_id = None
+
+    with patch("custom_components.neuralbridge.conversation.dr.async_get") as mock_dr:
+        mock_dr.return_value.async_get.return_value = mock_device
+        result = agent._get_device_area("device-no-area")
+
+    assert result is None
+
+
+def test_get_device_area_returns_none_when_area_registry_returns_none(
+    hass: HomeAssistant,
+) -> None:
+    """_get_device_area returns None when the area_id is not in the area registry."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    mock_device = MagicMock()
+    mock_device.area_id = "area-ghost"
+
+    with (
+        patch("custom_components.neuralbridge.conversation.dr.async_get") as mock_dr,
+        patch("custom_components.neuralbridge.conversation.ar.async_get") as mock_ar,
+    ):
+        mock_dr.return_value.async_get.return_value = mock_device
+        mock_ar.return_value.async_get_area.return_value = None
+        result = agent._get_device_area("device-with-ghost-area")
+
+    assert result is None
+
+
+def test_get_device_area_returns_area_name(hass: HomeAssistant) -> None:
+    """_get_device_area returns the area name when device and area are known."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    mock_device = MagicMock()
+    mock_device.area_id = "area-kitchen"
+    mock_area = MagicMock()
+    mock_area.name = "Kitchen"
+
+    with (
+        patch("custom_components.neuralbridge.conversation.dr.async_get") as mock_dr,
+        patch("custom_components.neuralbridge.conversation.ar.async_get") as mock_ar,
+    ):
+        mock_dr.return_value.async_get.return_value = mock_device
+        mock_ar.return_value.async_get_area.return_value = mock_area
+        result = agent._get_device_area("device-kitchen-echo")
+
+    assert result == "Kitchen"
+
+
+async def test_classify_with_router_injects_area_context_into_prompt(
+    hass: HomeAssistant,
+) -> None:
+    """_classify_with_router appends 'Device area: ...' when area_context is provided."""
+    router = {
+        "id": "router-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_OLLAMA,
+        CONF_AGENT_NAME: "Router",
+        CONF_OLLAMA_URL: "http://localhost:11434",
+        CONF_OLLAMA_MODEL: "qwen2.5:0.5b",
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+        CONF_TIMEOUT: 5,
+    }
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    captured: list[str] = []
+
+    async def _mock_backend(_cfg: dict, prompt: str) -> str:
+        captured.append(prompt)
+        return '{"local_ha": true, "web_search": false, "complexity": 10}'
+
+    with patch.object(conv_agent, "_call_router_backend", side_effect=_mock_backend):
+        decision = await conv_agent._classify_with_router(
+            router, "Turn on the lights", area_context="Kitchen"
+        )
+
+    assert decision is not None
+    assert "Device area: Kitchen" in captured[0]
+
+
+async def test_classify_with_router_no_area_context_omits_area_line(
+    hass: HomeAssistant,
+) -> None:
+    """_classify_with_router does not add a 'Device area' line when area_context is None."""
+    router = {
+        "id": "router-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_OLLAMA,
+        CONF_AGENT_NAME: "Router",
+        CONF_OLLAMA_URL: "http://localhost:11434",
+        CONF_OLLAMA_MODEL: "qwen2.5:0.5b",
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+        CONF_TIMEOUT: 5,
+    }
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    captured: list[str] = []
+
+    async def _mock_backend(_cfg: dict, prompt: str) -> str:
+        captured.append(prompt)
+        return '{"local_ha": false, "web_search": false, "complexity": 30}'
+
+    with patch.object(conv_agent, "_call_router_backend", side_effect=_mock_backend):
+        await conv_agent._classify_with_router(router, "What is the boiling point of water?")
+
+    assert "Device area" not in captured[0]
+
+
+async def test_check_with_routers_passes_area_context_to_classify(
+    hass: HomeAssistant,
+) -> None:
+    """_check_with_routers resolves device area and forwards it to each router."""
+    router = {
+        "id": "router-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_OLLAMA,
+        CONF_AGENT_NAME: "Router",
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+        CONF_TIMEOUT: 5,
+    }
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    user_input = ConversationInput(
+        text="Turn on the lights",
+        context=Context(),
+        conversation_id=None,
+        device_id="device-kitchen",
+        language="en",
+    )
+
+    calls: list[tuple] = []
+
+    async def _mock_classify(
+        router_cfg: dict, user_text: str, area_context: str | None = None
+    ) -> RouterDecision:
+        calls.append((user_text, area_context))
+        return RouterDecision(local_ha=True, complexity=10)
+
+    with (
+        patch.object(conv_agent, "_get_device_area", return_value="Living Room"),
+        patch.object(conv_agent, "_classify_with_router", side_effect=_mock_classify),
+    ):
+        await conv_agent._check_with_routers(user_input, [router])
+
+    assert len(calls) == 1
+    assert calls[0] == ("Turn on the lights", "Living Room")
+
+
+async def test_process_with_ollama_injects_area_context(hass: HomeAssistant) -> None:
+    """_process_with_ollama prepends '[Area: X]' to the user message when area is known."""
+    ollama_agent = _make_ollama_agent()
+    entry = _entry_with_agents(ollama_agent)
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    user_input = ConversationInput(
+        text="turn on the lights",
+        context=Context(),
+        conversation_id=None,
+        device_id="device-bedroom",
+        language="en",
+    )
+
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(return_value="OK, bedroom lights on.")
+
+    with (
+        patch.object(conv_agent, "_get_device_area", return_value="Bedroom"),
+        patch(
+            "custom_components.neuralbridge.conversation.OllamaClient",
+            return_value=mock_client,
+        ),
+    ):
+        result = await conv_agent._process_with_ollama(ollama_agent, user_input)
+
+    assert result is not None
+    messages = mock_client.chat.call_args[0][0]
+    user_msg = messages[-1]
+    assert user_msg["role"] == "user"
+    assert user_msg["content"] == "[Area: Bedroom] turn on the lights"
+
+
+async def test_process_with_ollama_no_area_no_prefix(hass: HomeAssistant) -> None:
+    """_process_with_ollama sends the original text unmodified when there is no area."""
+    ollama_agent = _make_ollama_agent()
+    entry = _entry_with_agents(ollama_agent)
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(return_value="It is 14:30.")
+
+    with (
+        patch.object(conv_agent, "_get_device_area", return_value=None),
+        patch(
+            "custom_components.neuralbridge.conversation.OllamaClient",
+            return_value=mock_client,
+        ),
+    ):
+        result = await conv_agent._process_with_ollama(
+            ollama_agent, _make_input("What time is it?")
+        )
+
+    assert result is not None
+    messages = mock_client.chat.call_args[0][0]
+    user_msg = messages[-1]
+    assert user_msg["content"] == "What time is it?"
+
+
+# ===========================================================================
+# Feature: Explicit agent override (_check_explicit_agent_override)
+# ===========================================================================
+
+
+def test_check_explicit_agent_override_returns_none_when_no_match(
+    hass: HomeAssistant,
+) -> None:
+    """No override prefix → returns None (follow normal routing)."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    agents = [_make_ollama_agent(name="Gemini")]
+    result = conv_agent._check_explicit_agent_override(
+        _make_input("What is the weather today?"), agents
+    )
+
+    assert result is None
+
+
+def test_check_explicit_agent_override_ask_prefix(hass: HomeAssistant) -> None:
+    """'Ask {name}: {query}' detects the override and strips the prefix."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    agent = _make_ollama_agent(name="Gemini")
+    user_input = _make_input("Ask Gemini: What is the weather today?")
+
+    result = conv_agent._check_explicit_agent_override(user_input, [agent])
+
+    assert result is not None
+    stripped_input, matched = result
+    assert stripped_input.text == "What is the weather today?"
+    assert matched == [agent]
+
+
+def test_check_explicit_agent_override_use_prefix(hass: HomeAssistant) -> None:
+    """'Use {name}: {query}' detects the override and strips the prefix."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    agent = _make_ollama_agent(name="Ollama")
+    user_input = _make_input("Use Ollama: Summarise the news")
+
+    result = conv_agent._check_explicit_agent_override(user_input, [agent])
+
+    assert result is not None
+    stripped_input, matched = result
+    assert stripped_input.text == "Summarise the news"
+    assert matched == [agent]
+
+
+def test_check_explicit_agent_override_name_only_prefix(hass: HomeAssistant) -> None:
+    """'{name}: {query}' plain prefix also triggers the override."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    agent = _make_ollama_agent(name="ChatGPT")
+    user_input = _make_input("ChatGPT: write me a poem about robots")
+
+    result = conv_agent._check_explicit_agent_override(user_input, [agent])
+
+    assert result is not None
+    stripped_input, _ = result
+    assert stripped_input.text == "write me a poem about robots"
+
+
+def test_check_explicit_agent_override_case_insensitive(hass: HomeAssistant) -> None:
+    """Override prefix matching is case-insensitive."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    agent = _make_ollama_agent(name="Gemini")
+
+    for text in ("ask gemini: hello", "ASK GEMINI: hello", "Ask GEMINI: hello"):
+        result = conv_agent._check_explicit_agent_override(_make_input(text), [agent])
+        assert result is not None, f"Expected match for '{text}'"
+        assert result[0].text == "hello"
+
+
+def test_check_explicit_agent_override_empty_query_not_matched(
+    hass: HomeAssistant,
+) -> None:
+    """An override prefix with an empty body (only whitespace) is not matched."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    agent = _make_ollama_agent(name="Gemini")
+
+    for text in ("Ask Gemini:", "Ask Gemini:   ", "Gemini:"):
+        result = conv_agent._check_explicit_agent_override(_make_input(text), [agent])
+        assert result is None, f"Expected no match for '{text}'"
+
+
+def test_check_explicit_agent_override_no_agents_returns_none(
+    hass: HomeAssistant,
+) -> None:
+    """With an empty agent list, override always returns None."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    result = conv_agent._check_explicit_agent_override(_make_input("Ask Gemini: anything"), [])
+
+    assert result is None
+
+
+def test_check_explicit_agent_override_agent_without_name_skipped(
+    hass: HomeAssistant,
+) -> None:
+    """An agent with no name is skipped and does not cause a match."""
+    entry = _entry_with_agents()
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    nameless = {
+        "id": "agent-nameless",
+        CONF_AGENT_TYPE: AGENT_TYPE_OLLAMA,
+        CONF_AGENT_NAME: "",
+        CONF_PRIORITY: 50,
+    }
+
+    result = conv_agent._check_explicit_agent_override(_make_input(": hello"), [nameless])
+    assert result is None
+
+
+async def test_compute_result_uses_explicit_agent_override(hass: HomeAssistant) -> None:
+    """When an override prefix is detected, routing is bypassed and the named agent is used."""
+    gemini = _make_ollama_agent(name="Gemini", agent_id="gemini-id", priority=60)
+    ollama_local = _make_ollama_agent(name="Ollama Local", agent_id="ollama-id", priority=10)
+    entry = _entry_with_agents(gemini, ollama_local)
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    ok_response = intent.IntentResponse(language="en")
+    ok_response.async_set_speech("Gemini says hello.")
+    gemini_result = ConversationResult(response=ok_response, conversation_id=None)
+
+    called_agents: list[str] = []
+
+    async def _mock_try(agent_cfg: dict, _input: ConversationInput) -> ConversationResult | None:
+        called_agents.append(agent_cfg.get(CONF_AGENT_NAME, ""))
+        if agent_cfg.get(CONF_AGENT_NAME) == "Gemini":
+            return gemini_result
+        return None
+
+    with patch.object(conv_agent, "_try_agent_with_tracking", side_effect=_mock_try):
+        result = await conv_agent._compute_result(_make_input("Ask Gemini: Who invented Python?"))
+
+    # Only Gemini should have been tried; Ollama Local must not be called
+    assert called_agents == ["Gemini"]
+    speech = result.response.speech.get("plain", {}).get("speech", "")
+    assert "Gemini says hello." in speech
+
+
+async def test_compute_result_override_stripped_text_forwarded(
+    hass: HomeAssistant,
+) -> None:
+    """The stripped query (without the override prefix) is forwarded to the agent."""
+    agent = _make_ollama_agent(name="Claude", agent_id="claude-id")
+    entry = _entry_with_agents(agent)
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    received_texts: list[str] = []
+
+    async def _mock_try(_cfg: dict, user_input: ConversationInput) -> ConversationResult | None:
+        received_texts.append(user_input.text)
+        resp = intent.IntentResponse(language="en")
+        resp.async_set_speech("Done.")
+        return ConversationResult(response=resp, conversation_id=None)
+
+    with patch.object(conv_agent, "_try_agent_with_tracking", side_effect=_mock_try):
+        await conv_agent._compute_result(_make_input("Use Claude: Tell me about the Turing test"))
+
+    assert received_texts == ["Tell me about the Turing test"]
+
+
+# ===========================================================================
+# Feature: Fallback response includes recovery suggestion
+# ===========================================================================
+
+
+async def test_fallback_response_contains_recovery_suggestion(
+    hass: HomeAssistant,
+) -> None:
+    """When all agents fail, the response includes a helpful rephrasing suggestion."""
+    agent = _make_ollama_agent()
+    entry = _entry_with_agents(agent)
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    with patch.object(
+        conv_agent, "_try_agent_with_tracking", new_callable=AsyncMock, return_value=None
+    ):
+        result = await conv_agent.async_process(_make_input("Hello"))
+
+    speech = result.response.speech.get("plain", {}).get("speech", "")
+    assert speech == FALLBACK_RESPONSE
+    # Verify the updated message includes actionable guidance
+    assert (
+        "rephrasing" in speech.lower()
+        or "rephrase" in speech.lower()
+        or "settings" in speech.lower()
+    )

@@ -19,6 +19,7 @@ from .const import (
     AGENT_TYPE_EXISTING,
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
+    AGENT_TYPE_WEB_SEARCH,
     CONF_AGENT_ASSIST_MODE,
     CONF_AGENT_CACHE_ENABLED,
     CONF_AGENT_ENABLED,
@@ -47,6 +48,10 @@ from .const import (
     CONF_ROUTER_CUSTOM_PROMPT,
     CONF_ROUTER_FALLBACK,
     CONF_ROUTER_LOG_LEVEL,
+    CONF_SEARCH_API_KEY,
+    CONF_SEARCH_MAX_SNIPPET_LEN,
+    CONF_SEARCH_PROVIDER,
+    CONF_SEARCH_RESULT_COUNT,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DATA_RESPONSE_CACHE,
@@ -72,6 +77,9 @@ from .const import (
     DEFAULT_ROUTER_FALLBACK,
     DEFAULT_ROUTER_LOG_LEVEL,
     DEFAULT_ROUTER_TIMEOUT,
+    DEFAULT_SEARCH_MAX_SNIPPET_LEN,
+    DEFAULT_SEARCH_RESULT_COUNT,
+    DEFAULT_SEARCH_TIMEOUT,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     DOMAIN,
@@ -92,6 +100,8 @@ from .const import (
     ROUTER_LOG_LEVEL_DEBUG,
     ROUTER_LOG_LEVEL_DEBUG_QUERY,
     ROUTER_LOG_LEVEL_NONE,
+    SEARCH_PROVIDER_BRAVE,
+    SEARCH_PROVIDERS,
 )
 from .languages_loader import get_string, list_available_languages
 
@@ -460,6 +470,8 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_configure_ollama()
             if user_input[CONF_AGENT_TYPE] == AGENT_TYPE_EXISTING:
                 return await self.async_step_configure_existing()
+            if user_input[CONF_AGENT_TYPE] == AGENT_TYPE_WEB_SEARCH:
+                return await self.async_step_configure_web_search()
             return await self.async_step_configure_local()
 
         return self.async_show_form(
@@ -480,6 +492,10 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                                 {
                                     "value": AGENT_TYPE_OLLAMA,
                                     "label": self._s("agent_types", "ollama"),
+                                },
+                                {
+                                    "value": AGENT_TYPE_WEB_SEARCH,
+                                    "label": self._s("agent_types", "web_search"),
                                 },
                             ],
                             mode=selector.SelectSelectorMode.DROPDOWN,
@@ -767,6 +783,359 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             },
         )
 
+    # ── Web Search connection validation ───────────────────────────────────────
+
+    async def _validate_web_search_connection(self, provider: str, api_key: str) -> str | None:
+        """Validate a web search API key by running a lightweight test query.
+
+        Args:
+            provider: Provider key (e.g. ``SEARCH_PROVIDER_BRAVE``).
+            api_key: Provider API key (never logged).
+
+        Returns:
+            An error key string if validation fails, None on success.
+        """
+        if not api_key:
+            return "search_api_key_missing"
+
+        if provider != SEARCH_PROVIDER_BRAVE:
+            # Unknown providers are accepted without live validation
+            return None
+
+        return await self._validate_brave_api_key(api_key)
+
+    async def _validate_brave_api_key(self, api_key: str) -> str | None:
+        """Validate a Brave Search API key with a lightweight test query.
+
+        Args:
+            api_key: Brave subscription token (never logged).
+
+        Returns:
+            An error key string if validation fails, None on success.
+        """
+        headers = {
+            "Accept": "application/json",
+            "X-Subscription-Token": api_key,
+        }
+        params: dict[str, Any] = {"q": "test", "count": 1}
+        try:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    "https://api.search.brave.com/res/v1/web/search",
+                    params=params,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as response,
+            ):
+                if response.status == _HTTP_OK:
+                    return None
+                if response.status in (401, 403):
+                    return "invalid_api_key"
+                return "search_api_unreachable"
+        except aiohttp.ClientError:
+            return "search_api_unreachable"
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.exception("Unexpected error validating web search: %s", err)
+            return "unknown"
+
+    # ── Configure web search agent ─────────────────────────────────────────────
+
+    async def async_step_configure_web_search(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure a new web search agent.
+
+        The user picks a provider, supplies an API key, and sets priority and
+        result-count options.  The API key is validated against the provider
+        before the agent is saved.
+
+        Args:
+            user_input: Form data submitted by the user, or None on first load.
+
+        Returns:
+            Form result or redirect to main menu after saving.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            provider: str = user_input.get(CONF_SEARCH_PROVIDER, SEARCH_PROVIDER_BRAVE)
+            api_key: str = user_input.get(CONF_SEARCH_API_KEY, "")
+
+            error_key = await self._validate_web_search_connection(provider, api_key)
+            if error_key:
+                errors["base"] = error_key
+
+            if not errors:
+                agent_config = {
+                    "id": str(uuid4()),
+                    CONF_AGENT_TYPE: AGENT_TYPE_WEB_SEARCH,
+                    CONF_AGENT_ENABLED: DEFAULT_AGENT_ENABLED,
+                    CONF_AGENT_NAME: user_input[CONF_AGENT_NAME],
+                    CONF_PRIORITY: user_input[CONF_PRIORITY],
+                    CONF_SEARCH_PROVIDER: provider,
+                    CONF_SEARCH_API_KEY: api_key,
+                    CONF_SEARCH_RESULT_COUNT: int(
+                        user_input.get(CONF_SEARCH_RESULT_COUNT, DEFAULT_SEARCH_RESULT_COUNT)
+                    ),
+                    CONF_SEARCH_MAX_SNIPPET_LEN: int(
+                        user_input.get(CONF_SEARCH_MAX_SNIPPET_LEN, DEFAULT_SEARCH_MAX_SNIPPET_LEN)
+                    ),
+                    "timeout": int(user_input.get(CONF_TIMEOUT, DEFAULT_SEARCH_TIMEOUT)),
+                    CONF_AGENT_CACHE_ENABLED: user_input.get(
+                        CONF_AGENT_CACHE_ENABLED, DEFAULT_AGENT_CACHE_ENABLED
+                    ),
+                    CONF_GUARD_RAIL_ENABLED_FOR_AGENT: user_input.get(
+                        CONF_GUARD_RAIL_ENABLED_FOR_AGENT, DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT
+                    ),
+                }
+                agents = list(self.config_entry.data.get(CONF_AGENTS, []))
+                agents.append(agent_config)
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={**self.config_entry.data, CONF_AGENTS: agents},
+                )
+                return await self.async_step_init()
+
+        provider_options = self._build_search_provider_options()
+
+        return self.async_show_form(
+            step_id="configure_web_search",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_AGENT_NAME, default="Web Search"): str,
+                    vol.Required(CONF_PRIORITY, default=DEFAULT_PRIORITY): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=PRIORITY_MIN_PROCESSING,
+                            max=PRIORITY_MAX,
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_SEARCH_PROVIDER, default=SEARCH_PROVIDER_BRAVE
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=provider_options,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required(CONF_SEARCH_API_KEY): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            type=selector.TextSelectorType.PASSWORD,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_SEARCH_RESULT_COUNT, default=DEFAULT_SEARCH_RESULT_COUNT
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1,
+                            max=10,
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_SEARCH_MAX_SNIPPET_LEN, default=DEFAULT_SEARCH_MAX_SNIPPET_LEN
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=50,
+                            max=500,
+                            step=50,
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_TIMEOUT, default=DEFAULT_SEARCH_TIMEOUT
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=5,
+                            max=30,
+                            unit_of_measurement="seconds",
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AGENT_CACHE_ENABLED, default=DEFAULT_AGENT_CACHE_ENABLED
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
+                        default=DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
+                    ): selector.BooleanSelector(),
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "priority_info": self._s("placeholders", "priority_info"),
+                "web_search_info": self._s("placeholders", "web_search_info"),
+            },
+        )
+
+    def _build_search_provider_options(self) -> list[selector.SelectOptionDict]:
+        """Build the provider dropdown option list for web search forms.
+
+        Returns:
+            List of SelectOptionDict for the provider selector.
+        """
+        options: list[selector.SelectOptionDict] = []
+        for prov in SEARCH_PROVIDERS:
+            label = self._s("search_providers", prov) or prov.capitalize()
+            options.append({"value": prov, "label": label})
+        return options
+
+    # ── Edit web search agent ─────────────────────────────────────────────────
+
+    async def async_step_edit_agent_web_search(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Edit settings for an existing web search agent.
+
+        The API key field is a password field left blank on load.  If the user
+        submits without entering a value the existing key is retained.  If a
+        new value is entered it is validated before saving.
+
+        Args:
+            user_input: Form data submitted by the user, or None on first load.
+
+        Returns:
+            Form result or redirect to main menu after saving.
+        """
+        errors: dict[str, str] = {}
+        agent = self._agent_data.get("_editing_agent", {})
+        agent_id: str = agent.get("id", "")
+
+        if user_input is not None:
+            if user_input.get("delete_agent"):
+                return await self.async_step_confirm_delete_agent()
+
+            provider: str = user_input.get(CONF_SEARCH_PROVIDER, SEARCH_PROVIDER_BRAVE)
+            new_key: str = user_input.get(CONF_SEARCH_API_KEY, "").strip()
+            api_key: str = new_key if new_key else agent.get(CONF_SEARCH_API_KEY, "")
+
+            if new_key:
+                error_key = await self._validate_web_search_connection(provider, new_key)
+                if error_key:
+                    errors["base"] = error_key
+
+            if not errors:
+                updated = {
+                    **agent,
+                    CONF_AGENT_ENABLED: user_input.get(
+                        CONF_AGENT_ENABLED, agent.get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED)
+                    ),
+                    CONF_AGENT_NAME: user_input[CONF_AGENT_NAME],
+                    CONF_PRIORITY: user_input[CONF_PRIORITY],
+                    CONF_SEARCH_PROVIDER: provider,
+                    CONF_SEARCH_API_KEY: api_key,
+                    CONF_SEARCH_RESULT_COUNT: int(
+                        user_input.get(CONF_SEARCH_RESULT_COUNT, DEFAULT_SEARCH_RESULT_COUNT)
+                    ),
+                    CONF_SEARCH_MAX_SNIPPET_LEN: int(
+                        user_input.get(CONF_SEARCH_MAX_SNIPPET_LEN, DEFAULT_SEARCH_MAX_SNIPPET_LEN)
+                    ),
+                    "timeout": int(user_input.get(CONF_TIMEOUT, DEFAULT_SEARCH_TIMEOUT)),
+                    CONF_AGENT_CACHE_ENABLED: user_input.get(
+                        CONF_AGENT_CACHE_ENABLED, DEFAULT_AGENT_CACHE_ENABLED
+                    ),
+                    CONF_GUARD_RAIL_ENABLED_FOR_AGENT: user_input.get(
+                        CONF_GUARD_RAIL_ENABLED_FOR_AGENT, DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT
+                    ),
+                }
+                agents = list(self.config_entry.data.get(CONF_AGENTS, []))
+                agents = [updated if a.get("id") == agent_id else a for a in agents]
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={**self.config_entry.data, CONF_AGENTS: agents},
+                )
+                return await self.async_step_init()
+
+        provider_options = self._build_search_provider_options()
+
+        return self.async_show_form(
+            step_id="edit_agent_web_search",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_AGENT_NAME, default=agent.get(CONF_AGENT_NAME, "Web Search")
+                    ): str,
+                    vol.Required(
+                        CONF_PRIORITY, default=agent.get(CONF_PRIORITY, DEFAULT_PRIORITY)
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=PRIORITY_MIN_PROCESSING,
+                            max=PRIORITY_MAX,
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AGENT_ENABLED,
+                        default=agent.get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED),
+                    ): selector.BooleanSelector(),
+                    vol.Required(
+                        CONF_SEARCH_PROVIDER,
+                        default=agent.get(CONF_SEARCH_PROVIDER, SEARCH_PROVIDER_BRAVE),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=provider_options,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional(CONF_SEARCH_API_KEY, default=""): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            type=selector.TextSelectorType.PASSWORD,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_SEARCH_RESULT_COUNT,
+                        default=agent.get(CONF_SEARCH_RESULT_COUNT, DEFAULT_SEARCH_RESULT_COUNT),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1,
+                            max=10,
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_SEARCH_MAX_SNIPPET_LEN,
+                        default=agent.get(
+                            CONF_SEARCH_MAX_SNIPPET_LEN, DEFAULT_SEARCH_MAX_SNIPPET_LEN
+                        ),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=50,
+                            max=500,
+                            step=50,
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_TIMEOUT,
+                        default=agent.get("timeout", DEFAULT_SEARCH_TIMEOUT),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=5,
+                            max=30,
+                            unit_of_measurement="seconds",
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AGENT_CACHE_ENABLED,
+                        default=agent.get(CONF_AGENT_CACHE_ENABLED, DEFAULT_AGENT_CACHE_ENABLED),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
+                        default=agent.get(
+                            CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
+                            DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
+                        ),
+                    ): selector.BooleanSelector(),
+                    vol.Optional("delete_agent", default=False): selector.BooleanSelector(),
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "priority_info": self._s("placeholders", "priority_info"),
+                "web_search_info": self._s("placeholders", "web_search_info"),
+            },
+        )
+
     # ── Manage agents ─────────────────────────────────────────────────────────
 
     async def async_step_manage_agents(
@@ -837,6 +1206,8 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             return await self.async_step_edit_agent_ollama()
         if agent_type == AGENT_TYPE_EXISTING:
             return await self.async_step_edit_agent_existing()
+        if agent_type == AGENT_TYPE_WEB_SEARCH:
+            return await self.async_step_edit_agent_web_search()
         return await self.async_step_edit_agent_local()
 
     # ── Edit Ollama agent ──────────────────────────────────────────────────────

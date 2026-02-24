@@ -18,6 +18,7 @@ from .const import (
     CONF_RESPONSE_CACHE_ENABLED,
     CONF_RESPONSE_CACHE_TTL,
     DATA_CIRCUIT_BREAKER,
+    DATA_ENTITY_CONTEXT,
     DATA_RESPONSE_CACHE,
     DATA_SESSION_MEMORY,
     DATA_STATISTICS,
@@ -28,6 +29,7 @@ from .const import (
     DOMAIN,
     SERVICE_CLEAR_CONVERSATION,
 )
+from .entity_context import EntityContextCache
 from .languages_loader import async_preload_all_languages
 from .response_cache import ResponseCache
 from .session_memory import SessionMemory
@@ -62,6 +64,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # list_available_languages calls never block the event loop.
     await async_preload_all_languages(hass)
 
+    entity_context = EntityContextCache()
+
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
         **entry.data,
@@ -70,6 +74,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DATA_RESPONSE_CACHE: response_cache,
         DATA_SESSION_MEMORY: session_memory,
         DATA_CIRCUIT_BREAKER: circuit_breaker,
+        DATA_ENTITY_CONTEXT: entity_context,
     }
 
     # Set up platforms (conversation + sensor)

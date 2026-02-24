@@ -16,6 +16,7 @@ agent_types:
   home_assistant: "Home Assistant (Built-in)"
   existing_integration: "Existing Integration (Gemini, ChatGPT, etc.)"
   ollama: "Ollama (External)"
+  web_search: "Web Search (Real-time data)"
 
 # ── Agent management UI ────────────────────────────────────────────────────────
 agent_management:
@@ -49,6 +50,11 @@ placeholders:
   guard_rail_rules_info: >-
     Enter custom regex patterns (one per line) to block matching content.
     Patterns are merged with the built-in defaults. Leave blank to use defaults only.
+  web_search_info: >-
+    The web search agent is routed to automatically by the routing agent when
+    a query is identified as time-sensitive or requiring current data
+    (e.g. news, sports results, current leaders, financial data).
+    Queries are never cached by default — disable caching to always fetch fresh results.
 
 # ── Guard rail rule category labels ───────────────────────────────────────────
 guard_rail_categories:
@@ -76,9 +82,13 @@ router_fallbacks:
   skip_routing: "Skip routing (try all agents in priority order)"
   block: "Block the request"
 
+# ── Search provider labels ─────────────────────────────────────────────────────
+search_providers:
+  brave: "Brave AI Search"
+
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:
-  fallback: "I'm having trouble connecting to my AI agents right now."
+  fallback: "I'm having trouble connecting to my AI agents right now. Try rephrasing your request or check your agent settings."
   no_agents: "No AI agents are configured. Please add agents in the integration settings."
   router_blocked: "I cannot process that type of request."
   guard_rail_blocked: "I cannot process this request as it may contain harmful content."

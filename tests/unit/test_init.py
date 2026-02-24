@@ -9,11 +9,13 @@ from custom_components.neuralbridge import async_reload_entry, async_setup_entry
 from custom_components.neuralbridge.circuit_breaker import CircuitBreaker
 from custom_components.neuralbridge.const import (
     DATA_CIRCUIT_BREAKER,
+    DATA_ENTITY_CONTEXT,
     DATA_SESSION_MEMORY,
     DATA_STATISTICS,
     DOMAIN,
     SERVICE_CLEAR_CONVERSATION,
 )
+from custom_components.neuralbridge.entity_context import EntityContextCache
 from custom_components.neuralbridge.statistics import AgentStatistics
 
 if TYPE_CHECKING:
@@ -185,3 +187,14 @@ async def test_setup_entry_stores_statistics(
     entry_data = hass.data[DOMAIN][mock_config_entry.entry_id]
     assert DATA_STATISTICS in entry_data
     assert isinstance(entry_data[DATA_STATISTICS], AgentStatistics)
+
+
+async def test_setup_entry_stores_entity_context_cache(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """async_setup_entry stores an EntityContextCache instance in hass.data."""
+    await _setup(hass, mock_config_entry)
+
+    entry_data = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert DATA_ENTITY_CONTEXT in entry_data
+    assert isinstance(entry_data[DATA_ENTITY_CONTEXT], EntityContextCache)

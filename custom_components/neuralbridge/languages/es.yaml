@@ -9,10 +9,15 @@ language:
   code: "es"
 
 # ── Agent type selector labels ─────────────────────────────────────────────────
+# ── Web search provider labels ────────────────────────────────────────────────
+search_providers:
+  brave: "Búsqueda Brave AI"
+
 agent_types:
   home_assistant: "Home Assistant (Integrado)"
   existing_integration: "Integración existente (Gemini, ChatGPT, etc.)"
   ollama: "Ollama (Externo)"
+  web_search: "Búsqueda web (datos en tiempo real)"
 
 # ── Agent management UI ────────────────────────────────────────────────────────
 agent_management:
@@ -29,7 +34,11 @@ agent_management:
 placeholders:
   priority_info: >-
     1–100 = Prioridad de procesamiento (número menor = mayor prioridad).
-    Añada agentes de enrutamiento dedicados mediante \"Añadir agente enrutador\".
+    Añada agentes de enrutamiento dedicados mediante "Añadir agente enrutador".
+  web_search_info: >-
+    Este agente envía consultas sensibles al tiempo a una API de búsqueda web.
+    El enrutamiento ocurre automáticamente cuando el enrutador identifica
+    una consulta que requiere información actual o en tiempo real.
   routing_agent_info: >-
     Los agentes de enrutamiento clasifican las solicitudes con un prompt JSON
     y guían la selección de agentes. Se ejecutan con prioridad 0; el caché y
@@ -75,7 +84,7 @@ router_fallbacks:
 
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:
-  fallback: "Tengo problemas para conectarme a mis agentes de IA en este momento."
+  fallback: "Tengo problemas para conectarme a mis agentes de IA en este momento. Intenta reformular tu solicitud o verifica la configuración de los agentes."
   no_agents: "No hay agentes de IA configurados. Por favor, añada agentes en la configuración de la integración."
   router_blocked: "No puedo procesar este tipo de solicitud."
   guard_rail_blocked: "No puedo procesar esta solicitud ya que puede contener contenido dañino."

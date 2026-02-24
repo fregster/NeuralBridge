@@ -9,11 +9,15 @@ language:
   code: "fr"
 
 # ── Agent type selector labels ─────────────────────────────────────────────────
+# ── Web search provider labels ────────────────────────────────────────────────
+search_providers:
+  brave: "Recherche Brave AI"
+
 agent_types:
   home_assistant: "Home Assistant (Intégré)"
   existing_integration: "Intégration existante (Gemini, ChatGPT, etc.)"
   ollama: "Ollama (Externe)"
-
+  web_search: "Recherche web (données en temps réel)"
 # ── Agent management UI ────────────────────────────────────────────────────────
 agent_management:
   status_enabled: "✓ Activé"
@@ -29,7 +33,11 @@ agent_management:
 placeholders:
   priority_info: >-
     1–100 = Priorité de traitement (numéro plus petit = priorité plus élevée).
-    Ajoutez des agents routeurs dédiés via \"Ajouter un agent routeur\".
+    Ajoutez des agents routeurs dédiés via "Ajouter un agent routeur".
+  web_search_info: >-
+    Cet agent envoie les requêtes sensibles au temps à une API de recherche web.
+    Le routage se produit automatiquement lorsque le routeur identifie
+    une requête nécessitant des informations actuelles ou en temps réel.
   routing_agent_info: >-
     Les agents routeurs classifient les requêtes avec un prompt JSON et guident
     la sélection des agents. Ils s'exécutent avec la priorité 0 ; la mise en
@@ -73,7 +81,7 @@ router_fallbacks:
   block: "Block the request"
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:
-  fallback: "J'ai des difficultés à me connecter à mes agents IA en ce moment."
+  fallback: "J'ai des difficultés à me connecter à mes agents IA en ce moment. Essayez de reformuler votre demande ou vérifiez les paramètres des agents."
   no_agents: "Aucun agent IA n'est configuré. Veuillez ajouter des agents dans les paramètres de l'intégration."
   router_blocked: "Je ne peux pas traiter ce type de demande."
   guard_rail_blocked: "Je ne peux pas traiter cette demande car elle pourrait contenir du contenu nuisible."

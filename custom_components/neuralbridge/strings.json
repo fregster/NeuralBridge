@@ -109,6 +109,62 @@
           "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent"
         }
       },
+      "configure_web_search": {
+        "title": "Configure Web Search Agent",
+        "description": "Add a web search agent that retrieves real-time information for time-sensitive queries (news, current events, live data).\n\n{priority_info}\n\n{web_search_info}",
+        "data": {
+          "agent_name": "Agent Name",
+          "priority": "Priority (1–100)",
+          "search_provider": "Search Provider",
+          "search_api_key": "API Key",
+          "search_result_count": "Number of Results",
+          "search_max_snippet_len": "Max Snippet Length",
+          "timeout": "Timeout",
+          "agent_cache_enabled": "Enable Response Cache",
+          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent"
+        },
+        "data_description": {
+          "agent_name": "A friendly name for this agent (e.g. \"Web Search\")",
+          "priority": "Priority for this agent — lower numbers are tried first",
+          "search_provider": "The web search service to use",
+          "search_api_key": "Your API subscription key for the selected provider",
+          "search_result_count": "How many search results to include in the response (1–10)",
+          "search_max_snippet_len": "Maximum characters per result snippet before truncation",
+          "timeout": "Maximum time to wait for search results",
+          "agent_cache_enabled": "Cache search results. Disable for queries that always need fresh data.",
+          "guard_rail_enabled_for_agent": "Run guard rail checks on search results returned by this agent"
+        }
+      },
+      "edit_agent_web_search": {
+        "title": "Edit Web Search Agent",
+        "description": "Edit settings for this web search agent.\n\n{priority_info}\n\n{web_search_info}",
+        "data": {
+          "agent_name": "Agent Name",
+          "priority": "Priority (1–100)",
+          "enabled": "Agent Enabled",
+          "search_provider": "Search Provider",
+          "search_api_key": "API Key (leave blank to keep current key)",
+          "search_result_count": "Number of Results",
+          "search_max_snippet_len": "Max Snippet Length",
+          "timeout": "Timeout",
+          "agent_cache_enabled": "Enable Response Cache",
+          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "delete_agent": "Delete this Agent"
+        },
+        "data_description": {
+          "agent_name": "A friendly name for this agent",
+          "priority": "Priority for this agent — lower numbers are tried first",
+          "enabled": "Toggle to enable or disable this agent without removing it",
+          "search_provider": "The web search service to use",
+          "search_api_key": "Enter a new API key to replace the current one, or leave blank to keep it unchanged",
+          "search_result_count": "How many search results to include in the response (1–10)",
+          "search_max_snippet_len": "Maximum characters per result snippet before truncation",
+          "timeout": "Maximum time to wait for search results",
+          "agent_cache_enabled": "Cache search results. Disable for queries that always need fresh data.",
+          "guard_rail_enabled_for_agent": "Run guard rail checks on search results returned by this agent",
+          "delete_agent": "Check this box and submit to permanently delete this agent (you will be asked to confirm)"
+        }
+      },
       "manage_agents": {
         "title": "Manage Agents",
         "description": "Select an agent to manage. Current status is shown next to each name.",
@@ -281,6 +337,9 @@
       "invalid_url_scheme": "Invalid URL scheme. Only http:// and https:// are supported.",
       "entity_not_found": "The selected conversation agent was not found. Ensure the integration is loaded and the entity is available.",
       "no_router_agent": "No routing agent is configured. Use \"Configure Routing Agent\" to select a conversation agent before enabling guard rails.",
+      "invalid_api_key": "The API key was rejected by the search provider. Please check your key and subscription status.",
+      "search_api_key_missing": "An API key is required for the selected search provider.",
+      "search_api_unreachable": "Could not reach the search provider API. Check your network connection and try again.",
       "unknown": "An unexpected error occurred. Check the logs for details."
     }
   },

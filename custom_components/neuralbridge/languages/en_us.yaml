@@ -16,6 +16,11 @@ agent_types:
   home_assistant: "Home Assistant (Built-in)"
   existing_integration: "Existing Integration (Gemini, ChatGPT, etc.)"
   ollama: "Ollama (External)"
+  web_search: "Web Search (Real-time data)"
+
+# ── Web search provider labels ────────────────────────────────────────────────
+search_providers:
+  brave: "Brave AI Search"
 
 # ── Agent management UI ────────────────────────────────────────────────────────
 agent_management:
@@ -32,7 +37,11 @@ agent_management:
 placeholders:
   priority_info: >-
     1-100 = Processing priority (lower numbers are tried first).
-    Add dedicated Routing Agents via the \"Add Routing Agent\" menu option.
+    Add dedicated Routing Agents via the "Add Routing Agent" menu option.
+  web_search_info: >-
+    This agent sends time-sensitive queries to a web search API.
+    Routing happens automatically when the router identifies a query
+    as requiring real-time or current information.
   routing_agent_info: >-
     Routing agents classify incoming requests using a JSON prompt and guide
     agent selection. They run at priority 0, with caching and guard rails
@@ -77,7 +86,7 @@ router_fallbacks:
 
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:
-  fallback: "I'm having trouble connecting to my AI agents right now."
+  fallback: "I'm having trouble connecting to my AI agents right now. Try rephrasing your request or check your agent settings."
   no_agents: "No AI agents are configured. Please add agents in the integration settings."
   router_blocked: "I cannot process that type of request."
   guard_rail_blocked: "I cannot process this request as it may contain harmful content."

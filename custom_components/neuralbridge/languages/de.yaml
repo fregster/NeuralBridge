@@ -13,6 +13,11 @@ agent_types:
   home_assistant: "Home Assistant (Eingebaut)"
   existing_integration: "Bestehende Integration (Gemini, ChatGPT, usw.)"
   ollama: "Ollama (Extern)"
+  web_search: "Websuche (Echtzeit-Daten)"
+
+# ── Web search provider labels ────────────────────────────────────────────────
+search_providers:
+  brave: "Brave AI Suche"
 
 # ── Agent management UI ────────────────────────────────────────────────────────
 agent_management:
@@ -29,7 +34,11 @@ agent_management:
 placeholders:
   priority_info: >-
     1–100 = Verarbeitungspriorität (niedrigerer Wert = höhere Priorität).
-    Fügen Sie dedizierte Router-Agenten über \"Router-Agent hinzufügen\" hinzu.
+    Fügen Sie dedizierte Router-Agenten über "Router-Agent hinzufügen" hinzu.
+  web_search_info: >-
+    Dieser Agent sendet zeitrelevante Anfragen an eine Websuche-API.
+    Das Routing erfolgt automatisch, wenn der Router die Anfrage als
+    aktualisierungsbedürftig einstuft.
   routing_agent_info: >-
     Router-Agenten klassifizieren eingehende Anfragen per JSON-Prompt und
     steuern die Agentenauswahl. Sie laufen mit Priorität 0; Caching und
@@ -75,7 +84,7 @@ router_fallbacks:
 
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:
-  fallback: "Ich habe gerade Probleme, mich mit meinen KI-Agenten zu verbinden."
+  fallback: "Ich habe gerade Probleme, mich mit meinen KI-Agenten zu verbinden. Versuche, deine Anfrage umzuformulieren, oder überprüfe die Agenteneinstellungen."
   no_agents: "Keine KI-Agenten konfiguriert. Bitte fügen Sie Agenten in den Integrationseinstellungen hinzu."
   router_blocked: "Ich kann diese Art von Anfrage nicht bearbeiten."
   guard_rail_blocked: "Ich kann diese Anfrage nicht bearbeiten, da sie möglicherweise schädliche Inhalte enthält."

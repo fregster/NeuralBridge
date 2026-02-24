@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import time
@@ -15,6 +16,8 @@ from homeassistant.components.conversation import (
     ConversationResult,
 )
 from homeassistant.components.conversation.const import DOMAIN as CONVERSATION_DOMAIN
+from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
@@ -23,6 +26,7 @@ from .const import (
     AGENT_TYPE_EXISTING,
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
+    AGENT_TYPE_WEB_SEARCH,
     CONF_AGENT_ASSIST_MODE,
     CONF_AGENT_CACHE_ENABLED,
     CONF_AGENT_ENABLED,
@@ -49,9 +53,14 @@ from .const import (
     CONF_ROUTER_CUSTOM_PROMPT,
     CONF_ROUTER_FALLBACK,
     CONF_ROUTER_LOG_LEVEL,
+    CONF_SEARCH_API_KEY,
+    CONF_SEARCH_MAX_SNIPPET_LEN,
+    CONF_SEARCH_PROVIDER,
+    CONF_SEARCH_RESULT_COUNT,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DATA_CIRCUIT_BREAKER,
+    DATA_ENTITY_CONTEXT,
     DATA_RESPONSE_CACHE,
     DATA_SESSION_MEMORY,
     DATA_STATISTICS,
@@ -78,6 +87,9 @@ from .const import (
     DEFAULT_ROUTER_FALLBACK,
     DEFAULT_ROUTER_LOG_LEVEL,
     DEFAULT_ROUTER_TIMEOUT,
+    DEFAULT_SEARCH_MAX_SNIPPET_LEN,
+    DEFAULT_SEARCH_RESULT_COUNT,
+    DEFAULT_SEARCH_TIMEOUT,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     DOMAIN,
@@ -98,15 +110,18 @@ from .const import (
     ROUTER_LOG_LEVEL_DEBUG_QUERY,
     ROUTER_RESPONSE_KEY_COMPLEXITY,
     ROUTER_RESPONSE_KEY_LOCAL_HA,
+    ROUTER_RESPONSE_KEY_WEB_SEARCH,
     ROUTER_SKIP_ROUTING_COMPLEXITY,
     SIGNAL_STATS_UPDATED,
 )
+from .entity_context import EntityContextCache
 from .guard_rail import GuardRailCache, GuardRailChecker
 from .languages_loader import get_string
 from .ollama_client import OllamaClient
 from .response_cache import ResponseCache
 from .session_memory import SessionMemory
 from .statistics import AgentStatistics
+from .web_search_client import WebSearchClient
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -127,25 +142,30 @@ class RouterDecision:
     Attributes:
         local_ha:   True when the request is a home-automation / device-control
                     command that should be handled by a LOCAL_HA agent.
+        web_search: True when the request requires real-time or current data
+                    (news, live scores, current leaders, financial data, etc.).
         complexity: Integer 1-100 indicating estimated request complexity.
                     Higher values suggest cloud-capable agents are preferred.
     """
 
-    __slots__ = ("complexity", "local_ha")
+    __slots__ = ("complexity", "local_ha", "web_search")
 
     # Class-level annotations required for mypy __slots__ attribute resolution
     complexity: int
     local_ha: bool
+    web_search: bool
 
-    def __init__(self, local_ha: bool, complexity: int) -> None:
+    def __init__(self, local_ha: bool, complexity: int, web_search: bool = False) -> None:
         """Initialise a RouterDecision.
 
         Args:
             local_ha:   Whether the request targets local home-automation.
             complexity: Estimated complexity score (1-100).
+            web_search: Whether the request needs real-time web data.
         """
         object.__setattr__(self, "local_ha", local_ha)
         object.__setattr__(self, "complexity", complexity)
+        object.__setattr__(self, "web_search", web_search)
 
     def __setattr__(self, _name: str, _value: object) -> None:
         raise AttributeError("RouterDecision is immutable")
@@ -153,13 +173,21 @@ class RouterDecision:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RouterDecision):
             return NotImplemented
-        return self.local_ha == other.local_ha and self.complexity == other.complexity
+        return (
+            self.local_ha == other.local_ha
+            and self.complexity == other.complexity
+            and self.web_search == other.web_search
+        )
 
     def __hash__(self) -> int:
-        return hash((self.local_ha, self.complexity))
+        return hash((self.local_ha, self.complexity, self.web_search))
 
     def __repr__(self) -> str:
-        return f"RouterDecision(local_ha={self.local_ha!r}, complexity={self.complexity!r})"
+        return (
+            f"RouterDecision(local_ha={self.local_ha!r}, "
+            f"complexity={self.complexity!r}, "
+            f"web_search={self.web_search!r})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -223,14 +251,15 @@ def _parse_router_response(raw: str) -> RouterDecision | None:
 
     # complexity == 0 is the router BLOCK signal; preserved for caller to handle
     if complexity == 0:
-        return RouterDecision(local_ha=False, complexity=0)
+        return RouterDecision(local_ha=False, complexity=0, web_search=False)
 
     # Clamp to 1-100
     complexity = max(1, min(100, complexity))
 
     local_ha = bool(data[ROUTER_RESPONSE_KEY_LOCAL_HA])
+    web_search = bool(data.get(ROUTER_RESPONSE_KEY_WEB_SEARCH, False))
 
-    return RouterDecision(local_ha=local_ha, complexity=complexity)
+    return RouterDecision(local_ha=local_ha, complexity=complexity, web_search=web_search)
 
 
 def _apply_router_decision(
@@ -239,10 +268,11 @@ def _apply_router_decision(
 ) -> list[dict[str, Any]]:
     """Filter and reorder processing agents based on the router decision.
 
-    When ``decision.local_ha`` is ``True``, LOCAL_HA agents are promoted to the
-    front of the list so they are tried first.  When ``False``, LOCAL_HA agents
-    are excluded entirely because the router determined the request does not
-    require home-automation handling.
+    When ``decision.web_search`` is ``True``, web-search agents are promoted to
+    the front of the list.  When ``decision.local_ha`` is ``True``, LOCAL_HA
+    agents are promoted.  When neither flag is set, LOCAL_HA agents are excluded
+    entirely (request is a general knowledge query; leave web-search agents in
+    their normal priority position).
 
     A ``decision.complexity`` of ``ROUTER_SKIP_ROUTING_COMPLEXITY`` (-1) is a
     special sentinel meaning "skip routing" — all processing agents are returned
@@ -258,6 +288,11 @@ def _apply_router_decision(
     if decision.complexity == ROUTER_SKIP_ROUTING_COMPLEXITY:
         # Fallback=skip_routing — bypass agent filtering, try everything
         return list(processing_agents)
+    if decision.web_search:
+        # Promote WEB_SEARCH agents to front; keep original order within each group
+        web = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) == AGENT_TYPE_WEB_SEARCH]
+        others = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) != AGENT_TYPE_WEB_SEARCH]
+        return web + others
     if decision.local_ha:
         # Promote LOCAL_HA agents to front; keep original order within each group
         local = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) == AGENT_TYPE_LOCAL_HA]
@@ -287,6 +322,7 @@ class NeuralBridgeAgent(ConversationEntity):
         self._attr_name = "NeuralBridge"
         self._attr_unique_id = config_entry.entry_id
         self._ollama_clients: dict[str, OllamaClient] = {}
+        self._web_search_clients: dict[str, WebSearchClient] = {}
         self._guard_rail_checker: GuardRailChecker | None = None
         self._guard_rail_rules_snapshot: dict[str, list[str]] | None = None
         self._guard_rail_cache = GuardRailCache()
@@ -308,6 +344,9 @@ class NeuralBridgeAgent(ConversationEntity):
             ),
         )
         self._session_memory: SessionMemory = entry_data.get(DATA_SESSION_MEMORY, SessionMemory())
+        self._entity_context_cache: EntityContextCache = entry_data.get(
+            DATA_ENTITY_CONTEXT, EntityContextCache()
+        )
 
     def _localized(self, *keys: str) -> str:
         """Return a localised string for the currently configured language.
@@ -408,6 +447,12 @@ class NeuralBridgeAgent(ConversationEntity):
             for a in sorted_agents
             if not (a.get(CONF_IS_ROUTER, False) or a.get(CONF_PRIORITY) == PRIORITY_ROUTER)
         ]
+
+        # Check for explicit named-agent override ("Ask Gemini: ...", "Use Ollama: ...", etc.)
+        override = self._check_explicit_agent_override(user_input, processing_agents)
+        if override is not None:
+            override_input, override_agents = override
+            return await self._try_processing_agents(override_agents, override_input)
 
         if router_agents:
             decision = await self._check_with_routers(user_input, router_agents)
@@ -691,12 +736,15 @@ class NeuralBridgeAgent(ConversationEntity):
             or None to block the request.
         """
         last_decision: RouterDecision | None = RouterDecision(
-            local_ha=False, complexity=DEFAULT_ROUTER_COMPLEXITY
+            local_ha=False, complexity=DEFAULT_ROUTER_COMPLEXITY, web_search=False
         )
+        area_context = self._get_device_area(user_input.device_id)
         all_errors = True
         for router_config in router_agents:
             _LOGGER.debug("Checking with router: %s", router_config.get(CONF_AGENT_NAME))
-            decision = await self._classify_with_router(router_config, user_input.text)
+            decision = await self._classify_with_router(
+                router_config, user_input.text, area_context
+            )
             if decision is None:
                 _LOGGER.info(
                     "Router agent '%s' blocked the request",
@@ -713,7 +761,10 @@ class NeuralBridgeAgent(ConversationEntity):
         return last_decision
 
     async def _classify_with_router(
-        self, router_config: dict[str, Any], user_text: str
+        self,
+        router_config: dict[str, Any],
+        user_text: str,
+        area_context: str | None = None,
     ) -> RouterDecision | None:
         """Ask a router agent to classify user text via a JSON prompt.
 
@@ -736,7 +787,8 @@ class NeuralBridgeAgent(ConversationEntity):
 
         Args:
             router_config: Configuration dict for the router agent.
-            user_text: The raw user input text to classify.
+            user_text:     The raw user input text to classify.
+            area_context:  Friendly area name of the originating device, or None.
 
         Returns:
             A RouterDecision on success or fallback, None to block the request.
@@ -753,6 +805,12 @@ class NeuralBridgeAgent(ConversationEntity):
         ).strip()
         prompt_template = custom_prompt if custom_prompt else ROUTER_CLASSIFICATION_PROMPT
         prompt = prompt_template.replace("{user_text}", user_text)
+
+        entity_context = self._entity_context_cache.get_summary(self.hass)
+        if entity_context:
+            prompt = f"{prompt}\n\n{entity_context}"
+        if area_context:
+            prompt = f"{prompt}\n\nDevice area: {area_context}"
 
         if log_level == ROUTER_LOG_LEVEL_DEBUG_QUERY:
             _LOGGER.debug("Router '%s' classifying query: %s", agent_name, user_text)
@@ -1006,6 +1064,8 @@ class NeuralBridgeAgent(ConversationEntity):
                     result = await self._process_with_ollama(agent_config, user_input)
                 elif agent_type in (AGENT_TYPE_EXISTING, AGENT_TYPE_LOCAL_HA):
                     result = await self._process_with_existing(agent_config, user_input)
+                elif agent_type == AGENT_TYPE_WEB_SEARCH:
+                    result = await self._process_with_web_search(agent_config, user_input)
                 else:
                     _LOGGER.error("Unknown agent type: %s", agent_type)
                     return None, False
@@ -1032,6 +1092,13 @@ class NeuralBridgeAgent(ConversationEntity):
         self, agent_config: dict[str, Any], user_input: ConversationInput
     ) -> ConversationResult | None:
         """Process input with an Ollama agent using session context (#9, #10).
+
+        When the request originates from a device that has an area assigned in
+        HA, the area name is prepended to the user message (e.g.
+        ``"[Area: Kitchen] turn on the lights"``).  This gives the local model
+        enough context to correctly scope device control commands without
+        needing to enumerate all entities.  The area prefix is **not** stored
+        in session memory — only the original user text is persisted.
 
         Args:
             agent_config: Configuration dict for the Ollama agent.
@@ -1063,7 +1130,9 @@ class NeuralBridgeAgent(ConversationEntity):
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.extend(history)
-        messages.append({"role": "user", "content": user_input.text})
+        area_ctx = self._get_device_area(user_input.device_id)
+        user_text = f"[Area: {area_ctx}] {user_input.text}" if area_ctx else user_input.text
+        messages.append({"role": "user", "content": user_text})
 
         response_text = await client.chat(messages)
 
@@ -1080,6 +1149,20 @@ class NeuralBridgeAgent(ConversationEntity):
         self, agent_config: dict[str, Any], user_input: ConversationInput
     ) -> ConversationResult | None:
         """Process input with an existing Home Assistant conversation agent.
+
+        The sub-agent is intentionally isolated from the outer ``current_chat_log``
+        context variable.  In HA 2025.2+ the built-in HA conversation agent (and
+        some other agents) call ``async_add_assistant_content_without_tools``
+        internally when they process a request.  Because the outer
+        ``conversation.process`` call shares the same asyncio context, that write
+        would land in the *same* ChatLog that NeuralBridge's own
+        ``_maybe_add_to_chat_log`` also writes to — resulting in the response text
+        appearing twice in the Assist UI.
+
+        Temporarily setting ``current_chat_log`` to ``None`` for the duration of
+        the sub-call prevents the sub-agent from polluting the outer ChatLog.
+        NeuralBridge re-adds the response exactly once via ``_maybe_add_to_chat_log``
+        after ``async_process`` returns.
 
         Args:
             agent_config: Configuration dict for the existing agent.
@@ -1098,6 +1181,22 @@ class NeuralBridgeAgent(ConversationEntity):
             _LOGGER.error("Conversation agent %s not found", entity_id)
             return None
 
+        # Isolate the sub-agent from the outer ChatLog so the sub-agent cannot
+        # write a duplicate entry into it.  Restore after the call regardless of
+        # outcome.  See docstring for the full explanation.
+        _chat_log_token = None
+        _chat_log_var = None
+        try:
+            from homeassistant.components.conversation.chat_log import (  # noqa: PLC0415
+                current_chat_log,
+            )
+
+            _chat_log_var = current_chat_log
+            _chat_log_token = current_chat_log.set(None)
+        except ImportError:
+            pass
+
+        response: Any = None
         try:
             response = await self.hass.services.async_call(
                 CONVERSATION_DOMAIN,
@@ -1112,35 +1211,79 @@ class NeuralBridgeAgent(ConversationEntity):
                 context=user_input.context,
                 return_response=True,
             )
-
-            if not response or "response" not in response:
-                _LOGGER.error("Agent %s returned unexpected response shape", entity_id)
-                return None
-
-            response_section: Any = response["response"]
-
-            # In assist mode, only accept responses where HA successfully executed an
-            # intent (response_type == "action_done").  Any other response type means
-            # HA didn't understand the request, so we return None and let the router
-            # continue to the next lower-priority agent (e.g. Ollama / Gemini).
-            assist_mode = agent_config.get(CONF_AGENT_ASSIST_MODE, DEFAULT_AGENT_ASSIST_MODE)
-            if assist_mode:
-                response_type = str(response_section.get("response_type", ""))
-                if response_type != "action_done":
-                    _LOGGER.debug(
-                        "Agent %s assist mode: response_type '%s' is not action_done, "
-                        "falling through to next agent",
-                        entity_id,
-                        response_type,
-                    )
-                    return None
-
-            speech_text = str(response_section.get("speech", {}).get("plain", {}).get("speech", ""))
-            if speech_text:
-                return self._create_result(speech_text, user_input.conversation_id)
-
         except Exception as err:  # pylint: disable=broad-except
             _LOGGER.error("Error calling conversation agent %s: %s", entity_id, err)
+        finally:
+            if _chat_log_token is not None and _chat_log_var is not None:
+                _chat_log_var.reset(_chat_log_token)
+
+        if response is None:
+            return None
+
+        if not response or "response" not in response:
+            _LOGGER.error("Agent %s returned unexpected response shape", entity_id)
+            return None
+
+        response_section: Any = response["response"]
+
+        # In assist mode, only accept responses where HA successfully executed an
+        # intent (response_type == "action_done").  Any other response type means
+        # HA didn't understand the request, so we return None and let the router
+        # continue to the next lower-priority agent (e.g. Ollama / Gemini).
+        assist_mode = agent_config.get(CONF_AGENT_ASSIST_MODE, DEFAULT_AGENT_ASSIST_MODE)
+        if assist_mode:
+            response_type = str(response_section.get("response_type", ""))
+            if response_type != "action_done":
+                _LOGGER.debug(
+                    "Agent %s assist mode: response_type '%s' is not action_done, "
+                    "falling through to next agent",
+                    entity_id,
+                    response_type,
+                )
+                return None
+
+        speech_text = str(response_section.get("speech", {}).get("plain", {}).get("speech", ""))
+        return self._create_result(speech_text, user_input.conversation_id) if speech_text else None
+
+    async def _process_with_web_search(
+        self, agent_config: dict[str, Any], user_input: ConversationInput
+    ) -> ConversationResult | None:
+        """Process input by executing a web search and returning a summary.
+
+        A ``WebSearchClient`` is instantiated on first use and cached per agent
+        ID (keyed by ``agent_config["id"]``).  The summary returned by the
+        client is turned directly into a ``ConversationResult``.
+
+        Args:
+            agent_config: Configuration dict for the web-search agent.
+            user_input: The user's conversation input.
+
+        Returns:
+            ConversationResult containing the search summary on success,
+            None if the search returned no results.
+        """
+        agent_id: str = agent_config.get("id", "")
+
+        config_for_client: dict[str, Any] = {
+            CONF_SEARCH_PROVIDER: agent_config.get(CONF_SEARCH_PROVIDER),
+            CONF_SEARCH_API_KEY: agent_config.get(CONF_SEARCH_API_KEY, ""),
+            CONF_SEARCH_RESULT_COUNT: agent_config.get(
+                CONF_SEARCH_RESULT_COUNT, DEFAULT_SEARCH_RESULT_COUNT
+            ),
+            CONF_SEARCH_MAX_SNIPPET_LEN: agent_config.get(
+                CONF_SEARCH_MAX_SNIPPET_LEN, DEFAULT_SEARCH_MAX_SNIPPET_LEN
+            ),
+            "timeout": agent_config.get("timeout", DEFAULT_SEARCH_TIMEOUT),
+        }
+
+        if agent_id not in self._web_search_clients:
+            self._web_search_clients[agent_id] = WebSearchClient(config_for_client)
+
+        client = self._web_search_clients[agent_id]
+        summary = await client.search_and_summarise(user_input.text)
+
+        if summary:
+            return self._create_result(summary, user_input.conversation_id)
 
         return None
 
@@ -1315,6 +1458,79 @@ class NeuralBridgeAgent(ConversationEntity):
         response = intent.IntentResponse(language=self.hass.config.language)
         response.async_set_speech(error_message)
         return ConversationResult(response=response, conversation_id=conversation_id)
+
+    def _get_device_area(self, device_id: str | None) -> str | None:
+        """Return the friendly area name for a device, or None if unavailable.
+
+        Looks up the device in the HA device registry, then resolves its area
+        via the area registry.  Used to inject location context into router
+        classification prompts and Ollama user messages so that phrases like
+        "turn on the lights" are automatically scoped to the caller's room.
+
+        Args:
+            device_id: The HA device ID from :attr:`ConversationInput.device_id`.
+
+        Returns:
+            The area name string, or None when the device has no area or is
+            unknown.
+        """
+        if not device_id:
+            return None
+        dev_registry = dr.async_get(self.hass)
+        device = dev_registry.async_get(device_id)
+        if device is None or not device.area_id:
+            return None
+        area_reg = ar.async_get(self.hass)
+        area = area_reg.async_get_area(device.area_id)
+        if area is None:
+            return None
+        return str(area.name)
+
+    def _check_explicit_agent_override(
+        self,
+        user_input: ConversationInput,
+        agents: list[dict[str, Any]],
+    ) -> tuple[ConversationInput, list[dict[str, Any]]] | None:
+        """Detect a named-agent override prefix and route directly to that agent.
+
+        Recognises three pattern variants (case-insensitive):
+
+        * ``"Ask {name}: {query}"``
+        * ``"Use {name}: {query}"``
+        * ``"{name}: {query}"``
+
+        When matched, the query text is stripped of the prefix and a modified
+        :class:`ConversationInput` is returned alongside the matched agent,
+        bypassing router classification entirely.  This mirrors the Alexa
+        ``"Ask {skill}"`` pattern, letting power users target a specific agent
+        by name without touching the routing pipeline.
+
+        Args:
+            user_input: The user's conversation input.
+            agents:     The list of enabled processing agent configs.
+
+        Returns:
+            ``(stripped_input, [matched_agent])`` when an override prefix is
+            detected, or ``None`` when the input should follow normal routing.
+        """
+        text_lower = user_input.text.lower()
+        for agent in agents:
+            name: str = agent.get(CONF_AGENT_NAME, "")
+            if not name:
+                continue
+            name_lower = name.lower()
+            for prefix in (
+                f"ask {name_lower}:",
+                f"use {name_lower}:",
+                f"{name_lower}:",
+            ):
+                if text_lower.startswith(prefix):
+                    stripped = user_input.text[len(prefix) :].strip()
+                    if not stripped:
+                        continue
+                    new_input = dataclasses.replace(user_input, text=stripped)
+                    return new_input, [agent]
+        return None
 
     async def async_will_remove_from_hass(self) -> None:
         """Clean up resources when entity is removed from Home Assistant."""
