@@ -12,6 +12,8 @@ language:
 # ── Web search provider labels ────────────────────────────────────────────────
 search_providers:
   brave: "Búsqueda Brave AI"
+  brave_answers: "Brave Answers (Respuesta directa)"
+  brave_combined: "Brave Combinado (Answers + búsqueda de reserva)"
 
 agent_types:
   home_assistant: "Home Assistant (Integrado)"
@@ -39,6 +41,8 @@ placeholders:
     Este agente envía consultas sensibles al tiempo a una API de búsqueda web.
     El enrutamiento ocurre automáticamente cuando el enrutador identifica
     una consulta que requiere información actual o en tiempo real.
+    Brave Answers y Brave Combinado requieren cada uno una clave de suscripción de Answers separada.
+  connection_ok: "\u2713 Prueba de conexión superada"
   routing_agent_info: >-
     Los agentes de enrutamiento clasifican las solicitudes con un prompt JSON
     y guían la selección de agentes. Se ejecutan con prioridad 0; el caché y

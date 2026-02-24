@@ -18,6 +18,8 @@ agent_types:
 # ── Web search provider labels ────────────────────────────────────────────────
 search_providers:
   brave: "Brave AI Suche"
+  brave_answers: "Brave Answers (Direkte Antwort)"
+  brave_combined: "Brave Kombiniert (Answers + Suche Fallback)"
 
 # ── Agent management UI ────────────────────────────────────────────────────────
 agent_management:
@@ -39,6 +41,8 @@ placeholders:
     Dieser Agent sendet zeitrelevante Anfragen an eine Websuche-API.
     Das Routing erfolgt automatisch, wenn der Router die Anfrage als
     aktualisierungsbedürftig einstuft.
+    Brave Answers und Brave Kombiniert erfordern jeweils einen separaten Answers-Abonnementschlüssel.
+  connection_ok: "\u2713 Verbindungstest bestanden"
   routing_agent_info: >-
     Router-Agenten klassifizieren eingehende Anfragen per JSON-Prompt und
     steuern die Agentenauswahl. Sie laufen mit Priorität 0; Caching und

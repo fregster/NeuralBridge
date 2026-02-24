@@ -180,7 +180,7 @@ ROUTER_CLASSIFICATION_PROMPT: Final = load_prompt(
     fallback=(
         "You are a smart home request classifier.\n"
         "Analyse the user message and respond with ONLY a valid JSON object — no other text.\n"
-        "The JSON must contain exactly these three fields:\n"
+        "The JSON must contain exactly these four fields:\n"
         '  "local_ha": boolean — true if this is a home automation or device control request, '
         "false for general questions or knowledge queries.\n"
         '  "web_search": boolean — true if the answer requires real-time or current information '
@@ -188,14 +188,18 @@ ROUTER_CLASSIFICATION_PROMPT: Final = load_prompt(
         "recent events). False for static knowledge or home control.\n"
         '  "complexity": integer — 1 (simple/factual) to 100 (complex reasoning). '
         "Use 0 to signal that the request should be BLOCKED.\n"
+        '  "intent_hint": string or null — "timer", "reminder", "todo", '
+        '"shopping_list", "announce", or null.\n'
         "Respond with complexity 0 ONLY for harmful, illegal, abusive, or clearly "
         "inappropriate requests.\n"
         "When web_search is true, local_ha should be false.\n"
         "Examples:\n"
-        '  Home control: {"local_ha": true, "web_search": false, "complexity": 5}\n'
-        '  General knowledge: {"local_ha": false, "web_search": false, "complexity": 30}\n'
-        '  Current news/data: {"local_ha": false, "web_search": true, "complexity": 40}\n'
-        '  Block: {"local_ha": false, "web_search": false, "complexity": 0}\n\n'
+        '  Home control: {"local_ha": true, "web_search": false, "complexity": 5, "intent_hint": null}\n'
+        '  Timer: {"local_ha": true, "web_search": false, "complexity": 5, "intent_hint": "timer"}\n'
+        '  To-do: {"local_ha": true, "web_search": false, "complexity": 5, "intent_hint": "todo"}\n'
+        '  General knowledge: {"local_ha": false, "web_search": false, "complexity": 30, "intent_hint": null}\n'
+        '  Current news/data: {"local_ha": false, "web_search": true, "complexity": 40, "intent_hint": null}\n'
+        '  Block: {"local_ha": false, "web_search": false, "complexity": 0, "intent_hint": null}\n\n'
         "User message: {user_text}"
     ),
 )
@@ -203,6 +207,10 @@ ROUTER_CLASSIFICATION_PROMPT: Final = load_prompt(
 # JSON response key names expected in a router agent's classification response
 ROUTER_RESPONSE_KEY_LOCAL_HA: Final = "local_ha"
 ROUTER_RESPONSE_KEY_COMPLEXITY: Final = "complexity"
+ROUTER_RESPONSE_KEY_INTENT_HINT: Final = "intent_hint"
+
+# Valid intent_hint values the router may return (Feature 8)
+VALID_INTENT_HINTS: Final = frozenset({"timer", "reminder", "shopping_list", "announce", "todo"})
 
 # Default complexity assumed when a router agent errors or returns unparseable output.
 # Mid-range so neither purely simple nor purely complex agents are excluded.
@@ -239,11 +247,18 @@ ROUTER_SKIP_ROUTING_COMPLEXITY: Final = -1
 
 # Web search provider keys
 SEARCH_PROVIDER_BRAVE: Final = "brave"
-SEARCH_PROVIDERS: Final[list[str]] = [SEARCH_PROVIDER_BRAVE]
+SEARCH_PROVIDER_BRAVE_ANSWERS: Final = "brave_answers"
+SEARCH_PROVIDER_BRAVE_COMBINED: Final = "brave_combined"
+SEARCH_PROVIDERS: Final[list[str]] = [
+    SEARCH_PROVIDER_BRAVE,
+    SEARCH_PROVIDER_BRAVE_ANSWERS,
+    SEARCH_PROVIDER_BRAVE_COMBINED,
+]
 
 # Web search agent configuration keys
 CONF_SEARCH_PROVIDER: Final = "search_provider"
 CONF_SEARCH_API_KEY: Final = "search_api_key"
+CONF_SEARCH_ANSWERS_API_KEY: Final = "search_answers_api_key"
 CONF_SEARCH_RESULT_COUNT: Final = "search_result_count"
 CONF_SEARCH_MAX_SNIPPET_LEN: Final = "search_max_snippet_len"
 
@@ -254,3 +269,7 @@ DEFAULT_SEARCH_TIMEOUT: Final = 15  # seconds — network round-trip is slower t
 
 # Router response key for web search routing
 ROUTER_RESPONSE_KEY_WEB_SEARCH: Final = "web_search"
+
+# Feature 10 — Language passthrough: force Ollama to respond in the user's language
+CONF_FORCE_RESPONSE_LANGUAGE: Final = "force_response_language"
+DEFAULT_FORCE_RESPONSE_LANGUAGE: Final = True

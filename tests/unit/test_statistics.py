@@ -67,6 +67,7 @@ class TestAgentStats:
             "blocks",
             "block_rate",
             "queries_per_hour",
+            "intent_hints",
         }
 
     def test_to_dict_values(self) -> None:
@@ -298,3 +299,66 @@ class TestAgentStatsNewProperties:
         assert result["blocks"] == 1
         assert result["block_rate"] == pytest.approx(0.25)
         assert result["queries_per_hour"] == pytest.approx(4.0)
+
+    def test_intent_hints_default_is_empty_dict(self) -> None:
+        """AgentStats.intent_hints defaults to an empty dict."""
+        stats = AgentStats()
+        assert stats.intent_hints == {}
+
+    def test_to_dict_includes_intent_hints(self) -> None:
+        """to_dict returns the intent_hints dict."""
+        stats = AgentStats()
+        stats.intent_hints["timer"] = 3
+        result = stats.to_dict()
+        assert result["intent_hints"] == {"timer": 3}
+
+    def test_to_dict_intent_hints_copy_is_returned(self) -> None:
+        """to_dict returns a copy of intent_hints, not the original dict."""
+        stats = AgentStats()
+        stats.intent_hints["timer"] = 1
+        result = stats.to_dict()
+        result["intent_hints"]["timer"] = 99  # mutate the returned copy
+        assert stats.intent_hints["timer"] == 1  # original unchanged
+
+
+class TestAgentStatisticsIntentHint:
+    """Tests for AgentStatistics.record_intent_hint (Feature 8)."""
+
+    def test_record_intent_hint_increments_counter(self) -> None:
+        """record_intent_hint increments the counter for the given hint."""
+        stats = AgentStatistics()
+        stats.record_request("r1", "Router")
+        stats.record_intent_hint("r1", "timer")
+        agent_stats = stats.get_agent_stats("r1")
+        assert agent_stats is not None
+        assert agent_stats.intent_hints["timer"] == 1
+
+    def test_record_intent_hint_multiple_increments(self) -> None:
+        """record_intent_hint increments correctly across multiple calls."""
+        stats = AgentStatistics()
+        stats.record_request("r1", "Router")
+        stats.record_intent_hint("r1", "timer")
+        stats.record_intent_hint("r1", "timer")
+        stats.record_intent_hint("r1", "todo")
+        agent_stats = stats.get_agent_stats("r1")
+        assert agent_stats is not None
+        assert agent_stats.intent_hints["timer"] == 2
+        assert agent_stats.intent_hints["todo"] == 1
+
+    def test_record_intent_hint_unknown_agent_id_is_safe(self) -> None:
+        """record_intent_hint with an unknown agent_id does not raise."""
+        stats = AgentStatistics()
+        stats.record_intent_hint("nonexistent", "timer")  # should not raise
+
+    def test_record_intent_hint_different_agents_independent(self) -> None:
+        """Intent hint counters are per-agent and do not bleed between agents."""
+        stats = AgentStatistics()
+        stats.record_request("r1", "Router1")
+        stats.record_request("r2", "Router2")
+        stats.record_intent_hint("r1", "timer")
+        agent1 = stats.get_agent_stats("r1")
+        agent2 = stats.get_agent_stats("r2")
+        assert agent1 is not None
+        assert agent2 is not None
+        assert agent1.intent_hints == {"timer": 1}
+        assert agent2.intent_hints == {}

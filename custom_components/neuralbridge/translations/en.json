@@ -287,12 +287,14 @@
         "description": "Configure global NeuralBridge settings including home control and response caching.",
         "data": {
           "enable_home_control": "Enable Home Control",
+          "force_response_language": "Force Response Language",
           "response_cache_enabled": "Enable Response Cache",
           "response_cache_ttl": "Cache TTL",
           "purge_cache_now": "Purge Cache Now"
         },
         "data_description": {
           "enable_home_control": "Allow NeuralBridge to control Home Assistant devices. When enabled, the Assist UI shows 'This assistant can control your home'. Add a Home Assistant sub-agent at a low priority number to handle device commands, with LLM agents at higher priorities for general questions.",
+          "force_response_language": "When enabled, Ollama agents are instructed to respond in the same language the user is speaking (e.g. speak French → agent replies in French). Disable this to let the model respond in its default trained language.",
           "response_cache_enabled": "Cache agent responses to avoid repeated calls for identical inputs.",
           "response_cache_ttl": "How long (in seconds) a cached response remains valid before expiring.",
           "purge_cache_now": "Immediately discard all currently cached responses. Useful after changing agent configurations."

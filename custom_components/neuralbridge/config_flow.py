@@ -29,6 +29,7 @@ from .const import (
     CONF_DEFAULT_PROMPT,
     CONF_ENABLE_HOME_CONTROL,
     CONF_ENTITY_ID,
+    CONF_FORCE_RESPONSE_LANGUAGE,
     CONF_GUARD_RAIL_ACTION,
     CONF_GUARD_RAIL_AI_THRESHOLD,
     CONF_GUARD_RAIL_DETOXIFY_THRESHOLD,
@@ -48,6 +49,7 @@ from .const import (
     CONF_ROUTER_CUSTOM_PROMPT,
     CONF_ROUTER_FALLBACK,
     CONF_ROUTER_LOG_LEVEL,
+    CONF_SEARCH_ANSWERS_API_KEY,
     CONF_SEARCH_API_KEY,
     CONF_SEARCH_MAX_SNIPPET_LEN,
     CONF_SEARCH_PROVIDER,
@@ -59,6 +61,7 @@ from .const import (
     DEFAULT_AGENT_ENABLED,
     DEFAULT_DEFAULT_PROMPT,
     DEFAULT_ENABLE_HOME_CONTROL,
+    DEFAULT_FORCE_RESPONSE_LANGUAGE,
     DEFAULT_GUARD_RAIL_ACTION,
     DEFAULT_GUARD_RAIL_AI_THRESHOLD,
     DEFAULT_GUARD_RAIL_DETOXIFY_THRESHOLD,
@@ -101,6 +104,8 @@ from .const import (
     ROUTER_LOG_LEVEL_DEBUG_QUERY,
     ROUTER_LOG_LEVEL_NONE,
     SEARCH_PROVIDER_BRAVE,
+    SEARCH_PROVIDER_BRAVE_ANSWERS,
+    SEARCH_PROVIDER_BRAVE_COMBINED,
     SEARCH_PROVIDERS,
 )
 from .languages_loader import get_string, list_available_languages
@@ -785,30 +790,49 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     # ── Web Search connection validation ───────────────────────────────────────
 
-    async def _validate_web_search_connection(self, provider: str, api_key: str) -> str | None:
-        """Validate a web search API key by running a lightweight test query.
+    async def _validate_web_search_connection(
+        self,
+        provider: str,
+        api_key: str,
+        answers_api_key: str = "",
+    ) -> str | None:
+        """Validate web search API key(s) by running lightweight test queries.
+
+        For ``brave_combined`` both keys are validated independently; the first
+        failure encountered is returned.
 
         Args:
             provider: Provider key (e.g. ``SEARCH_PROVIDER_BRAVE``).
-            api_key: Provider API key (never logged).
+            api_key: Brave Search subscription token (never logged).
+            answers_api_key: Brave Answers subscription token (never logged).
+                             Required when ``provider`` is ``brave_answers`` or
+                             ``brave_combined``.
 
         Returns:
             An error key string if validation fails, None on success.
         """
-        if not api_key:
-            return "search_api_key_missing"
+        if provider in (SEARCH_PROVIDER_BRAVE, SEARCH_PROVIDER_BRAVE_COMBINED):
+            if not api_key:
+                return "search_api_key_missing"
+            err = await self._validate_brave_api_key(api_key)
+            if err:
+                return err
 
-        if provider != SEARCH_PROVIDER_BRAVE:
-            # Unknown providers are accepted without live validation
-            return None
+        if provider in (SEARCH_PROVIDER_BRAVE_ANSWERS, SEARCH_PROVIDER_BRAVE_COMBINED):
+            if not answers_api_key:
+                return "search_answers_api_key_missing"
+            err = await self._validate_brave_answers_api_key(answers_api_key)
+            if err:
+                return err
 
-        return await self._validate_brave_api_key(api_key)
+        # All known providers validated above; unknown providers are accepted without live validation.
+        return None
 
     async def _validate_brave_api_key(self, api_key: str) -> str | None:
         """Validate a Brave Search API key with a lightweight test query.
 
         Args:
-            api_key: Brave subscription token (never logged).
+            api_key: Brave Search subscription token (never logged).
 
         Returns:
             An error key string if validation fails, None on success.
@@ -839,6 +863,41 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             _LOGGER.exception("Unexpected error validating web search: %s", err)
             return "unknown"
 
+    async def _validate_brave_answers_api_key(self, api_key: str) -> str | None:
+        """Validate a Brave Answers API key with a lightweight test query.
+
+        Args:
+            api_key: Brave Answers subscription token (never logged).
+
+        Returns:
+            An error key string if validation fails, None on success.
+        """
+        headers = {
+            "Accept": "application/json",
+            "X-Subscription-Token": api_key,
+        }
+        params: dict[str, Any] = {"q": "test"}
+        try:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    "https://api.search.brave.com/res/v1/answer",
+                    params=params,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as response,
+            ):
+                if response.status == _HTTP_OK:
+                    return None
+                if response.status in (401, 403):
+                    return "invalid_answers_api_key"
+                return "search_api_unreachable"
+        except aiohttp.ClientError:
+            return "search_api_unreachable"
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.exception("Unexpected error validating Brave Answers key: %s", err)
+            return "unknown"
+
     # ── Configure web search agent ─────────────────────────────────────────────
 
     async def async_step_configure_web_search(
@@ -857,14 +916,26 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             Form result or redirect to main menu after saving.
         """
         errors: dict[str, str] = {}
+        connection_status: str = self._agent_data.pop("_web_search_test_status", "")
 
         if user_input is not None:
             provider: str = user_input.get(CONF_SEARCH_PROVIDER, SEARCH_PROVIDER_BRAVE)
             api_key: str = user_input.get(CONF_SEARCH_API_KEY, "")
+            answers_api_key: str = user_input.get(CONF_SEARCH_ANSWERS_API_KEY, "")
+            test_only: bool = bool(user_input.get("test_connection", False))
 
-            error_key = await self._validate_web_search_connection(provider, api_key)
+            error_key = await self._validate_web_search_connection(
+                provider, api_key, answers_api_key
+            )
             if error_key:
                 errors["base"] = error_key
+
+            if not errors and test_only:
+                # Test passed — return to the form with a success indicator.
+                self._agent_data["_web_search_test_status"] = self._s(
+                    "placeholders", "connection_ok"
+                )
+                return await self.async_step_configure_web_search()
 
             if not errors:
                 agent_config = {
@@ -875,6 +946,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_PRIORITY: user_input[CONF_PRIORITY],
                     CONF_SEARCH_PROVIDER: provider,
                     CONF_SEARCH_API_KEY: api_key,
+                    CONF_SEARCH_ANSWERS_API_KEY: answers_api_key,
                     CONF_SEARCH_RESULT_COUNT: int(
                         user_input.get(CONF_SEARCH_RESULT_COUNT, DEFAULT_SEARCH_RESULT_COUNT)
                     ),
@@ -924,6 +996,11 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                             type=selector.TextSelectorType.PASSWORD,
                         )
                     ),
+                    vol.Optional(CONF_SEARCH_ANSWERS_API_KEY, default=""): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            type=selector.TextSelectorType.PASSWORD,
+                        )
+                    ),
                     vol.Optional(
                         CONF_SEARCH_RESULT_COUNT, default=DEFAULT_SEARCH_RESULT_COUNT
                     ): selector.NumberSelector(
@@ -959,12 +1036,14 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
                         default=DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                     ): selector.BooleanSelector(),
+                    vol.Optional("test_connection", default=False): selector.BooleanSelector(),
                 }
             ),
             errors=errors,
             description_placeholders={
                 "priority_info": self._s("placeholders", "priority_info"),
                 "web_search_info": self._s("placeholders", "web_search_info"),
+                "connection_status": connection_status,
             },
         )
 
@@ -998,6 +1077,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             Form result or redirect to main menu after saving.
         """
         errors: dict[str, str] = {}
+        connection_status: str = self._agent_data.pop("_web_search_test_status", "")
         agent = self._agent_data.get("_editing_agent", {})
         agent_id: str = agent.get("id", "")
 
@@ -1007,12 +1087,31 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
             provider: str = user_input.get(CONF_SEARCH_PROVIDER, SEARCH_PROVIDER_BRAVE)
             new_key: str = user_input.get(CONF_SEARCH_API_KEY, "").strip()
+            new_answers_key: str = user_input.get(CONF_SEARCH_ANSWERS_API_KEY, "").strip()
             api_key: str = new_key if new_key else agent.get(CONF_SEARCH_API_KEY, "")
+            answers_api_key: str = (
+                new_answers_key if new_answers_key else agent.get(CONF_SEARCH_ANSWERS_API_KEY, "")
+            )
+            test_only: bool = bool(user_input.get("test_connection", False))
 
-            if new_key:
-                error_key = await self._validate_web_search_connection(provider, new_key)
+            # Validate whichever key(s) were changed (or both on a test request).
+            keys_to_validate_search = new_key or test_only
+            keys_to_validate_answers = new_answers_key or test_only
+            if keys_to_validate_search or keys_to_validate_answers:
+                error_key = await self._validate_web_search_connection(
+                    provider,
+                    api_key if keys_to_validate_search else "",
+                    answers_api_key if keys_to_validate_answers else "",
+                )
                 if error_key:
                     errors["base"] = error_key
+
+            if not errors and test_only:
+                # Test passed — return to the form with a success indicator.
+                self._agent_data["_web_search_test_status"] = self._s(
+                    "placeholders", "connection_ok"
+                )
+                return await self.async_step_edit_agent_web_search()
 
             if not errors:
                 updated = {
@@ -1024,6 +1123,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_PRIORITY: user_input[CONF_PRIORITY],
                     CONF_SEARCH_PROVIDER: provider,
                     CONF_SEARCH_API_KEY: api_key,
+                    CONF_SEARCH_ANSWERS_API_KEY: answers_api_key,
                     CONF_SEARCH_RESULT_COUNT: int(
                         user_input.get(CONF_SEARCH_RESULT_COUNT, DEFAULT_SEARCH_RESULT_COUNT)
                     ),
@@ -1082,6 +1182,11 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                             type=selector.TextSelectorType.PASSWORD,
                         )
                     ),
+                    vol.Optional(CONF_SEARCH_ANSWERS_API_KEY, default=""): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            type=selector.TextSelectorType.PASSWORD,
+                        )
+                    ),
                     vol.Optional(
                         CONF_SEARCH_RESULT_COUNT,
                         default=agent.get(CONF_SEARCH_RESULT_COUNT, DEFAULT_SEARCH_RESULT_COUNT),
@@ -1126,6 +1231,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                             DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                         ),
                     ): selector.BooleanSelector(),
+                    vol.Optional("test_connection", default=False): selector.BooleanSelector(),
                     vol.Optional("delete_agent", default=False): selector.BooleanSelector(),
                 }
             ),
@@ -1133,6 +1239,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             description_placeholders={
                 "priority_info": self._s("placeholders", "priority_info"),
                 "web_search_info": self._s("placeholders", "web_search_info"),
+                "connection_status": connection_status,
             },
         )
 
@@ -1564,6 +1671,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             enable_home_control: bool = user_input.get(
                 CONF_ENABLE_HOME_CONTROL, DEFAULT_ENABLE_HOME_CONTROL
             )
+            force_response_language: bool = user_input.get(
+                CONF_FORCE_RESPONSE_LANGUAGE, DEFAULT_FORCE_RESPONSE_LANGUAGE
+            )
 
             current_data = {
                 **self.config_entry.data,
@@ -1572,6 +1682,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_MAX_RETRIES: max_retries,
                 CONF_RETRY_BASE_DELAY: retry_base_delay,
                 CONF_ENABLE_HOME_CONTROL: enable_home_control,
+                CONF_FORCE_RESPONSE_LANGUAGE: force_response_language,
             }
             self.hass.config_entries.async_update_entry(
                 self.config_entry,
@@ -1596,6 +1707,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         current_max_retries = entry_data.get(CONF_MAX_RETRIES, DEFAULT_MAX_RETRIES)
         current_retry_delay = entry_data.get(CONF_RETRY_BASE_DELAY, DEFAULT_RETRY_BASE_DELAY)
         current_home_control = entry_data.get(CONF_ENABLE_HOME_CONTROL, DEFAULT_ENABLE_HOME_CONTROL)
+        current_force_lang = entry_data.get(
+            CONF_FORCE_RESPONSE_LANGUAGE, DEFAULT_FORCE_RESPONSE_LANGUAGE
+        )
 
         return self.async_show_form(
             step_id="advanced_settings",
@@ -1603,6 +1717,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 {
                     vol.Required(
                         CONF_ENABLE_HOME_CONTROL, default=current_home_control
+                    ): selector.BooleanSelector(),
+                    vol.Required(
+                        CONF_FORCE_RESPONSE_LANGUAGE, default=current_force_lang
                     ): selector.BooleanSelector(),
                     vol.Required(
                         CONF_RESPONSE_CACHE_ENABLED, default=current_enabled

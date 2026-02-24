@@ -36,6 +36,7 @@ from .const import (
     CONF_DEFAULT_PROMPT,
     CONF_ENABLE_HOME_CONTROL,
     CONF_ENTITY_ID,
+    CONF_FORCE_RESPONSE_LANGUAGE,
     CONF_GUARD_RAIL_ACTION,
     CONF_GUARD_RAIL_AI_THRESHOLD,
     CONF_GUARD_RAIL_DETOXIFY_THRESHOLD,
@@ -71,6 +72,7 @@ from .const import (
     DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
     DEFAULT_DEFAULT_PROMPT,
     DEFAULT_ENABLE_HOME_CONTROL,
+    DEFAULT_FORCE_RESPONSE_LANGUAGE,
     DEFAULT_GUARD_RAIL_ACTION,
     DEFAULT_GUARD_RAIL_AI_THRESHOLD,
     DEFAULT_GUARD_RAIL_DETOXIFY_THRESHOLD,
@@ -109,10 +111,12 @@ from .const import (
     ROUTER_LOG_LEVEL_DEBUG,
     ROUTER_LOG_LEVEL_DEBUG_QUERY,
     ROUTER_RESPONSE_KEY_COMPLEXITY,
+    ROUTER_RESPONSE_KEY_INTENT_HINT,
     ROUTER_RESPONSE_KEY_LOCAL_HA,
     ROUTER_RESPONSE_KEY_WEB_SEARCH,
     ROUTER_SKIP_ROUTING_COMPLEXITY,
     SIGNAL_STATS_UPDATED,
+    VALID_INTENT_HINTS,
 )
 from .entity_context import EntityContextCache
 from .guard_rail import GuardRailCache, GuardRailChecker
@@ -140,32 +144,44 @@ class RouterDecision:
     """Immutable classification result produced by a router agent.
 
     Attributes:
-        local_ha:   True when the request is a home-automation / device-control
-                    command that should be handled by a LOCAL_HA agent.
-        web_search: True when the request requires real-time or current data
-                    (news, live scores, current leaders, financial data, etc.).
-        complexity: Integer 1-100 indicating estimated request complexity.
-                    Higher values suggest cloud-capable agents are preferred.
+        local_ha:    True when the request is a home-automation / device-control
+                     command that should be handled by a LOCAL_HA agent.
+        web_search:  True when the request requires real-time or current data
+                     (news, live scores, current leaders, financial data, etc.).
+        complexity:  Integer 1-100 indicating estimated request complexity.
+                     Higher values suggest cloud-capable agents are preferred.
+        intent_hint: Optional routing hint (``"timer"``, ``"reminder"``,
+                     ``"todo"``, ``"shopping_list"``, ``"announce"``, or
+                     ``None``).  Forces LOCAL_HA routing for certain intents.
     """
 
-    __slots__ = ("complexity", "local_ha", "web_search")
+    __slots__ = ("complexity", "intent_hint", "local_ha", "web_search")
 
     # Class-level annotations required for mypy __slots__ attribute resolution
     complexity: int
+    intent_hint: str | None
     local_ha: bool
     web_search: bool
 
-    def __init__(self, local_ha: bool, complexity: int, web_search: bool = False) -> None:
+    def __init__(
+        self,
+        local_ha: bool,
+        complexity: int,
+        web_search: bool = False,
+        intent_hint: str | None = None,
+    ) -> None:
         """Initialise a RouterDecision.
 
         Args:
-            local_ha:   Whether the request targets local home-automation.
-            complexity: Estimated complexity score (1-100).
-            web_search: Whether the request needs real-time web data.
+            local_ha:    Whether the request targets local home-automation.
+            complexity:  Estimated complexity score (1-100).
+            web_search:  Whether the request needs real-time web data.
+            intent_hint: Optional intent classification hint (Feature 8).
         """
         object.__setattr__(self, "local_ha", local_ha)
         object.__setattr__(self, "complexity", complexity)
         object.__setattr__(self, "web_search", web_search)
+        object.__setattr__(self, "intent_hint", intent_hint)
 
     def __setattr__(self, _name: str, _value: object) -> None:
         raise AttributeError("RouterDecision is immutable")
@@ -177,22 +193,72 @@ class RouterDecision:
             self.local_ha == other.local_ha
             and self.complexity == other.complexity
             and self.web_search == other.web_search
+            and self.intent_hint == other.intent_hint
         )
 
     def __hash__(self) -> int:
-        return hash((self.local_ha, self.complexity, self.web_search))
+        return hash((self.local_ha, self.complexity, self.web_search, self.intent_hint))
 
     def __repr__(self) -> str:
         return (
             f"RouterDecision(local_ha={self.local_ha!r}, "
             f"complexity={self.complexity!r}, "
-            f"web_search={self.web_search!r})"
+            f"web_search={self.web_search!r}, "
+            f"intent_hint={self.intent_hint!r})"
         )
 
 
 # ---------------------------------------------------------------------------
 # Module-level routing helpers
 # ---------------------------------------------------------------------------
+
+# Mapping of BCP-47 base language codes to human-readable names.
+# Used by Feature 10 to inject "Respond in {language}." into Ollama prompts.
+_LANG_CODE_TO_NAME: dict[str, str] = {
+    "ar": "Arabic",
+    "cs": "Czech",
+    "da": "Danish",
+    "de": "German",
+    "el": "Greek",
+    "en": "English",
+    "es": "Spanish",
+    "fi": "Finnish",
+    "fr": "French",
+    "he": "Hebrew",
+    "hi": "Hindi",
+    "hu": "Hungarian",
+    "it": "Italian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "nl": "Dutch",
+    "no": "Norwegian",
+    "pl": "Polish",
+    "pt": "Portuguese",
+    "ro": "Romanian",
+    "ru": "Russian",
+    "sk": "Slovak",
+    "sv": "Swedish",
+    "tr": "Turkish",
+    "uk": "Ukrainian",
+    "zh": "Chinese",
+}
+
+
+def _get_language_name(language_code: str) -> str:
+    """Return a human-readable language name for the given BCP-47 language code.
+
+    Normalises the code to a 2-letter base (e.g. ``"fr-FR"`` → ``"fr"``) before
+    looking up in ``_LANG_CODE_TO_NAME``.  Falls back to the original code when
+    the language is not in the map.
+
+    Args:
+        language_code: BCP-47 language tag (e.g. ``"en"``, ``"fr-FR"``).
+
+    Returns:
+        Human-readable name (e.g. ``"French"``) or the original code if unknown.
+    """
+    base = language_code.lower().split("-")[0].split("_")[0]
+    return _LANG_CODE_TO_NAME.get(base, language_code)
 
 
 def _parse_router_response(raw: str) -> RouterDecision | None:
@@ -259,7 +325,13 @@ def _parse_router_response(raw: str) -> RouterDecision | None:
     local_ha = bool(data[ROUTER_RESPONSE_KEY_LOCAL_HA])
     web_search = bool(data.get(ROUTER_RESPONSE_KEY_WEB_SEARCH, False))
 
-    return RouterDecision(local_ha=local_ha, complexity=complexity, web_search=web_search)
+    # Extract optional intent_hint (Feature 8); accept only known values
+    raw_hint = data.get(ROUTER_RESPONSE_KEY_INTENT_HINT)
+    intent_hint: str | None = str(raw_hint) if raw_hint in VALID_INTENT_HINTS else None
+
+    return RouterDecision(
+        local_ha=local_ha, complexity=complexity, web_search=web_search, intent_hint=intent_hint
+    )
 
 
 def _apply_router_decision(
@@ -288,6 +360,12 @@ def _apply_router_decision(
     if decision.complexity == ROUTER_SKIP_ROUTING_COMPLEXITY:
         # Fallback=skip_routing — bypass agent filtering, try everything
         return list(processing_agents)
+    # Feature 8: intent_hint forces LOCAL_HA for timer/reminder/todo/shopping_list commands
+    # regardless of what the router returned for local_ha (extra safety net).
+    if decision.intent_hint in ("timer", "reminder", "todo", "shopping_list"):
+        local = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) == AGENT_TYPE_LOCAL_HA]
+        others = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) != AGENT_TYPE_LOCAL_HA]
+        return local + others
     if decision.web_search:
         # Promote WEB_SEARCH agents to front; keep original order within each group
         web = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) == AGENT_TYPE_WEB_SEARCH]
@@ -743,7 +821,7 @@ class NeuralBridgeAgent(ConversationEntity):
         for router_config in router_agents:
             _LOGGER.debug("Checking with router: %s", router_config.get(CONF_AGENT_NAME))
             decision = await self._classify_with_router(
-                router_config, user_input.text, area_context
+                router_config, user_input.text, area_context, user_input.language
             )
             if decision is None:
                 _LOGGER.info(
@@ -765,6 +843,7 @@ class NeuralBridgeAgent(ConversationEntity):
         router_config: dict[str, Any],
         user_text: str,
         area_context: str | None = None,
+        language: str | None = None,
     ) -> RouterDecision | None:
         """Ask a router agent to classify user text via a JSON prompt.
 
@@ -789,6 +868,7 @@ class NeuralBridgeAgent(ConversationEntity):
             router_config: Configuration dict for the router agent.
             user_text:     The raw user input text to classify.
             area_context:  Friendly area name of the originating device, or None.
+            language:      BCP-47 language tag from the HA pipeline, or None.
 
         Returns:
             A RouterDecision on success or fallback, None to block the request.
@@ -811,6 +891,8 @@ class NeuralBridgeAgent(ConversationEntity):
             prompt = f"{prompt}\n\n{entity_context}"
         if area_context:
             prompt = f"{prompt}\n\nDevice area: {area_context}"
+        if language:
+            prompt = f"{prompt}\nLanguage: {language}"
 
         if log_level == ROUTER_LOG_LEVEL_DEBUG_QUERY:
             _LOGGER.debug("Router '%s' classifying query: %s", agent_name, user_text)
@@ -835,6 +917,10 @@ class NeuralBridgeAgent(ConversationEntity):
             self._statistics.record_block(agent_id)
             self._dispatch_stats_updated()
             return None
+
+        # Record intent_hint in stats if the router provided one (Feature 8)
+        if parsed.intent_hint:
+            self._statistics.record_intent_hint(agent_id, parsed.intent_hint)
 
         self._log_router_decision(log_level, agent_name, parsed)
         self._dispatch_stats_updated()
@@ -1088,6 +1174,38 @@ class NeuralBridgeAgent(ConversationEntity):
             )
             return None, False
 
+    def _render_ha_context(self, prompt: str) -> str:
+        """Substitute ``{ha_*}`` template tokens with live HA configuration values.
+
+        Supported tokens:
+
+        * ``{ha_location_name}`` — friendly name of the HA installation
+          (``hass.config.location_name``).
+        * ``{ha_timezone}`` — IANA timezone string, e.g. ``"Europe/London"``
+          (``hass.config.time_zone``).
+        * ``{ha_unit_temperature}`` — temperature unit symbol, e.g. ``"°C"``
+          (``hass.config.units.temperature_unit.value``).
+
+        Tokens not present in *prompt* are silently ignored, making this safe
+        to call on any user-supplied prompt text.
+
+        Args:
+            prompt: Raw prompt text, possibly containing ``{ha_*}`` tokens.
+
+        Returns:
+            Prompt with all recognised tokens replaced by their runtime values.
+        """
+        cfg = self.hass.config
+        unit_temp = getattr(cfg.units, "temperature_unit", None)
+        temperature_unit: str = (
+            unit_temp.value if unit_temp is not None and hasattr(unit_temp, "value") else ""
+        )
+        return (
+            prompt.replace("{ha_location_name}", cfg.location_name or "")
+            .replace("{ha_timezone}", cfg.time_zone or "")
+            .replace("{ha_unit_temperature}", temperature_unit)
+        )
+
     async def _process_with_ollama(
         self, agent_config: dict[str, Any], user_input: ConversationInput
     ) -> ConversationResult | None:
@@ -1116,6 +1234,7 @@ class NeuralBridgeAgent(ConversationEntity):
             CONF_DEFAULT_PROMPT, DEFAULT_DEFAULT_PROMPT
         )
         system_prompt: str = agent_prompt if agent_prompt else global_default
+        system_prompt = self._render_ha_context(system_prompt)
 
         if not isinstance(ollama_url, str) or not isinstance(ollama_model, str):
             return None
@@ -1123,6 +1242,20 @@ class NeuralBridgeAgent(ConversationEntity):
             self._ollama_clients[agent_id] = OllamaClient(ollama_url, ollama_model, timeout)
 
         client = self._ollama_clients[agent_id]
+
+        # Feature 10 — Language passthrough: append "Respond in {lang}." when
+        # the pipeline language differs from the configured integration language
+        # and CONF_FORCE_RESPONSE_LANGUAGE is enabled (default: True).
+        config = self._get_config()
+        force_lang: bool = config.get(CONF_FORCE_RESPONSE_LANGUAGE, DEFAULT_FORCE_RESPONSE_LANGUAGE)
+        if force_lang and user_input.language:
+            input_base = user_input.language.lower().split("-")[0].split("_")[0]
+            conf_base = (
+                str(config.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)).lower().split("-")[0].split("_")[0]
+            )
+            if input_base != conf_base:
+                lang_name = _get_language_name(user_input.language)
+                system_prompt = f"{system_prompt}\nRespond in {lang_name}.".strip()
 
         # Build message list: optional system prompt + history + current turn (#9)
         history = self._session_memory.get_messages(user_input.conversation_id)

@@ -111,44 +111,50 @@
       },
       "configure_web_search": {
         "title": "Configure Web Search Agent",
-        "description": "Add a web search agent that retrieves real-time information for time-sensitive queries (news, current events, live data).\n\n{priority_info}\n\n{web_search_info}",
+        "description": "Add a web search agent that retrieves real-time information for time-sensitive queries (news, current events, live data).\n\n{priority_info}\n\n{web_search_info}{connection_status}",
         "data": {
           "agent_name": "Agent Name",
           "priority": "Priority (1–100)",
           "search_provider": "Search Provider",
-          "search_api_key": "API Key",
-          "search_result_count": "Number of Results",
-          "search_max_snippet_len": "Max Snippet Length",
-          "timeout": "Timeout",
-          "agent_cache_enabled": "Enable Response Cache",
-          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent"
-        },
-        "data_description": {
-          "agent_name": "A friendly name for this agent (e.g. \"Web Search\")",
-          "priority": "Priority for this agent — lower numbers are tried first",
-          "search_provider": "The web search service to use",
-          "search_api_key": "Your API subscription key for the selected provider",
-          "search_result_count": "How many search results to include in the response (1–10)",
-          "search_max_snippet_len": "Maximum characters per result snippet before truncation",
-          "timeout": "Maximum time to wait for search results",
-          "agent_cache_enabled": "Cache search results. Disable for queries that always need fresh data.",
-          "guard_rail_enabled_for_agent": "Run guard rail checks on search results returned by this agent"
-        }
-      },
-      "edit_agent_web_search": {
-        "title": "Edit Web Search Agent",
-        "description": "Edit settings for this web search agent.\n\n{priority_info}\n\n{web_search_info}",
-        "data": {
-          "agent_name": "Agent Name",
-          "priority": "Priority (1–100)",
-          "enabled": "Agent Enabled",
-          "search_provider": "Search Provider",
-          "search_api_key": "API Key (leave blank to keep current key)",
+          "search_api_key": "Search API Key",
+          "search_answers_api_key": "Answers API Key",
           "search_result_count": "Number of Results",
           "search_max_snippet_len": "Max Snippet Length",
           "timeout": "Timeout",
           "agent_cache_enabled": "Enable Response Cache",
           "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "test_connection": "Test connection before saving"
+        },
+        "data_description": {
+          "agent_name": "A friendly name for this agent (e.g. \"Web Search\")",
+          "priority": "Priority for this agent — lower numbers are tried first",
+          "search_provider": "The web search service to use",
+          "search_api_key": "Your Brave Search subscription key (required for Brave Search and Brave Combined)",
+          "search_answers_api_key": "Your Brave Answers subscription key (required for Brave Answers and Brave Combined — separate subscription from Brave Search)",
+          "search_result_count": "How many search results to include in the response (1–10)",
+          "search_max_snippet_len": "Maximum characters per result snippet before truncation",
+          "timeout": "Maximum time to wait for search results",
+          "agent_cache_enabled": "Cache search results. Disable for queries that always need fresh data.",
+          "guard_rail_enabled_for_agent": "Run guard rail checks on search results returned by this agent",
+          "test_connection": "Tick to test your API key(s) without saving. Untick and submit again to save."
+        }
+      },
+      "edit_agent_web_search": {
+        "title": "Edit Web Search Agent",
+        "description": "Edit settings for this web search agent.\n\n{priority_info}\n\n{web_search_info}{connection_status}",
+        "data": {
+          "agent_name": "Agent Name",
+          "priority": "Priority (1–100)",
+          "enabled": "Agent Enabled",
+          "search_provider": "Search Provider",
+          "search_api_key": "Search API Key (leave blank to keep current key)",
+          "search_answers_api_key": "Answers API Key (leave blank to keep current key)",
+          "search_result_count": "Number of Results",
+          "search_max_snippet_len": "Max Snippet Length",
+          "timeout": "Timeout",
+          "agent_cache_enabled": "Enable Response Cache",
+          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "test_connection": "Test connection before saving",
           "delete_agent": "Delete this Agent"
         },
         "data_description": {
@@ -156,12 +162,14 @@
           "priority": "Priority for this agent — lower numbers are tried first",
           "enabled": "Toggle to enable or disable this agent without removing it",
           "search_provider": "The web search service to use",
-          "search_api_key": "Enter a new API key to replace the current one, or leave blank to keep it unchanged",
+          "search_api_key": "Enter a new Brave Search key to replace the current one, or leave blank to keep it unchanged",
+          "search_answers_api_key": "Enter a new Brave Answers key to replace the current one, or leave blank to keep it unchanged",
           "search_result_count": "How many search results to include in the response (1–10)",
           "search_max_snippet_len": "Maximum characters per result snippet before truncation",
           "timeout": "Maximum time to wait for search results",
           "agent_cache_enabled": "Cache search results. Disable for queries that always need fresh data.",
           "guard_rail_enabled_for_agent": "Run guard rail checks on search results returned by this agent",
+          "test_connection": "Tick to test your API key(s) without saving. Untick and submit again to save.",
           "delete_agent": "Check this box and submit to permanently delete this agent (you will be asked to confirm)"
         }
       },
@@ -287,12 +295,14 @@
         "description": "Configure global NeuralBridge settings including home control and response caching.",
         "data": {
           "enable_home_control": "Enable Home Control",
+          "force_response_language": "Force Response Language",
           "response_cache_enabled": "Enable Response Cache",
           "response_cache_ttl": "Cache TTL",
           "purge_cache_now": "Purge Cache Now"
         },
         "data_description": {
           "enable_home_control": "Allow NeuralBridge to control Home Assistant devices. When enabled, the Assist UI shows 'This assistant can control your home'. Add a Home Assistant sub-agent at a low priority number to handle device commands, with LLM agents at higher priorities for general questions.",
+          "force_response_language": "When enabled, Ollama agents are instructed to respond in the same language the user is speaking (e.g. speak French → agent replies in French). Disable this to let the model respond in its default trained language.",
           "response_cache_enabled": "Cache agent responses to avoid repeated calls for identical inputs.",
           "response_cache_ttl": "How long (in seconds) a cached response remains valid before expiring.",
           "purge_cache_now": "Immediately discard all currently cached responses. Useful after changing agent configurations."
@@ -337,8 +347,10 @@
       "invalid_url_scheme": "Invalid URL scheme. Only http:// and https:// are supported.",
       "entity_not_found": "The selected conversation agent was not found. Ensure the integration is loaded and the entity is available.",
       "no_router_agent": "No routing agent is configured. Use \"Configure Routing Agent\" to select a conversation agent before enabling guard rails.",
-      "invalid_api_key": "The API key was rejected by the search provider. Please check your key and subscription status.",
-      "search_api_key_missing": "An API key is required for the selected search provider.",
+      "invalid_api_key": "The Brave Search API key was rejected. Please check your key and subscription status.",
+      "invalid_answers_api_key": "The Brave Answers API key was rejected. Please check your key and Answers subscription status.",
+      "search_api_key_missing": "A Brave Search API key is required for the selected provider.",
+      "search_answers_api_key_missing": "A Brave Answers API key is required for the selected provider.",
       "search_api_unreachable": "Could not reach the search provider API. Check your network connection and try again.",
       "unknown": "An unexpected error occurred. Check the logs for details."
     }

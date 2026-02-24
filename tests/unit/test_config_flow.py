@@ -27,6 +27,7 @@ from custom_components.neuralbridge.const import (
     CONF_DEFAULT_PROMPT,
     CONF_ENABLE_HOME_CONTROL,
     CONF_ENTITY_ID,
+    CONF_FORCE_RESPONSE_LANGUAGE,
     CONF_GUARD_RAIL_ACTION,
     CONF_GUARD_RAIL_AI_THRESHOLD,
     CONF_GUARD_RAIL_ENABLED,
@@ -44,6 +45,7 @@ from custom_components.neuralbridge.const import (
     CONF_ROUTER_CUSTOM_PROMPT,
     CONF_ROUTER_FALLBACK,
     CONF_ROUTER_LOG_LEVEL,
+    CONF_SEARCH_ANSWERS_API_KEY,
     CONF_SEARCH_API_KEY,
     CONF_SEARCH_MAX_SNIPPET_LEN,
     CONF_SEARCH_PROVIDER,
@@ -54,6 +56,7 @@ from custom_components.neuralbridge.const import (
     DEFAULT_AGENT_CACHE_ENABLED,
     DEFAULT_DEFAULT_PROMPT,
     DEFAULT_ENABLE_HOME_CONTROL,
+    DEFAULT_FORCE_RESPONSE_LANGUAGE,
     DEFAULT_GUARD_RAIL_ACTION,
     DEFAULT_GUARD_RAIL_AI_THRESHOLD,
     DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
@@ -79,6 +82,8 @@ from custom_components.neuralbridge.const import (
     ROUTER_FALLBACK_SKIP_ROUTING,
     ROUTER_LOG_LEVEL_NONE,
     SEARCH_PROVIDER_BRAVE,
+    SEARCH_PROVIDER_BRAVE_ANSWERS,
+    SEARCH_PROVIDER_BRAVE_COMBINED,
 )
 
 if TYPE_CHECKING:
@@ -2602,7 +2607,7 @@ async def test_edit_agent_web_search_saves_with_new_api_key(hass: HomeAssistant)
             }
         )
 
-    mock_validate.assert_called_once_with(SEARCH_PROVIDER_BRAVE, "new-brave-key")
+    mock_validate.assert_called_once_with(SEARCH_PROVIDER_BRAVE, "new-brave-key", "")
     assert result["type"] == FlowResultType.MENU
     assert result["step_id"] == "init"
     agents = handler.config_entry.data[CONF_AGENTS]
@@ -2691,3 +2696,507 @@ async def test_route_to_edit_step_dispatches_to_edit_web_search(hass: HomeAssist
 
     mock_edit.assert_called_once_with()
     assert result["step_id"] == "edit_agent_web_search"
+
+
+# ---------------------------------------------------------------------------
+# _validate_web_search_connection — Brave Answers + Combined paths
+# ---------------------------------------------------------------------------
+
+
+async def test_validate_web_search_connection_brave_answers_empty_answers_key(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """brave_answers with empty answers_api_key returns 'search_answers_api_key_missing'."""
+    handler = _make_handler(mock_config_entry, hass)
+    result = await handler._validate_web_search_connection(SEARCH_PROVIDER_BRAVE_ANSWERS, "", "")
+    assert result == "search_answers_api_key_missing"
+
+
+async def test_validate_web_search_connection_brave_combined_empty_search_key(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """brave_combined with empty search key returns 'search_api_key_missing'."""
+    handler = _make_handler(mock_config_entry, hass)
+    result = await handler._validate_web_search_connection(
+        SEARCH_PROVIDER_BRAVE_COMBINED, "", "answers-key"
+    )
+    assert result == "search_api_key_missing"
+
+
+async def test_validate_web_search_connection_brave_combined_empty_answers_key(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """brave_combined with empty answers key returns 'search_answers_api_key_missing'."""
+    handler = _make_handler(mock_config_entry, hass)
+    with patch.object(
+        handler, "_validate_brave_api_key", new_callable=AsyncMock, return_value=None
+    ):
+        result = await handler._validate_web_search_connection(
+            SEARCH_PROVIDER_BRAVE_COMBINED, "search-key", ""
+        )
+    assert result == "search_answers_api_key_missing"
+
+
+async def test_validate_web_search_connection_brave_answers_delegates_to_answers_key(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """brave_answers delegates to _validate_brave_answers_api_key."""
+    handler = _make_handler(mock_config_entry, hass)
+    with patch.object(
+        handler,
+        "_validate_brave_answers_api_key",
+        new_callable=AsyncMock,
+        return_value=None,
+    ) as mock_validate:
+        result = await handler._validate_web_search_connection(
+            SEARCH_PROVIDER_BRAVE_ANSWERS, "", "my-answers-key"
+        )
+    mock_validate.assert_called_once_with("my-answers-key")
+    assert result is None
+
+
+async def test_validate_web_search_connection_brave_answers_returns_error_when_key_invalid(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """brave_answers propagates error returned by _validate_brave_answers_api_key."""
+    handler = _make_handler(mock_config_entry, hass)
+    with patch.object(
+        handler,
+        "_validate_brave_answers_api_key",
+        new_callable=AsyncMock,
+        return_value="invalid_answers_api_key",
+    ):
+        result = await handler._validate_web_search_connection(
+            SEARCH_PROVIDER_BRAVE_ANSWERS, "", "bad-answers-key"
+        )
+    assert result == "invalid_answers_api_key"
+
+
+async def test_validate_web_search_connection_brave_combined_validates_both_keys(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """brave_combined calls both _validate_brave_api_key and _validate_brave_answers_api_key."""
+    handler = _make_handler(mock_config_entry, hass)
+    with (
+        patch.object(
+            handler, "_validate_brave_api_key", new_callable=AsyncMock, return_value=None
+        ) as mock_search,
+        patch.object(
+            handler, "_validate_brave_answers_api_key", new_callable=AsyncMock, return_value=None
+        ) as mock_answers,
+    ):
+        result = await handler._validate_web_search_connection(
+            SEARCH_PROVIDER_BRAVE_COMBINED, "s-key", "a-key"
+        )
+    mock_search.assert_called_once_with("s-key")
+    mock_answers.assert_called_once_with("a-key")
+    assert result is None
+
+
+async def test_validate_web_search_connection_brave_combined_search_key_fails_returns_error(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """brave_combined stops at first failure — bad search key is returned immediately."""
+    handler = _make_handler(mock_config_entry, hass)
+    with (
+        patch.object(
+            handler,
+            "_validate_brave_api_key",
+            new_callable=AsyncMock,
+            return_value="invalid_api_key",
+        ),
+        patch.object(
+            handler, "_validate_brave_answers_api_key", new_callable=AsyncMock, return_value=None
+        ) as mock_answers,
+    ):
+        result = await handler._validate_web_search_connection(
+            SEARCH_PROVIDER_BRAVE_COMBINED, "bad-search-key", "a-key"
+        )
+    mock_answers.assert_not_awaited()
+    assert result == "invalid_api_key"
+
+
+# ---------------------------------------------------------------------------
+# _validate_brave_answers_api_key — HTTP variants
+# ---------------------------------------------------------------------------
+
+
+async def test_validate_brave_answers_api_key_http_200_returns_none(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """HTTP 200 from Brave Answers → None (success)."""
+    handler = _make_handler(mock_config_entry, hass)
+    with patch(_PATCH_BRAVE_SESSION, return_value=_make_brave_session_cm(200)):
+        result = await handler._validate_brave_answers_api_key("valid-answers-key")
+    assert result is None
+
+
+async def test_validate_brave_answers_api_key_http_401_returns_invalid(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """HTTP 401 from Brave Answers → 'invalid_answers_api_key'."""
+    handler = _make_handler(mock_config_entry, hass)
+    with patch(_PATCH_BRAVE_SESSION, return_value=_make_brave_session_cm(401)):
+        result = await handler._validate_brave_answers_api_key("bad-answers-key")
+    assert result == "invalid_answers_api_key"
+
+
+async def test_validate_brave_answers_api_key_http_403_returns_invalid(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """HTTP 403 from Brave Answers → 'invalid_answers_api_key'."""
+    handler = _make_handler(mock_config_entry, hass)
+    with patch(_PATCH_BRAVE_SESSION, return_value=_make_brave_session_cm(403)):
+        result = await handler._validate_brave_answers_api_key("forbidden-key")
+    assert result == "invalid_answers_api_key"
+
+
+async def test_validate_brave_answers_api_key_http_500_returns_unreachable(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Non-200/401/403 Answers status → 'search_api_unreachable'."""
+    handler = _make_handler(mock_config_entry, hass)
+    with patch(_PATCH_BRAVE_SESSION, return_value=_make_brave_session_cm(500)):
+        result = await handler._validate_brave_answers_api_key("key")
+    assert result == "search_api_unreachable"
+
+
+async def test_validate_brave_answers_api_key_client_error_returns_unreachable(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """aiohttp.ClientError during Answers validation → 'search_api_unreachable'."""
+    handler = _make_handler(mock_config_entry, hass)
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(side_effect=aiohttp.ClientError("timeout"))
+    session_cm.__aexit__ = AsyncMock(return_value=None)
+    with patch(_PATCH_BRAVE_SESSION, return_value=session_cm):
+        result = await handler._validate_brave_answers_api_key("key")
+    assert result == "search_api_unreachable"
+
+
+async def test_validate_brave_answers_api_key_unexpected_exception_returns_unknown(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Unexpected exception during Answers validation → 'unknown'."""
+    handler = _make_handler(mock_config_entry, hass)
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(side_effect=RuntimeError("boom"))
+    session_cm.__aexit__ = AsyncMock(return_value=None)
+    with patch(_PATCH_BRAVE_SESSION, return_value=session_cm):
+        result = await handler._validate_brave_answers_api_key("key")
+    assert result == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# configure_web_search — test_connection checkbox
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_web_search_test_connection_success_returns_form(
+    hass: HomeAssistant,
+) -> None:
+    """test_connection=True with passing validation returns form (does not save)."""
+    entry = _entry_with_agents(hass, [])
+    handler = _make_handler(entry, hass)
+    with patch.object(
+        handler,
+        "_validate_web_search_connection",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        result = await handler.async_step_configure_web_search(
+            {
+                CONF_AGENT_NAME: "Brave Search",
+                CONF_PRIORITY: 40,
+                CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE,
+                CONF_SEARCH_API_KEY: "valid-key",
+                "test_connection": True,
+            }
+        )
+
+    # Must return the form, not init menu
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "configure_web_search"
+    # Nothing saved
+    assert handler.config_entry.data.get(CONF_AGENTS, []) == []
+
+
+async def test_configure_web_search_test_connection_failure_shows_error(
+    hass: HomeAssistant,
+) -> None:
+    """test_connection=True with failing validation shows the error on the form."""
+    entry = _entry_with_agents(hass, [])
+    handler = _make_handler(entry, hass)
+    with patch.object(
+        handler,
+        "_validate_web_search_connection",
+        new_callable=AsyncMock,
+        return_value="invalid_api_key",
+    ):
+        result = await handler.async_step_configure_web_search(
+            {
+                CONF_AGENT_NAME: "Brave Search",
+                CONF_PRIORITY: 40,
+                CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE,
+                CONF_SEARCH_API_KEY: "bad-key",
+                "test_connection": True,
+            }
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"]["base"] == "invalid_api_key"
+
+
+async def test_configure_web_search_saves_answers_api_key(
+    hass: HomeAssistant,
+) -> None:
+    """configure_web_search persists CONF_SEARCH_ANSWERS_API_KEY in agent config."""
+    entry = _entry_with_agents(hass, [])
+    handler = _make_handler(entry, hass)
+    with patch.object(
+        handler,
+        "_validate_web_search_connection",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        await handler.async_step_configure_web_search(
+            {
+                CONF_AGENT_NAME: "Brave Answers Agent",
+                CONF_PRIORITY: 40,
+                CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE_COMBINED,
+                CONF_SEARCH_API_KEY: "search-key",
+                CONF_SEARCH_ANSWERS_API_KEY: "answers-key",
+                CONF_SEARCH_RESULT_COUNT: DEFAULT_SEARCH_RESULT_COUNT,
+                CONF_SEARCH_MAX_SNIPPET_LEN: DEFAULT_SEARCH_MAX_SNIPPET_LEN,
+                CONF_TIMEOUT: DEFAULT_SEARCH_TIMEOUT,
+                CONF_AGENT_CACHE_ENABLED: False,
+                CONF_GUARD_RAIL_ENABLED_FOR_AGENT: False,
+                "test_connection": False,
+            }
+        )
+
+    agents = handler.config_entry.data[CONF_AGENTS]
+    assert len(agents) == 1
+    assert agents[0][CONF_SEARCH_ANSWERS_API_KEY] == "answers-key"
+    assert agents[0][CONF_SEARCH_API_KEY] == "search-key"
+
+
+# ---------------------------------------------------------------------------
+# edit_agent_web_search — test_connection checkbox
+# ---------------------------------------------------------------------------
+
+
+async def test_edit_agent_web_search_test_connection_success_returns_form(
+    hass: HomeAssistant,
+) -> None:
+    """test_connection=True with passing validation returns form (does not save)."""
+    agent = _web_search_agent(agent_id="ws-tc-1")
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = agent
+
+    with patch.object(
+        handler,
+        "_validate_web_search_connection",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        result = await handler.async_step_edit_agent_web_search(
+            {
+                CONF_AGENT_NAME: "Brave Search",
+                CONF_PRIORITY: 40,
+                CONF_AGENT_ENABLED: True,
+                CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE,
+                CONF_SEARCH_API_KEY: "new-key",
+                CONF_SEARCH_ANSWERS_API_KEY: "",
+                CONF_SEARCH_RESULT_COUNT: DEFAULT_SEARCH_RESULT_COUNT,
+                CONF_SEARCH_MAX_SNIPPET_LEN: DEFAULT_SEARCH_MAX_SNIPPET_LEN,
+                CONF_TIMEOUT: DEFAULT_SEARCH_TIMEOUT,
+                CONF_AGENT_CACHE_ENABLED: False,
+                CONF_GUARD_RAIL_ENABLED_FOR_AGENT: False,
+                "test_connection": True,
+            }
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "edit_agent_web_search"
+    # Original agent unchanged
+    saved = next(a for a in handler.config_entry.data[CONF_AGENTS] if a.get("id") == "ws-tc-1")
+    assert saved[CONF_SEARCH_API_KEY] == "existing-brave-key"
+
+
+async def test_edit_agent_web_search_test_connection_failure_shows_error(
+    hass: HomeAssistant,
+) -> None:
+    """test_connection=True with failing validation shows error on edit form."""
+    agent = _web_search_agent(agent_id="ws-tc-2")
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = agent
+
+    with patch.object(
+        handler,
+        "_validate_web_search_connection",
+        new_callable=AsyncMock,
+        return_value="invalid_answers_api_key",
+    ):
+        result = await handler.async_step_edit_agent_web_search(
+            {
+                CONF_AGENT_NAME: "Brave Search",
+                CONF_PRIORITY: 40,
+                CONF_AGENT_ENABLED: True,
+                CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE_COMBINED,
+                CONF_SEARCH_API_KEY: "s-key",
+                CONF_SEARCH_ANSWERS_API_KEY: "bad-answers-key",
+                "test_connection": True,
+            }
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"]["base"] == "invalid_answers_api_key"
+
+
+async def test_edit_agent_web_search_saves_answers_api_key(hass: HomeAssistant) -> None:
+    """edit_agent_web_search saves CONF_SEARCH_ANSWERS_API_KEY when a new key is provided."""
+    agent = _web_search_agent(
+        agent_id="ws-ans-1",
+        **{CONF_SEARCH_ANSWERS_API_KEY: "old-answers-key"},
+    )
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = agent
+
+    with patch.object(
+        handler,
+        "_validate_web_search_connection",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        await handler.async_step_edit_agent_web_search(
+            {
+                CONF_AGENT_NAME: "Brave Combined",
+                CONF_PRIORITY: 40,
+                CONF_AGENT_ENABLED: True,
+                CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE_COMBINED,
+                CONF_SEARCH_API_KEY: "new-search-key",
+                CONF_SEARCH_ANSWERS_API_KEY: "new-answers-key",
+                CONF_SEARCH_RESULT_COUNT: DEFAULT_SEARCH_RESULT_COUNT,
+                CONF_SEARCH_MAX_SNIPPET_LEN: DEFAULT_SEARCH_MAX_SNIPPET_LEN,
+                CONF_TIMEOUT: DEFAULT_SEARCH_TIMEOUT,
+                CONF_AGENT_CACHE_ENABLED: False,
+                CONF_GUARD_RAIL_ENABLED_FOR_AGENT: False,
+                "test_connection": False,
+            }
+        )
+
+    saved = next(a for a in handler.config_entry.data[CONF_AGENTS] if a.get("id") == "ws-ans-1")
+    assert saved[CONF_SEARCH_ANSWERS_API_KEY] == "new-answers-key"
+    assert saved[CONF_SEARCH_API_KEY] == "new-search-key"
+
+
+async def test_edit_agent_web_search_keeps_existing_answers_key_when_blank(
+    hass: HomeAssistant,
+) -> None:
+    """Blank answers key field retains the original answers key."""
+    agent = _web_search_agent(
+        agent_id="ws-ans-2",
+        **{CONF_SEARCH_ANSWERS_API_KEY: "keep-this-answers-key"},
+    )
+    entry = _entry_with_agents(hass, [agent])
+    handler = _make_handler(entry, hass)
+    handler._agent_data["_editing_agent"] = agent
+
+    with patch.object(
+        handler, "_validate_web_search_connection", new_callable=AsyncMock
+    ) as mock_validate:
+        await handler.async_step_edit_agent_web_search(
+            {
+                CONF_AGENT_NAME: "Brave Combined",
+                CONF_PRIORITY: 40,
+                CONF_AGENT_ENABLED: True,
+                CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE_COMBINED,
+                CONF_SEARCH_API_KEY: "",  # blank → keep existing
+                CONF_SEARCH_ANSWERS_API_KEY: "",  # blank → keep existing
+                CONF_SEARCH_RESULT_COUNT: DEFAULT_SEARCH_RESULT_COUNT,
+                CONF_SEARCH_MAX_SNIPPET_LEN: DEFAULT_SEARCH_MAX_SNIPPET_LEN,
+                CONF_TIMEOUT: DEFAULT_SEARCH_TIMEOUT,
+                CONF_AGENT_CACHE_ENABLED: False,
+                CONF_GUARD_RAIL_ENABLED_FOR_AGENT: False,
+                "test_connection": False,
+            }
+        )
+
+    mock_validate.assert_not_called()
+    saved = next(a for a in handler.config_entry.data[CONF_AGENTS] if a.get("id") == "ws-ans-2")
+    assert saved[CONF_SEARCH_ANSWERS_API_KEY] == "keep-this-answers-key"
+
+
+# ===========================================================================
+# Feature 10 — advanced_settings: force_response_language toggle
+# ===========================================================================
+
+
+async def test_advanced_settings_saves_force_response_language(hass: HomeAssistant) -> None:
+    """Submitting advanced_settings with force_response_language=False persists the value."""
+    entry = _entry_with_agents(hass, [])
+    handler = _make_handler(entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_advanced_settings(
+            {
+                CONF_RESPONSE_CACHE_ENABLED: True,
+                CONF_RESPONSE_CACHE_TTL: 300,
+                "purge_cache_now": False,
+                CONF_FORCE_RESPONSE_LANGUAGE: False,
+            }
+        )
+
+    assert entry.data[CONF_FORCE_RESPONSE_LANGUAGE] is False
+
+
+async def test_advanced_settings_force_response_language_defaults_to_true(
+    hass: HomeAssistant,
+) -> None:
+    """force_response_language defaults to True when not provided in the submitted form."""
+    entry = _entry_with_agents(hass, [])
+    handler = _make_handler(entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_advanced_settings(
+            {
+                CONF_RESPONSE_CACHE_ENABLED: True,
+                CONF_RESPONSE_CACHE_TTL: 300,
+                "purge_cache_now": False,
+                # CONF_FORCE_RESPONSE_LANGUAGE not provided → uses default
+            }
+        )
+
+    assert entry.data.get(CONF_FORCE_RESPONSE_LANGUAGE, DEFAULT_FORCE_RESPONSE_LANGUAGE) is True
+
+
+async def test_advanced_settings_shows_force_response_language_field(
+    hass: HomeAssistant,
+) -> None:
+    """async_step_advanced_settings form includes the force_response_language field."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_FORCE_RESPONSE_LANGUAGE: False},
+        options={},
+    )
+    entry.add_to_hass(hass)
+    handler = _make_handler(entry, hass)
+
+    result = await handler.async_step_advanced_settings()
+
+    assert result["type"] == FlowResultType.FORM
+    schema = result["data_schema"].schema
+    keys = [k.schema if hasattr(k, "schema") else k for k in schema]
+    assert CONF_FORCE_RESPONSE_LANGUAGE in keys

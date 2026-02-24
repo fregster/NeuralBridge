@@ -10,6 +10,7 @@ import aiohttp
 import pytest
 
 from custom_components.neuralbridge.const import (
+    CONF_SEARCH_ANSWERS_API_KEY,
     CONF_SEARCH_API_KEY,
     CONF_SEARCH_MAX_SNIPPET_LEN,
     CONF_SEARCH_PROVIDER,
@@ -18,13 +19,18 @@ from custom_components.neuralbridge.const import (
     DEFAULT_SEARCH_RESULT_COUNT,
     DEFAULT_SEARCH_TIMEOUT,
     SEARCH_PROVIDER_BRAVE,
+    SEARCH_PROVIDER_BRAVE_ANSWERS,
+    SEARCH_PROVIDER_BRAVE_COMBINED,
 )
 from custom_components.neuralbridge.web_search_client import (
     SEARCH_PROVIDER_MAP,
+    BraveAnswersCombinedProvider,
+    BraveAnswersProvider,
     BraveSearchProvider,
     SearchResult,
     WebSearchClient,
     _format_results,
+    _parse_brave_answers_response,
     _parse_brave_response,
 )
 
@@ -324,6 +330,116 @@ def test_parse_brave_response_no_title_no_url_is_skipped() -> None:
     assert results == []
 
 
+def test_parse_brave_response_news_block_only_returns_results() -> None:
+    """News results are returned when the web block is absent or empty."""
+    data: dict[str, Any] = {
+        "news": {
+            "results": [
+                {
+                    "title": "Top Headline",
+                    "url": "https://news.example.com/1",
+                    "description": "Breaking news snippet.",
+                }
+            ]
+        }
+    }
+    results = _parse_brave_response(data)
+    assert len(results) == 1
+    assert results[0].title == "Top Headline"
+    assert results[0].url == "https://news.example.com/1"
+    assert results[0].snippet == "Breaking news snippet."
+
+
+def test_parse_brave_response_news_block_combined_with_web() -> None:
+    """When both blocks have results they are combined: web first, then news."""
+    data: dict[str, Any] = {
+        "web": {
+            "results": [
+                {"title": "Web Result", "url": "https://web.example.com", "description": "web"}
+            ]
+        },
+        "news": {
+            "results": [
+                {"title": "News Result", "url": "https://news.example.com", "description": "news"}
+            ]
+        },
+    }
+    results = _parse_brave_response(data)
+    assert len(results) == 2
+    assert results[0].title == "Web Result"
+    assert results[1].title == "News Result"
+
+
+def test_parse_brave_response_news_block_non_dict_is_skipped() -> None:
+    """Non-dict 'news' value is skipped; web results still returned."""
+    data: dict[str, Any] = {
+        "web": {
+            "results": [
+                {"title": "Web Only", "url": "https://web.example.com", "description": "ok"}
+            ]
+        },
+        "news": "invalid",
+    }
+    results = _parse_brave_response(data)
+    assert len(results) == 1
+    assert results[0].title == "Web Only"
+
+
+def test_parse_brave_response_news_block_empty_results_returns_web_only() -> None:
+    """Empty news results list does not affect web results."""
+    data: dict[str, Any] = {
+        "web": {
+            "results": [
+                {"title": "Web Item", "url": "https://web.example.com", "description": "desc"}
+            ]
+        },
+        "news": {"results": []},
+    }
+    results = _parse_brave_response(data)
+    assert len(results) == 1
+    assert results[0].title == "Web Item"
+
+
+def test_parse_brave_response_news_non_list_results_is_skipped() -> None:
+    """Non-list news.results is treated as empty."""
+    data: dict[str, Any] = {"news": {"results": "not-a-list"}}
+    results = _parse_brave_response(data)
+    assert results == []
+
+
+def test_parse_brave_response_news_item_no_title_no_url_is_skipped() -> None:
+    """News item with neither title nor URL is skipped."""
+    data: dict[str, Any] = {"news": {"results": [{"description": "snippet only"}]}}
+    results = _parse_brave_response(data)
+    assert results == []
+
+
+def test_parse_brave_response_news_item_non_dict_is_skipped() -> None:
+    """Non-dict items in news.results are silently skipped."""
+    data: dict[str, Any] = {"news": {"results": ["not-a-dict", None, 42]}}
+    results = _parse_brave_response(data)
+    assert results == []
+
+
+def test_parse_brave_response_news_fallback_to_extra_snippets() -> None:
+    """News items also use extra_snippets when description is absent."""
+    data: dict[str, Any] = {
+        "news": {
+            "results": [
+                {
+                    "title": "News Page",
+                    "url": "https://news.example.com",
+                    "description": "",
+                    "extra_snippets": ["news fallback snippet"],
+                }
+            ]
+        }
+    }
+    results = _parse_brave_response(data)
+    assert len(results) == 1
+    assert results[0].snippet == "news fallback snippet"
+
+
 # ---------------------------------------------------------------------------
 # _format_results
 # ---------------------------------------------------------------------------
@@ -497,3 +613,476 @@ def test_search_result_equality() -> None:
     r1 = SearchResult(title="T", url="https://u.com", snippet="S")
     r2 = SearchResult(title="T", url="https://u.com", snippet="S")
     assert r1 == r2
+
+
+# ---------------------------------------------------------------------------
+# SEARCH_PROVIDER_MAP — new provider keys
+# ---------------------------------------------------------------------------
+
+
+def test_search_provider_map_contains_brave_answers() -> None:
+    """SEARCH_PROVIDER_MAP must include the brave_answers key."""
+    assert SEARCH_PROVIDER_BRAVE_ANSWERS in SEARCH_PROVIDER_MAP
+    assert SEARCH_PROVIDER_MAP[SEARCH_PROVIDER_BRAVE_ANSWERS] is BraveAnswersProvider
+
+
+def test_search_provider_map_does_not_contain_brave_combined() -> None:
+    """brave_combined is handled by WebSearchClient directly (two-key constructor)."""
+    assert SEARCH_PROVIDER_BRAVE_COMBINED not in SEARCH_PROVIDER_MAP
+
+
+# ---------------------------------------------------------------------------
+# BraveAnswersProvider — __init__
+# ---------------------------------------------------------------------------
+
+
+def test_brave_answers_provider_stores_api_key_and_timeout() -> None:
+    """BraveAnswersProvider stores api_key and timeout."""
+    provider = BraveAnswersProvider(api_key="answers-key", timeout=12)
+    assert provider._api_key == "answers-key"
+    assert provider._timeout == 12
+
+
+def test_brave_answers_provider_api_key_not_in_repr() -> None:
+    """Answers API key must not appear in repr output (security)."""
+    provider = BraveAnswersProvider(api_key="super-secret-answers")
+    assert "super-secret-answers" not in repr(provider)
+
+
+# ---------------------------------------------------------------------------
+# BraveAnswersProvider.search — success paths
+# ---------------------------------------------------------------------------
+
+
+def _make_answers_response(
+    status: int = 200,
+    json_data: dict[str, Any] | None = None,
+) -> AsyncMock:
+    """Return a mock aiohttp response for the Answers endpoint."""
+    mock = AsyncMock()
+    mock.status = status
+    mock.json = AsyncMock(return_value=json_data if json_data is not None else {})
+    return mock
+
+
+async def test_brave_answers_search_openai_style_response() -> None:
+    """search() parses OpenAI-style choices[0].message.content response."""
+    data: dict[str, Any] = {"choices": [{"message": {"content": "The answer is 42."}}]}
+    mock_response = _make_answers_response(200, data)
+    session_cm = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        return_value=session_cm,
+    ):
+        provider = BraveAnswersProvider(api_key="tok", timeout=5)
+        results = await provider.search("What is the answer?")
+
+    assert len(results) == 1
+    assert results[0].snippet == "The answer is 42."
+    assert results[0].title == ""
+    assert results[0].url == ""
+
+
+async def test_brave_answers_search_brave_native_dict_response() -> None:
+    """search() parses Brave-native answer.text response shape."""
+    data: dict[str, Any] = {"answer": {"text": "It is raining in Tokyo."}}
+    mock_response = _make_answers_response(200, data)
+    session_cm = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        return_value=session_cm,
+    ):
+        provider = BraveAnswersProvider(api_key="tok", timeout=5)
+        results = await provider.search("What is the weather in Tokyo?")
+
+    assert len(results) == 1
+    assert results[0].snippet == "It is raining in Tokyo."
+
+
+async def test_brave_answers_search_top_level_string_response() -> None:
+    """search() parses a top-level 'answer' string field."""
+    data: dict[str, Any] = {"answer": "The capital is Paris."}
+    mock_response = _make_answers_response(200, data)
+    session_cm = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        return_value=session_cm,
+    ):
+        provider = BraveAnswersProvider(api_key="tok", timeout=5)
+        results = await provider.search("What is the capital of France?")
+
+    assert len(results) == 1
+    assert results[0].snippet == "The capital is Paris."
+
+
+async def test_brave_answers_search_no_answer_returns_empty() -> None:
+    """search() returns empty list when no recognisable answer field is present."""
+    mock_response = _make_answers_response(200, {"type": "answer", "web": {}})
+    session_cm = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        return_value=session_cm,
+    ):
+        provider = BraveAnswersProvider(api_key="tok", timeout=5)
+        results = await provider.search("unknowable query")
+
+    assert results == []
+
+
+async def test_brave_answers_search_count_param_is_accepted() -> None:
+    """count parameter is accepted for protocol compliance without raising."""
+    data: dict[str, Any] = {"choices": [{"message": {"content": "OK"}}]}
+    mock_response = _make_answers_response(200, data)
+    session_cm = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        return_value=session_cm,
+    ):
+        provider = BraveAnswersProvider(api_key="tok", timeout=5)
+        results = await provider.search("q", 10)  # positional; _count is intentionally unused
+
+    assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# BraveAnswersProvider.search — non-200 / errors
+# ---------------------------------------------------------------------------
+
+
+async def test_brave_answers_search_non_200_returns_empty(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Non-200 HTTP status returns empty list and logs a warning."""
+    mock_response = _make_answers_response(status=429)
+    session_cm = _make_session_cm(mock_response)
+
+    with (
+        patch(
+            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            return_value=session_cm,
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
+        provider = BraveAnswersProvider(api_key="tok", timeout=5)
+        results = await provider.search("q")
+
+    assert results == []
+    assert "429" in caplog.text
+
+
+async def test_brave_answers_search_client_error_returns_empty(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """aiohttp.ClientError is caught and returns empty list."""
+    get_cm = AsyncMock()
+    get_cm.__aenter__ = AsyncMock(side_effect=aiohttp.ClientError("no route"))
+    get_cm.__aexit__ = AsyncMock(return_value=None)
+    session = MagicMock()
+    session.get = MagicMock(return_value=get_cm)
+    session_cm = AsyncMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            return_value=session_cm,
+        ),
+        caplog.at_level(logging.ERROR),
+    ):
+        provider = BraveAnswersProvider(api_key="tok", timeout=5)
+        results = await provider.search("q")
+
+    assert results == []
+    assert "Brave Answers" in caplog.text
+
+
+async def test_brave_answers_search_unexpected_exception_returns_empty(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Unexpected exceptions are caught and return empty list."""
+    get_cm = AsyncMock()
+    get_cm.__aenter__ = AsyncMock(side_effect=RuntimeError("boom"))
+    get_cm.__aexit__ = AsyncMock(return_value=None)
+    session = MagicMock()
+    session.get = MagicMock(return_value=get_cm)
+    session_cm = AsyncMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            return_value=session_cm,
+        ),
+        caplog.at_level(logging.ERROR),
+    ):
+        provider = BraveAnswersProvider(api_key="tok", timeout=5)
+        results = await provider.search("q")
+
+    assert results == []
+
+
+async def test_brave_answers_search_api_key_never_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Answers API key must never appear in any log output."""
+    secret = "my-very-secret-answers-key-99"  # noqa: S105
+    mock_response = _make_answers_response(status=401)
+    session_cm = _make_session_cm(mock_response)
+
+    with (
+        patch(
+            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            return_value=session_cm,
+        ),
+        caplog.at_level(logging.DEBUG),
+    ):
+        provider = BraveAnswersProvider(api_key=secret, timeout=5)
+        await provider.search("q")
+
+    for record in caplog.records:
+        assert secret not in record.getMessage()
+
+
+# ---------------------------------------------------------------------------
+# _parse_brave_answers_response
+# ---------------------------------------------------------------------------
+
+
+def test_parse_brave_answers_response_empty_dict() -> None:
+    """Empty dict returns empty list."""
+    assert _parse_brave_answers_response({}) == []
+
+
+def test_parse_brave_answers_response_openai_choices_shape() -> None:
+    """OpenAI-style choices[0].message.content is parsed correctly."""
+    data: dict[str, Any] = {"choices": [{"message": {"content": "Direct answer."}}]}
+    results = _parse_brave_answers_response(data)
+    assert len(results) == 1
+    assert results[0].snippet == "Direct answer."
+    assert results[0].title == ""
+    assert results[0].url == ""
+
+
+def test_parse_brave_answers_response_openai_empty_content() -> None:
+    """Empty content string in choices returns empty list."""
+    data: dict[str, Any] = {"choices": [{"message": {"content": ""}}]}
+    assert _parse_brave_answers_response(data) == []
+
+
+def test_parse_brave_answers_response_openai_empty_choices_list() -> None:
+    """Empty choices list falls through to other shapes."""
+    data: dict[str, Any] = {"choices": [], "answer": {"text": "fallback"}}
+    results = _parse_brave_answers_response(data)
+    assert len(results) == 1
+    assert results[0].snippet == "fallback"
+
+
+def test_parse_brave_answers_response_openai_non_dict_message() -> None:
+    """Non-dict message inside choices is skipped; fallback applies."""
+    data: dict[str, Any] = {
+        "choices": [{"message": "not-a-dict"}],
+        "answer": {"text": "native fallback"},
+    }
+    results = _parse_brave_answers_response(data)
+    assert len(results) == 1
+    assert results[0].snippet == "native fallback"
+
+
+def test_parse_brave_answers_response_brave_native_dict_shape() -> None:
+    """answer.text dict shape is parsed correctly."""
+    data: dict[str, Any] = {"answer": {"text": "The result."}}
+    results = _parse_brave_answers_response(data)
+    assert len(results) == 1
+    assert results[0].snippet == "The result."
+
+
+def test_parse_brave_answers_response_brave_native_empty_text() -> None:
+    """Empty answer.text falls through to top-level string check."""
+    data: dict[str, Any] = {"answer": {"text": ""}}
+    assert _parse_brave_answers_response(data) == []
+
+
+def test_parse_brave_answers_response_top_level_string() -> None:
+    """Top-level answer string is parsed as snippet."""
+    data: dict[str, Any] = {"answer": "Simple answer string."}
+    results = _parse_brave_answers_response(data)
+    assert len(results) == 1
+    assert results[0].snippet == "Simple answer string."
+
+
+def test_parse_brave_answers_response_top_level_empty_string() -> None:
+    """Empty top-level answer string returns empty list."""
+    data: dict[str, Any] = {"answer": "   "}
+    assert _parse_brave_answers_response(data) == []
+
+
+# ---------------------------------------------------------------------------
+# BraveAnswersCombinedProvider
+# ---------------------------------------------------------------------------
+
+
+async def test_brave_combined_provider_fast_path_returns_answer() -> None:
+    """Combined provider returns direct answer when Answers API succeeds."""
+    answers_result = [SearchResult(title="", url="", snippet="Direct facts.")]
+
+    answers_provider = AsyncMock(spec=BraveAnswersProvider)
+    answers_provider.search = AsyncMock(return_value=answers_result)
+    search_provider = AsyncMock(spec=BraveSearchProvider)
+    search_provider.search = AsyncMock(return_value=[])
+
+    provider = BraveAnswersCombinedProvider(
+        answers_api_key="a-key", search_api_key="s-key", timeout=5
+    )
+    provider._answers = answers_provider
+    provider._search = search_provider
+
+    results = await provider.search("What is gravity?")
+
+    assert results == answers_result
+    answers_provider.search.assert_awaited_once_with("What is gravity?")
+    search_provider.search.assert_not_awaited()
+
+
+async def test_brave_combined_provider_fallback_to_search() -> None:
+    """Combined provider falls back to Search when Answers returns empty."""
+    search_results = [SearchResult(title="Page", url="https://example.com", snippet="Some snippet")]
+
+    answers_provider = AsyncMock(spec=BraveAnswersProvider)
+    answers_provider.search = AsyncMock(return_value=[])
+    search_provider = AsyncMock(spec=BraveSearchProvider)
+    search_provider.search = AsyncMock(return_value=search_results)
+
+    provider = BraveAnswersCombinedProvider(
+        answers_api_key="a-key", search_api_key="s-key", timeout=5
+    )
+    provider._answers = answers_provider
+    provider._search = search_provider
+
+    results = await provider.search("Latest news", count=3)
+
+    assert results == search_results
+    answers_provider.search.assert_awaited_once_with("Latest news")
+    search_provider.search.assert_awaited_once_with("Latest news", 3)
+
+
+async def test_brave_combined_provider_both_fail_returns_empty() -> None:
+    """Combined provider returns empty list when both sub-providers fail."""
+    answers_provider = AsyncMock(spec=BraveAnswersProvider)
+    answers_provider.search = AsyncMock(return_value=[])
+    search_provider = AsyncMock(spec=BraveSearchProvider)
+    search_provider.search = AsyncMock(return_value=[])
+
+    provider = BraveAnswersCombinedProvider(
+        answers_api_key="a-key", search_api_key="s-key", timeout=5
+    )
+    provider._answers = answers_provider
+    provider._search = search_provider
+
+    results = await provider.search("impossible query")
+    assert results == []
+
+
+def test_brave_combined_provider_creates_sub_providers() -> None:
+    """BraveAnswersCombinedProvider creates both sub-providers on init."""
+    provider = BraveAnswersCombinedProvider(
+        answers_api_key="ans-key", search_api_key="srch-key", timeout=8
+    )
+    assert isinstance(provider._answers, BraveAnswersProvider)
+    assert isinstance(provider._search, BraveSearchProvider)
+    assert provider._answers._api_key == "ans-key"
+    assert provider._search._api_key == "srch-key"
+    assert provider._answers._timeout == 8
+    assert provider._search._timeout == 8
+
+
+# ---------------------------------------------------------------------------
+# WebSearchClient.__init__ — new providers
+# ---------------------------------------------------------------------------
+
+
+def test_web_search_client_init_brave_answers() -> None:
+    """WebSearchClient creates BraveAnswersProvider for 'brave_answers' key."""
+    config: dict[str, Any] = {
+        CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE_ANSWERS,
+        CONF_SEARCH_API_KEY: "not-used",
+        CONF_SEARCH_ANSWERS_API_KEY: "answers-key",
+        CONF_SEARCH_RESULT_COUNT: 1,
+        CONF_SEARCH_MAX_SNIPPET_LEN: 200,
+        "timeout": 10,
+    }
+    client = WebSearchClient(config)
+    assert isinstance(client._provider, BraveAnswersProvider)
+    assert client._provider._api_key == "answers-key"
+
+
+def test_web_search_client_init_brave_combined() -> None:
+    """WebSearchClient creates BraveAnswersCombinedProvider for 'brave_combined' key."""
+    config: dict[str, Any] = {
+        CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE_COMBINED,
+        CONF_SEARCH_API_KEY: "search-key",
+        CONF_SEARCH_ANSWERS_API_KEY: "answers-key",
+        CONF_SEARCH_RESULT_COUNT: 5,
+        CONF_SEARCH_MAX_SNIPPET_LEN: 200,
+        "timeout": 10,
+    }
+    client = WebSearchClient(config)
+    assert isinstance(client._provider, BraveAnswersCombinedProvider)
+
+
+def test_web_search_client_init_brave_combined_passes_both_keys() -> None:
+    """BraveAnswersCombinedProvider receives both keys from agent config."""
+    config: dict[str, Any] = {
+        CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE_COMBINED,
+        CONF_SEARCH_API_KEY: "my-search-key",
+        CONF_SEARCH_ANSWERS_API_KEY: "my-answers-key",
+        "timeout": 5,
+    }
+    client = WebSearchClient(config)
+    combined = client._provider
+    assert isinstance(combined, BraveAnswersCombinedProvider)
+    assert combined._answers._api_key == "my-answers-key"
+    assert combined._search._api_key == "my-search-key"
+
+
+# ---------------------------------------------------------------------------
+# _format_results — direct-answer (no-URL) shortcut
+# ---------------------------------------------------------------------------
+
+
+def test_format_results_direct_answer_single_no_url_skips_preamble() -> None:
+    """Single result with empty URL returns snippet directly, no preamble."""
+    result = SearchResult(title="", url="", snippet="The capital is Paris.")
+    output = _format_results([result], max_snippet_len=200)
+    assert output == "The capital is Paris."
+    assert "Here is what I found:" not in output
+
+
+def test_format_results_direct_answer_truncates_at_max_snippet_len() -> None:
+    """Direct-answer snippet is still truncated at max_snippet_len."""
+    long_answer = "x" * 300
+    result = SearchResult(title="", url="", snippet=long_answer)
+    output = _format_results([result], max_snippet_len=200)
+    assert output == "x" * 200 + "\u2026"
+
+
+def test_format_results_direct_answer_truncates_at_max_summary_len() -> None:
+    """Direct-answer snippet is hard-capped at _MAX_SUMMARY_LEN (2000 chars)."""
+    very_long = "y" * 2500
+    result = SearchResult(title="", url="", snippet=very_long)
+    output = _format_results([result], max_snippet_len=3000)
+    assert len(output) <= 2001  # 2000 + "…"
+
+
+def test_format_results_single_result_with_url_still_uses_preamble() -> None:
+    """Single result with a populated URL still uses the standard numbered list."""
+    result = SearchResult(title="A page", url="https://example.com", snippet="Some info")
+    output = _format_results([result], max_snippet_len=200)
+    assert output.startswith("Here is what I found:")
+    assert "1. A page" in output

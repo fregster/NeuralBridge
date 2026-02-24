@@ -12,6 +12,8 @@ language:
 # ── Web search provider labels ────────────────────────────────────────────────
 search_providers:
   brave: "Recherche Brave AI"
+  brave_answers: "Brave Answers (Réponse directe)"
+  brave_combined: "Brave Combiné (Answers + recherche de secours)"
 
 agent_types:
   home_assistant: "Home Assistant (Intégré)"
@@ -38,6 +40,8 @@ placeholders:
     Cet agent envoie les requêtes sensibles au temps à une API de recherche web.
     Le routage se produit automatiquement lorsque le routeur identifie
     une requête nécessitant des informations actuelles ou en temps réel.
+    Brave Answers et Brave Combiné nécessitent chacun une clé d'abonnement Answers distincte.
+  connection_ok: "\u2713 Test de connexion réussi"
   routing_agent_info: >-
     Les agents routeurs classifient les requêtes avec un prompt JSON et guident
     la sélection des agents. Ils s'exécutent avec la priorité 0 ; la mise en

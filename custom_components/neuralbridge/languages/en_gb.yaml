@@ -55,6 +55,8 @@ placeholders:
     a query is identified as time-sensitive or requiring current data
     (e.g. news, sports results, current leaders, financial data).
     Queries are never cached by default — disable caching to always fetch fresh results.
+    Brave Answers and Brave Combined each require a separate Answers subscription key.
+  connection_ok: "\u2713 Connection test passed"
 
 # ── Guard rail rule category labels ───────────────────────────────────────────
 guard_rail_categories:
@@ -85,6 +87,8 @@ router_fallbacks:
 # ── Search provider labels ─────────────────────────────────────────────────────
 search_providers:
   brave: "Brave AI Search"
+  brave_answers: "Brave Answers (Direct answer)"
+  brave_combined: "Brave Combined (Answers + Search fallback)"
 
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:

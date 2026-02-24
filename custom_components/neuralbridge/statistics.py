@@ -7,7 +7,7 @@ Statistics are held in memory and reset on Home Assistant restart.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -22,6 +22,7 @@ class AgentStats:
     total_latency_ms: float = 0.0
     blocks: int = 0
     first_request_time: float | None = None
+    intent_hints: dict[str, int] = field(default_factory=dict)
 
     @property
     def avg_latency_ms(self) -> float:
@@ -86,6 +87,7 @@ class AgentStats:
             "blocks": self.blocks,
             "block_rate": self.block_rate,
             "queries_per_hour": self.queries_per_hour,
+            "intent_hints": dict(self.intent_hints),
         }
 
 
@@ -159,6 +161,21 @@ class AgentStatistics:
         if stats is None:
             return
         stats.blocks += 1
+
+    def record_intent_hint(self, agent_id: str, hint: str) -> None:
+        """Record an intent_hint returned by a router agent (Feature 8).
+
+        Counts how many times each hint type (timer, reminder, todo,
+        shopping_list, announce) has been seen for a given router agent.
+
+        Args:
+            agent_id: Unique identifier for the router agent.
+            hint: The intent_hint string (e.g. ``"timer"``, ``"todo"``).
+        """
+        stats = self._stats.get(agent_id)
+        if stats is None:
+            return
+        stats.intent_hints[hint] = stats.intent_hints.get(hint, 0) + 1
 
     def get_agent_stats(self, agent_id: str) -> AgentStats | None:
         """Return the statistics for a specific agent.

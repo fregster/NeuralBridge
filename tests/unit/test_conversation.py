@@ -33,6 +33,7 @@ from custom_components.neuralbridge.const import (
     CONF_AGENTS,
     CONF_ENABLE_HOME_CONTROL,
     CONF_ENTITY_ID,
+    CONF_FORCE_RESPONSE_LANGUAGE,
     CONF_GUARD_RAIL_ACTION,
     CONF_GUARD_RAIL_ENABLED,
     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
@@ -76,6 +77,7 @@ from custom_components.neuralbridge.conversation import (
     NeuralBridgeAgent,
     RouterDecision,
     _apply_router_decision,
+    _get_language_name,
     _parse_router_response,
     async_setup_entry,
 )
@@ -1133,7 +1135,12 @@ async def test_check_with_routers_block_stops_at_first_router(hass: HomeAssistan
 
     call_count = 0
 
-    def always_block(router_config: dict, user_text: str, area_context: str | None = None) -> None:
+    def always_block(
+        router_config: dict,
+        user_text: str,
+        area_context: str | None = None,
+        language: str | None = None,
+    ) -> None:
         nonlocal call_count
         call_count += 1
 
@@ -4028,9 +4035,12 @@ async def test_check_with_routers_passes_area_context_to_classify(
     calls: list[tuple] = []
 
     async def _mock_classify(
-        router_cfg: dict, user_text: str, area_context: str | None = None
+        router_cfg: dict,
+        user_text: str,
+        area_context: str | None = None,
+        language: str | None = None,
     ) -> RouterDecision:
-        calls.append((user_text, area_context))
+        calls.append((user_text, area_context, language))
         return RouterDecision(local_ha=True, complexity=10)
 
     with (
@@ -4040,7 +4050,7 @@ async def test_check_with_routers_passes_area_context_to_classify(
         await conv_agent._check_with_routers(user_input, [router])
 
     assert len(calls) == 1
-    assert calls[0] == ("Turn on the lights", "Living Room")
+    assert calls[0] == ("Turn on the lights", "Living Room", "en")
 
 
 async def test_process_with_ollama_injects_area_context(hass: HomeAssistant) -> None:
@@ -4315,3 +4325,593 @@ async def test_fallback_response_contains_recovery_suggestion(
         or "rephrase" in speech.lower()
         or "settings" in speech.lower()
     )
+
+
+# ===========================================================================
+# Feature 8 — RouterDecision intent_hint field
+# ===========================================================================
+
+
+def test_router_decision_intent_hint_default_is_none() -> None:
+    """RouterDecision.intent_hint defaults to None when not supplied."""
+    decision = RouterDecision(local_ha=True, complexity=10)
+    assert decision.intent_hint is None
+
+
+def test_router_decision_intent_hint_stored_correctly() -> None:
+    """RouterDecision stores a provided intent_hint."""
+    decision = RouterDecision(local_ha=True, complexity=5, intent_hint="timer")
+    assert decision.intent_hint == "timer"
+
+
+def test_router_decision_equality_includes_intent_hint() -> None:
+    """Two RouterDecisions with the same fields but different intent_hint are unequal."""
+    d1 = RouterDecision(local_ha=True, complexity=5, intent_hint="timer")
+    d2 = RouterDecision(local_ha=True, complexity=5, intent_hint=None)
+    assert d1 != d2
+
+
+def test_router_decision_equality_same_intent_hint() -> None:
+    """Two RouterDecisions with identical fields including intent_hint are equal."""
+    d1 = RouterDecision(local_ha=True, complexity=5, intent_hint="todo")
+    d2 = RouterDecision(local_ha=True, complexity=5, intent_hint="todo")
+    assert d1 == d2
+
+
+def test_router_decision_hash_includes_intent_hint() -> None:
+    """RouterDecision hash changes when intent_hint differs."""
+    d1 = RouterDecision(local_ha=True, complexity=5, intent_hint="timer")
+    d2 = RouterDecision(local_ha=True, complexity=5, intent_hint=None)
+    assert hash(d1) != hash(d2)
+
+
+def test_router_decision_repr_includes_intent_hint() -> None:
+    """RouterDecision repr includes the intent_hint field."""
+    d = RouterDecision(local_ha=True, complexity=5, intent_hint="reminder")
+    assert "intent_hint='reminder'" in repr(d)
+
+
+def test_router_decision_is_immutable_intent_hint() -> None:
+    """Setting intent_hint on a RouterDecision raises AttributeError."""
+    d = RouterDecision(local_ha=False, complexity=10)
+    with pytest.raises(AttributeError):
+        d.intent_hint = "timer"  # type: ignore[misc]
+
+
+# ===========================================================================
+# Feature 8 — _parse_router_response intent_hint parsing
+# ===========================================================================
+
+
+def test_parse_router_response_valid_intent_hint_timer() -> None:
+    """JSON with a valid intent_hint='timer' is parsed and stored."""
+    result = _parse_router_response('{"local_ha": true, "complexity": 5, "intent_hint": "timer"}')
+    assert result is not None
+    assert result.intent_hint == "timer"
+
+
+def test_parse_router_response_valid_intent_hint_todo() -> None:
+    """JSON with intent_hint='todo' is parsed correctly."""
+    result = _parse_router_response('{"local_ha": true, "complexity": 5, "intent_hint": "todo"}')
+    assert result is not None
+    assert result.intent_hint == "todo"
+
+
+def test_parse_router_response_valid_intent_hint_shopping_list() -> None:
+    """JSON with intent_hint='shopping_list' is parsed correctly."""
+    result = _parse_router_response(
+        '{"local_ha": true, "complexity": 5, "intent_hint": "shopping_list"}'
+    )
+    assert result is not None
+    assert result.intent_hint == "shopping_list"
+
+
+def test_parse_router_response_valid_intent_hint_reminder() -> None:
+    """JSON with intent_hint='reminder' is parsed correctly."""
+    result = _parse_router_response(
+        '{"local_ha": true, "complexity": 8, "intent_hint": "reminder"}'
+    )
+    assert result is not None
+    assert result.intent_hint == "reminder"
+
+
+def test_parse_router_response_valid_intent_hint_announce() -> None:
+    """JSON with intent_hint='announce' is parsed correctly."""
+    result = _parse_router_response(
+        '{"local_ha": true, "complexity": 8, "intent_hint": "announce"}'
+    )
+    assert result is not None
+    assert result.intent_hint == "announce"
+
+
+def test_parse_router_response_intent_hint_null_yields_none() -> None:
+    """JSON with intent_hint=null results in intent_hint=None."""
+    result = _parse_router_response('{"local_ha": false, "complexity": 30, "intent_hint": null}')
+    assert result is not None
+    assert result.intent_hint is None
+
+
+def test_parse_router_response_missing_intent_hint_yields_none() -> None:
+    """JSON without intent_hint field results in intent_hint=None (backward-compatible)."""
+    result = _parse_router_response('{"local_ha": true, "complexity": 5}')
+    assert result is not None
+    assert result.intent_hint is None
+
+
+def test_parse_router_response_unknown_intent_hint_discarded() -> None:
+    """An unrecognised intent_hint value is ignored and stored as None."""
+    result = _parse_router_response(
+        '{"local_ha": true, "complexity": 5, "intent_hint": "unknown_future_type"}'
+    )
+    assert result is not None
+    assert result.intent_hint is None
+
+
+# ===========================================================================
+# Feature 8 — _apply_router_decision intent_hint forces LOCAL_HA
+# ===========================================================================
+
+
+def _local_ha_agent(agent_id: str = "local-1") -> dict:
+    return {"id": agent_id, CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA, CONF_AGENT_NAME: "LocalHA"}
+
+
+def _ollama_agent_cfg(agent_id: str = "ollama-1") -> dict:
+    return {"id": agent_id, CONF_AGENT_TYPE: AGENT_TYPE_OLLAMA, CONF_AGENT_NAME: "Ollama"}
+
+
+def test_apply_router_decision_timer_hint_forces_local_ha() -> None:
+    """intent_hint='timer' promotes LOCAL_HA agents to the front regardless of local_ha flag."""
+    decision = RouterDecision(local_ha=False, complexity=5, intent_hint="timer")
+    agents = [_ollama_agent_cfg(), _local_ha_agent()]
+    result = _apply_router_decision(decision, agents)
+    assert result[0][CONF_AGENT_TYPE] == AGENT_TYPE_LOCAL_HA
+
+
+def test_apply_router_decision_reminder_hint_forces_local_ha() -> None:
+    """intent_hint='reminder' promotes LOCAL_HA agents to the front."""
+    decision = RouterDecision(local_ha=False, complexity=8, intent_hint="reminder")
+    agents = [_ollama_agent_cfg(), _local_ha_agent()]
+    result = _apply_router_decision(decision, agents)
+    assert result[0][CONF_AGENT_TYPE] == AGENT_TYPE_LOCAL_HA
+
+
+def test_apply_router_decision_todo_hint_forces_local_ha() -> None:
+    """intent_hint='todo' promotes LOCAL_HA agents to the front."""
+    decision = RouterDecision(local_ha=False, complexity=5, intent_hint="todo")
+    agents = [_ollama_agent_cfg(), _local_ha_agent()]
+    result = _apply_router_decision(decision, agents)
+    assert result[0][CONF_AGENT_TYPE] == AGENT_TYPE_LOCAL_HA
+
+
+def test_apply_router_decision_shopping_list_hint_forces_local_ha() -> None:
+    """intent_hint='shopping_list' promotes LOCAL_HA agents to the front."""
+    decision = RouterDecision(local_ha=False, complexity=5, intent_hint="shopping_list")
+    agents = [_ollama_agent_cfg(), _local_ha_agent()]
+    result = _apply_router_decision(decision, agents)
+    assert result[0][CONF_AGENT_TYPE] == AGENT_TYPE_LOCAL_HA
+
+
+def test_apply_router_decision_announce_hint_does_not_force_local_ha() -> None:
+    """intent_hint='announce' is not a LOCAL_HA-forcing hint; follows normal local_ha flag."""
+    # local_ha=False → LOCAL_HA agents excluded for general routing
+    decision = RouterDecision(local_ha=False, complexity=8, intent_hint="announce")
+    agents = [_ollama_agent_cfg(), _local_ha_agent()]
+    result = _apply_router_decision(decision, agents)
+    # LOCAL_HA agent should be excluded since local_ha=False and hint is 'announce'
+    types = [a[CONF_AGENT_TYPE] for a in result]
+    assert AGENT_TYPE_LOCAL_HA not in types
+
+
+def test_apply_router_decision_none_hint_preserves_existing_logic() -> None:
+    """When intent_hint is None, existing local_ha/web_search logic is unchanged."""
+    decision = RouterDecision(local_ha=True, complexity=5, intent_hint=None)
+    agents = [_ollama_agent_cfg(), _local_ha_agent()]
+    result = _apply_router_decision(decision, agents)
+    assert result[0][CONF_AGENT_TYPE] == AGENT_TYPE_LOCAL_HA
+
+
+# ===========================================================================
+# Feature 8 — _classify_with_router records intent_hint in statistics
+# ===========================================================================
+
+
+async def test_classify_with_router_records_intent_hint(hass: HomeAssistant) -> None:
+    """When the router returns an intent_hint, record_intent_hint is called on statistics."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config()
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient.generate",
+        new_callable=AsyncMock,
+        return_value='{"local_ha": true, "complexity": 5, "intent_hint": "timer"}',
+    ):
+        result = await conv_agent._classify_with_router(router, "set a timer for 5 minutes")
+
+    assert result is not None
+    assert result.intent_hint == "timer"
+    router_id = router["id"]
+    stats = conv_agent._statistics.get_agent_stats(router_id)
+    assert stats is not None
+    assert stats.intent_hints.get("timer", 0) == 1
+
+
+async def test_classify_with_router_no_intent_hint_no_stats_recorded(
+    hass: HomeAssistant,
+) -> None:
+    """When intent_hint is null, record_intent_hint is NOT called."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config()
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient.generate",
+        new_callable=AsyncMock,
+        return_value='{"local_ha": false, "complexity": 30, "intent_hint": null}',
+    ):
+        await conv_agent._classify_with_router(router, "what is the capital of France?")
+
+    router_id = router["id"]
+    stats = conv_agent._statistics.get_agent_stats(router_id)
+    assert stats is not None
+    assert stats.intent_hints == {}
+
+
+# ===========================================================================
+# Feature 10 — _get_language_name helper
+# ===========================================================================
+
+
+def test_get_language_name_known_codes() -> None:
+    """_get_language_name returns the human-readable name for known codes."""
+    assert _get_language_name("de") == "German"
+    assert _get_language_name("fr") == "French"
+    assert _get_language_name("es") == "Spanish"
+    assert _get_language_name("en") == "English"
+
+
+def test_get_language_name_regional_variant_normalised() -> None:
+    """BCP-47 regional variants are normalised to the base code."""
+    assert _get_language_name("fr-FR") == "French"
+    assert _get_language_name("pt-BR") == "Portuguese"
+    assert _get_language_name("zh-CN") == "Chinese"
+
+
+def test_get_language_name_unknown_code_returns_input() -> None:
+    """Unknown language codes are returned as-is."""
+    assert _get_language_name("xx") == "xx"
+    assert _get_language_name("tlh") == "tlh"
+
+
+# ===========================================================================
+# Feature 10 — _classify_with_router language injection
+# ===========================================================================
+
+
+async def test_classify_with_router_appends_language_to_prompt(hass: HomeAssistant) -> None:
+    """When language is provided, 'Language: {lang}' is appended to the classification prompt."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config()
+
+    captured_prompts: list[str] = []
+
+    async def _capture_generate(prompt: str) -> str:
+        captured_prompts.append(prompt)
+        return '{"local_ha": false, "complexity": 20, "intent_hint": null}'
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient.generate",
+        side_effect=_capture_generate,
+    ):
+        await conv_agent._classify_with_router(router, "some query", language="de")
+
+    assert len(captured_prompts) == 1
+    assert "Language: de" in captured_prompts[0]
+
+
+async def test_classify_with_router_no_language_no_language_line(hass: HomeAssistant) -> None:
+    """When language is None, no 'Language:' line is added to the prompt."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config()
+
+    captured_prompts: list[str] = []
+
+    async def _capture_generate(prompt: str) -> str:
+        captured_prompts.append(prompt)
+        return '{"local_ha": false, "complexity": 20, "intent_hint": null}'
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient.generate",
+        side_effect=_capture_generate,
+    ):
+        await conv_agent._classify_with_router(router, "some query", language=None)
+
+    assert len(captured_prompts) == 1
+    assert "Language:" not in captured_prompts[0]
+
+
+# ===========================================================================
+# Feature 10 — _process_with_ollama language passthrough
+# ===========================================================================
+
+
+async def test_process_with_ollama_injects_language_instruction_when_different(
+    hass: HomeAssistant,
+) -> None:
+    """When user language differs from config, 'Respond in {Lang}.' is appended to system prompt."""
+    ollama_agent = _make_ollama_agent(system_prompt="You are a helpful assistant.")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [ollama_agent],
+            CONF_FORCE_RESPONSE_LANGUAGE: True,
+            "language": "en_gb",
+        },
+    )
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    user_input = ConversationInput(
+        text="Hallo",
+        context=Context(),
+        conversation_id=None,
+        device_id=None,
+        language="de",
+    )
+
+    captured_messages: list[list[dict]] = []
+    mock_client = MagicMock()
+
+    async def _capture_chat(messages: list[dict]) -> str:
+        captured_messages.append(messages)
+        return "Hallo!"
+
+    mock_client.chat = _capture_chat
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient",
+        return_value=mock_client,
+    ):
+        result = await conv_agent._process_with_ollama(ollama_agent, user_input)
+
+    assert result is not None
+    system_msgs = [m for m in captured_messages[0] if m["role"] == "system"]
+    assert len(system_msgs) == 1
+    assert "Respond in German." in system_msgs[0]["content"]
+
+
+async def test_process_with_ollama_no_language_injection_when_same_language(
+    hass: HomeAssistant,
+) -> None:
+    """No language instruction is injected when user language matches the config language."""
+    ollama_agent = _make_ollama_agent(system_prompt="You are helpful.")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [ollama_agent],
+            CONF_FORCE_RESPONSE_LANGUAGE: True,
+            "language": "en_gb",
+        },
+    )
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    user_input = ConversationInput(
+        text="Hello",
+        context=Context(),
+        conversation_id=None,
+        device_id=None,
+        language="en",
+    )
+
+    captured_messages: list[list[dict]] = []
+    mock_client = MagicMock()
+
+    async def _capture_chat(messages: list[dict]) -> str:
+        captured_messages.append(messages)
+        return "Hello!"
+
+    mock_client.chat = _capture_chat
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient",
+        return_value=mock_client,
+    ):
+        await conv_agent._process_with_ollama(ollama_agent, user_input)
+
+    system_msgs = [m for m in captured_messages[0] if m["role"] == "system"]
+    assert len(system_msgs) == 1
+    assert "Respond in" not in system_msgs[0]["content"]
+
+
+async def test_process_with_ollama_no_language_injection_when_force_disabled(
+    hass: HomeAssistant,
+) -> None:
+    """When CONF_FORCE_RESPONSE_LANGUAGE is False, no language instruction is injected."""
+    ollama_agent = _make_ollama_agent(system_prompt="You are helpful.")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [ollama_agent],
+            CONF_FORCE_RESPONSE_LANGUAGE: False,
+            "language": "en_gb",
+        },
+    )
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    user_input = ConversationInput(
+        text="Bonjour",
+        context=Context(),
+        conversation_id=None,
+        device_id=None,
+        language="fr",
+    )
+
+    captured_messages: list[list[dict]] = []
+    mock_client = MagicMock()
+
+    async def _capture_chat(messages: list[dict]) -> str:
+        captured_messages.append(messages)
+        return "Bonjour!"
+
+    mock_client.chat = _capture_chat
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient",
+        return_value=mock_client,
+    ):
+        await conv_agent._process_with_ollama(ollama_agent, user_input)
+
+    system_msgs = [m for m in captured_messages[0] if m["role"] == "system"]
+    assert len(system_msgs) == 1
+    assert "Respond in" not in system_msgs[0]["content"]
+
+
+async def test_process_with_ollama_no_language_injection_when_language_none(
+    hass: HomeAssistant,
+) -> None:
+    """When user_input.language is an empty string, no language injection occurs."""
+    ollama_agent = _make_ollama_agent(system_prompt="You are helpful.")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [ollama_agent],
+            CONF_FORCE_RESPONSE_LANGUAGE: True,
+            "language": "en_gb",
+        },
+    )
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    # language="" behaves the same as no language provided
+    user_input = ConversationInput(
+        text="Hello",
+        context=Context(),
+        conversation_id=None,
+        device_id=None,
+        language="",
+    )
+
+    captured_messages: list[list[dict]] = []
+    mock_client = MagicMock()
+
+    async def _capture_chat(messages: list[dict]) -> str:
+        captured_messages.append(messages)
+        return "Hello!"
+
+    mock_client.chat = _capture_chat
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient",
+        return_value=mock_client,
+    ):
+        await conv_agent._process_with_ollama(ollama_agent, user_input)
+
+    system_msgs = [m for m in captured_messages[0] if m["role"] == "system"]
+    assert len(system_msgs) == 1
+    assert "Respond in" not in system_msgs[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Tests — _render_ha_context
+# ---------------------------------------------------------------------------
+
+
+def test_render_ha_context_substitutes_all_tokens(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """_render_ha_context replaces all supported {ha_*} tokens."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+
+    hass.config.location_name = "My Home"
+    hass.config.time_zone = "Europe/London"
+    # hass.config.units defaults to METRIC_SYSTEM in the test fixture,
+    # so temperature_unit.value == "°C" without any extra configuration.
+
+    prompt = "Located at {ha_location_name}. TZ={ha_timezone}. Unit={ha_unit_temperature}."
+    result = agent._render_ha_context(prompt)
+
+    assert result == "Located at My Home. TZ=Europe/London. Unit=°C."
+
+
+def test_render_ha_context_no_tokens_returns_unchanged(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """_render_ha_context is a no-op when the prompt contains no {ha_*} tokens."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    prompt = "You are a helpful assistant."
+
+    result = agent._render_ha_context(prompt)
+
+    assert result == prompt
+
+
+def test_render_ha_context_missing_units_attribute_falls_back_to_empty(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """_render_ha_context replaces {ha_unit_temperature} with '' when attribute absent."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    # Replace units with an object that has no 'temperature_unit' attribute
+    hass.config.units = object()  # type: ignore[assignment]
+
+    prompt = "Unit: {ha_unit_temperature}"
+    result = agent._render_ha_context(prompt)
+
+    assert result == "Unit: "
+
+
+def test_render_ha_context_empty_location_name(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """_render_ha_context replaces {ha_location_name} with '' when location_name is empty."""
+    agent = NeuralBridgeAgent(hass, mock_config_entry)
+    hass.config.location_name = ""
+
+    prompt = "Located at {ha_location_name}."
+    result = agent._render_ha_context(prompt)
+
+    assert result == "Located at ."
+
+
+async def test_process_with_ollama_renders_ha_context_in_system_prompt(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """_process_with_ollama renders {ha_*} tokens in the resolved system prompt."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [],
+            "default_prompt": "TZ={ha_timezone} LOC={ha_location_name}",
+        },
+    )
+    entry.add_to_hass(hass)
+    hass.config.location_name = "Test Home"
+    hass.config.time_zone = "Australia/Sydney"
+
+    agent = NeuralBridgeAgent(hass, entry)
+    # Agent has no per-agent system_prompt, so the global default_prompt is used
+    agent_cfg = _make_ollama_agent(agent_id="render-test")
+    agent_cfg[CONF_SYSTEM_PROMPT] = ""
+
+    captured_messages: list[list[dict]] = []
+    mock_client = MagicMock()
+
+    async def _capture(messages: list[dict]) -> str:
+        captured_messages.append(messages)
+        return "ok"
+
+    mock_client.chat = _capture
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient",
+        return_value=mock_client,
+    ):
+        await agent._process_with_ollama(agent_cfg, _make_input())
+
+    system_content = next(m["content"] for m in captured_messages[0] if m["role"] == "system")
+    assert "TZ=Australia/Sydney" in system_content
+    assert "LOC=Test Home" in system_content

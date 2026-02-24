@@ -164,16 +164,58 @@
 
 ---
 
+## Feature 13 — Brave Answers Provider (Direct-Answer Web Search)
+
+**Problem:** The current `BraveSearchProvider` returns a list of web results (titles + snippets) that must be summarised before speech output.  Smart home voice queries ("Who is the UK Prime Minister?", "How many grams in an ounce?", "What time is it in Tokyo?") are better served by a *direct answer* — a single, concise, speakable sentence — rather than five page titles.
+
+Brave exposes a completely separate **Answers API** (`https://api.search.brave.com/res/v1/answer`) that returns a factual answer string when one is available.  This is a far better fit for the Q&A pattern that dominates voice assistant usage.
+
+**Important: Separate API subscriptions required.** Brave Search and Brave Answers are distinct products with distinct subscription plans and distinct API keys (both delivered via `X-Subscription-Token` but sourced from different dashboard subscriptions).  The combined provider therefore requires *two* API keys.  The Answers API is also OpenAI-SDK-compatible and supports streaming, so it is called via a simple REST JSON request (no streaming needed for this integration).
+
+**Plan:**
+1. Add constants to `const.py`:
+   - `SEARCH_PROVIDER_BRAVE_ANSWERS = "brave_answers"`
+   - `SEARCH_PROVIDER_BRAVE_COMBINED = "brave_combined"`
+   - `CONF_SEARCH_ANSWERS_API_KEY = "search_answers_api_key"` — second key used by the combined provider and the answers-only provider.
+   - Update `SEARCH_PROVIDERS` list to include all three keys.
+2. Implement `BraveAnswersProvider` in `web_search_client.py`:
+   - Queries `https://api.search.brave.com/res/v1/answer` with the **Answers subscription key**.
+   - Parses the `answer` / `text` field from the JSON response.
+   - Returns a single `SearchResult(title="", url="", snippet=<answer>)`, or an empty list if no answer is present.
+3. Add `BraveAnswersCombinedProvider` (provider key `"brave_combined"`):
+   - Accepts both `api_key` (Search key) and `answers_api_key` (Answers key).
+   - First calls `BraveAnswersProvider.search()` using the Answers key.
+   - If it returns a non-empty result, returns it immediately (fast path).
+   - Otherwise falls back to `BraveSearchProvider.search()` using the Search key.
+4. Register all three keys in `SEARCH_PROVIDER_MAP`.  Because the combined provider has a different constructor signature, `WebSearchClient.__init__` must branch on provider key to pass both keys when constructing `BraveAnswersCombinedProvider`.
+5. Update `config_flow.py`:
+   - Expose three provider options in the dropdown: `Brave Search` (current), `Brave Answers`, `Brave (Answers + Search fallback)`.
+   - When provider is `brave_answers` or `brave_combined`, show `CONF_SEARCH_ANSWERS_API_KEY` (password field, labelled "Answers API Key").
+   - When provider is `brave_combined`, also show the existing `CONF_SEARCH_API_KEY` (labelled "Search API Key").
+   - When provider is `brave_search` only, show `CONF_SEARCH_API_KEY` as today.
+   - **Test connection checkbox:** add `vol.Optional("test_connection", default=False): selector.BooleanSelector()` to both `configure_web_search` and `edit_agent_web_search` forms.  When checked + submitted, run validation and return to the same form with a `"connection_ok"` description placeholder indicating success, or an `errors["base"]` entry on failure — without saving.  When unchecked + submitted, behave as today (validate then save).
+   - `_validate_web_search_connection` accepts an optional `answers_api_key` argument and validates whichever keys are required for the chosen provider.
+6. Update `_format_results`: when the result list contains exactly one item whose `url` is empty (i.e. a direct-answer), skip the "Here is what I found:" preamble and return the answer text directly.
+7. No new pip dependency — same `aiohttp` session pattern throughout.
+8. **Privacy:** neither key is ever logged.  Query text is not logged (same policy as existing provider).
+
+**Files affected:** `web_search_client.py`, `const.py`, `config_flow.py`, `strings.json`, language YAMLs (all 5), `tests/unit/test_web_search_client.py`.
+
+**Expected coverage delta:** ~40 new test cases — answers happy path, empty answer response, combined provider answers-path, combined provider search-fallback, both keys validated independently, test_connection=True branch (success + each error code), `_format_results` direct-answer path.
+
+---
+
 ## Suggested Implementation Order
 
 | Priority | Feature | Rationale |
 |---|---|---|
 | 1 | **8** — Timer/reminder + `intent_hint` | Foundational for features 11 and 12 |
 | 2 | **12** — To-do list routing | Cheapest win once `intent_hint` exists |
-| 3 | **2** — Compound splitting | High user impact; self-contained |
-| 4 | **4** — High-stakes confirmation | Security pillar; medium effort |
-| 5 | **9** — Semantic cache | Performance win; no new dependencies |
-| 6 | **10** — Language passthrough | Low effort; important for i18n users |
-| 7 | **6** — Verbosity / brief mode | Quality of life; low effort |
-| 8 | **11** — Broadcast announcements | Requires TTS setup; medium effort |
-| 9 | **7** — Multi-user profiles | Highest complexity; needs HA user profile prerequisites |
+| 3 | **13** — Brave Answers provider | Low effort; self-contained; high voice UX improvement |
+| 4 | **2** — Compound splitting | High user impact; self-contained |
+| 5 | **4** — High-stakes confirmation | Security pillar; medium effort |
+| 6 | **9** — Semantic cache | Performance win; no new dependencies |
+| 7 | **10** — Language passthrough | Low effort; important for i18n users |
+| 8 | **6** — Verbosity / brief mode | Quality of life; low effort |
+| 9 | **11** — Broadcast announcements | Requires TTS setup; medium effort |
+| 10 | **7** — Multi-user profiles | Highest complexity; needs HA user profile prerequisites |

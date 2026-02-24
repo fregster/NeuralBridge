@@ -313,6 +313,12 @@ def test_relevant_domains_includes_key_smart_home_domains() -> None:
         assert domain in RELEVANT_DOMAINS
 
 
+def test_relevant_domains_includes_todo_and_shopping_list() -> None:
+    """Feature 12: 'todo' and 'shopping_list' domains are in RELEVANT_DOMAINS."""
+    assert "todo" in RELEVANT_DOMAINS
+    assert "shopping_list" in RELEVANT_DOMAINS
+
+
 # ---------------------------------------------------------------------------
 # Integration-style: real HomeAssistant fixture
 # ---------------------------------------------------------------------------
