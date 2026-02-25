@@ -109,8 +109,13 @@ def _make_handler(
     mock_config_entry: MockConfigEntry, hass: HomeAssistant
 ) -> NeuralBridgeOptionsFlowHandler:
     """Create a NeuralBridgeOptionsFlowHandler with hass and flow attrs injected."""
+    # Ensure the entry is registered with hass — required because OptionsFlow.config_entry
+    # is now a property that calls hass.config_entries.async_get_known_entry(_config_entry_id).
+    if not hass.config_entries.async_get_entry(mock_config_entry.entry_id):
+        mock_config_entry.add_to_hass(hass)
     handler = NeuralBridgeOptionsFlowHandler()
-    handler._config_entry = mock_config_entry  # Injected by HA flow manager in production
+    # _config_entry_id is what the new HA OptionsFlow.config_entry property reads.
+    handler._config_entry_id = mock_config_entry.entry_id  # type: ignore[attr-defined]
     handler.hass = hass
     # flow_id and handler are normally set by the HA flow manager; provide
     # sentinel values so async_show_form / async_show_menu don't raise.

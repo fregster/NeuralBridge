@@ -100,6 +100,8 @@ def _make_input(
         conversation_id=conversation_id,
         device_id=None,
         language="en",
+        satellite_id=None,
+        agent_id=None,
     )
 
 
@@ -4030,6 +4032,8 @@ async def test_check_with_routers_passes_area_context_to_classify(
         conversation_id=None,
         device_id="device-kitchen",
         language="en",
+        satellite_id=None,
+        agent_id=None,
     )
 
     calls: list[tuple] = []
@@ -4066,6 +4070,8 @@ async def test_process_with_ollama_injects_area_context(hass: HomeAssistant) -> 
         conversation_id=None,
         device_id="device-bedroom",
         language="en",
+        satellite_id=None,
+        agent_id=None,
     )
 
     mock_client = MagicMock()
@@ -4660,6 +4666,8 @@ async def test_process_with_ollama_injects_language_instruction_when_different(
         conversation_id=None,
         device_id=None,
         language="de",
+        satellite_id=None,
+        agent_id=None,
     )
 
     captured_messages: list[list[dict]] = []
@@ -4705,6 +4713,8 @@ async def test_process_with_ollama_no_language_injection_when_same_language(
         conversation_id=None,
         device_id=None,
         language="en",
+        satellite_id=None,
+        agent_id=None,
     )
 
     captured_messages: list[list[dict]] = []
@@ -4749,6 +4759,8 @@ async def test_process_with_ollama_no_language_injection_when_force_disabled(
         conversation_id=None,
         device_id=None,
         language="fr",
+        satellite_id=None,
+        agent_id=None,
     )
 
     captured_messages: list[list[dict]] = []
@@ -4794,6 +4806,8 @@ async def test_process_with_ollama_no_language_injection_when_language_none(
         conversation_id=None,
         device_id=None,
         language="",
+        satellite_id=None,
+        agent_id=None,
     )
 
     captured_messages: list[list[dict]] = []

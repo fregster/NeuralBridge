@@ -41,6 +41,8 @@ def _make_input(text: str, conversation_id: str | None = None) -> ConversationIn
         conversation_id=conversation_id,
         device_id=None,
         language="en",
+        satellite_id=None,
+        agent_id=None,
     )
 
 
