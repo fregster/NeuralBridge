@@ -63,7 +63,7 @@ max-returns = 6
 max-statements = 50
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.13"
 strict = true
 show_error_codes = true
 follow_imports = "silent"
@@ -88,6 +88,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["better_profanity.*", "detoxify.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "homeassistant.components.conversation.chat_log"
 ignore_missing_imports = true
 
 [tool.coverage.run]

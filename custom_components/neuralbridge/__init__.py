@@ -13,17 +13,24 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant, ServiceCall
 
+from .circuit_breaker import CircuitBreaker
 from .const import (
     CONF_RESPONSE_CACHE_ENABLED,
     CONF_RESPONSE_CACHE_TTL,
+    DATA_CIRCUIT_BREAKER,
+    DATA_ENTITY_CONTEXT,
     DATA_RESPONSE_CACHE,
     DATA_SESSION_MEMORY,
     DATA_STATISTICS,
+    DEFAULT_CIRCUIT_BREAKER_COOLDOWN,
+    DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
     DEFAULT_RESPONSE_CACHE_ENABLED,
     DEFAULT_RESPONSE_CACHE_TTL,
     DOMAIN,
     SERVICE_CLEAR_CONVERSATION,
 )
+from .entity_context import EntityContextCache
+from .languages_loader import async_preload_all_languages
 from .response_cache import ResponseCache
 from .session_memory import SessionMemory
 from .statistics import AgentStatistics
@@ -48,6 +55,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     cache_ttl = merged_config.get(CONF_RESPONSE_CACHE_TTL, DEFAULT_RESPONSE_CACHE_TTL)
     response_cache = ResponseCache(enabled=cache_enabled, ttl_seconds=cache_ttl)
     session_memory = SessionMemory()
+    circuit_breaker = CircuitBreaker(
+        failure_threshold=DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
+        cooldown_seconds=DEFAULT_CIRCUIT_BREAKER_COOLDOWN,
+    )
+
+    # Pre-load language files in an executor so later synchronous get_string /
+    # list_available_languages calls never block the event loop.
+    await async_preload_all_languages(hass)
+
+    entity_context = EntityContextCache()
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
@@ -56,6 +73,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DATA_STATISTICS: statistics,
         DATA_RESPONSE_CACHE: response_cache,
         DATA_SESSION_MEMORY: session_memory,
+        DATA_CIRCUIT_BREAKER: circuit_breaker,
+        DATA_ENTITY_CONTEXT: entity_context,
     }
 
     # Set up platforms (conversation + sensor)

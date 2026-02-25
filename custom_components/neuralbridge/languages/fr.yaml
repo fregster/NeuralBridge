@@ -9,11 +9,17 @@ language:
   code: "fr"
 
 # ── Agent type selector labels ─────────────────────────────────────────────────
+# ── Web search provider labels ────────────────────────────────────────────────
+search_providers:
+  brave: "Recherche Brave AI"
+  brave_answers: "Brave Answers (Réponse directe)"
+  brave_combined: "Brave Combiné (Answers + recherche de secours)"
+
 agent_types:
   home_assistant: "Home Assistant (Intégré)"
   existing_integration: "Intégration existante (Gemini, ChatGPT, etc.)"
   ollama: "Ollama (Externe)"
-
+  web_search: "Recherche web (données en temps réel)"
 # ── Agent management UI ────────────────────────────────────────────────────────
 agent_management:
   status_enabled: "✓ Activé"
@@ -28,16 +34,26 @@ agent_management:
 # ── Description placeholder text used inside config flow steps ─────────────────
 placeholders:
   priority_info: >-
-    0 = Routeur/Filtre (TinyLlama, Qwen), 0–100 = Priorité de traitement.
-    Les garde-fous sont désactivés pour les agents de priorité 0 (pour éviter les boucles).
+    1–100 = Priorité de traitement (numéro plus petit = priorité plus élevée).
+    Ajoutez des agents routeurs dédiés via "Ajouter un agent routeur".
+  web_search_info: >-
+    Cet agent envoie les requêtes sensibles au temps à une API de recherche web.
+    Le routage se produit automatiquement lorsque le routeur identifie
+    une requête nécessitant des informations actuelles ou en temps réel.
+    Brave Answers et Brave Combiné nécessitent chacun une clé d'abonnement Answers distincte.
+  connection_ok: "\u2713 Test de connexion réussi"
+  routing_agent_info: >-
+    Les agents routeurs classifient les requêtes avec un prompt JSON et guident
+    la sélection des agents. Ils s'exécutent avec la priorité 0 ; la mise en
+    cache et les garde-fous sont désactivés automatiquement pour éviter les boucles.
   guard_rails_info: >-
-    Les garde-fous s'exécutent sur l'agent local de plus haute priorité (valeur la plus basse,
-    généralement 0) pour un filtrage de contenu rapide et respectueux de la vie privée.
-    Approche hybride : règles rapides d'abord, puis IA si le seuil de confiance n'est pas atteint.
+    Les garde-fous s'exécutent sur l'agent routeur configuré pour un filtrage de contenu
+    rapide et respectueux de la vie privée. Approche hybride : règles rapides d'abord,
+    puis IA si le seuil de confiance n'est pas atteint.
   no_router_agent_error: >-
-    Aucun agent routeur (priorité 0) n'est configuré.
-    Ajoutez un agent local léger (p. ex. TinyLlama, Qwen) avec la priorité 0 avant
-    d'activer les garde-fous.
+    Aucun agent routeur n'est configuré.
+    Utilisez \"Ajouter un agent routeur\" pour ajouter un agent Ollama léger
+    (p. ex. TinyLlama, Qwen) avant d'activer les garde-fous.
   guard_rail_rules_info: >-
     Saisissez des expressions régulières personnalisées (une par ligne) pour bloquer le contenu
     correspondant. Les motifs sont fusionnés avec les défauts intégrés. Laissez vide pour
@@ -55,10 +71,21 @@ guard_rail_actions:
   notify_ask: "Notifier et demander (Recommandé)"
   warn: "Avertir (Préfixer avec un avertissement)"
   block: "Bloquer (Empêcher la réponse)"
+# ── Router log level selector labels ──────────────────────────────────────────
+router_log_levels:
+  none: "None"
+  complexity_only: "Complexity level only"
+  debug_info: "Debug information"
+  debug_with_query: "Debug with query logging (⚠ logs PII)"
 
+# ── Router fallback behaviour selector labels ──────────────────────────────────
+router_fallbacks:
+  default_complexity: "Use default complexity (fail open)"
+  skip_routing: "Skip routing (try all agents in priority order)"
+  block: "Block the request"
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:
-  fallback: "J'ai des difficultés à me connecter à mes agents IA en ce moment."
+  fallback: "J'ai des difficultés à me connecter à mes agents IA en ce moment. Essayez de reformuler votre demande ou vérifiez les paramètres des agents."
   no_agents: "Aucun agent IA n'est configuré. Veuillez ajouter des agents dans les paramètres de l'intégration."
   router_blocked: "Je ne peux pas traiter ce type de demande."
   guard_rail_blocked: "Je ne peux pas traiter cette demande car elle pourrait contenir du contenu nuisible."

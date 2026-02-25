@@ -9,10 +9,17 @@ language:
   code: "es"
 
 # ── Agent type selector labels ─────────────────────────────────────────────────
+# ── Web search provider labels ────────────────────────────────────────────────
+search_providers:
+  brave: "Búsqueda Brave AI"
+  brave_answers: "Brave Answers (Respuesta directa)"
+  brave_combined: "Brave Combinado (Answers + búsqueda de reserva)"
+
 agent_types:
   home_assistant: "Home Assistant (Integrado)"
   existing_integration: "Integración existente (Gemini, ChatGPT, etc.)"
   ollama: "Ollama (Externo)"
+  web_search: "Búsqueda web (datos en tiempo real)"
 
 # ── Agent management UI ────────────────────────────────────────────────────────
 agent_management:
@@ -28,16 +35,26 @@ agent_management:
 # ── Description placeholder text used inside config flow steps ─────────────────
 placeholders:
   priority_info: >-
-    0 = Enrutador/Filtro (TinyLlama, Qwen), 0–100 = Prioridad de procesamiento.
-    Las barandillas desactivadas para agentes con prioridad 0 (para evitar bucles).
+    1–100 = Prioridad de procesamiento (número menor = mayor prioridad).
+    Añada agentes de enrutamiento dedicados mediante "Añadir agente enrutador".
+  web_search_info: >-
+    Este agente envía consultas sensibles al tiempo a una API de búsqueda web.
+    El enrutamiento ocurre automáticamente cuando el enrutador identifica
+    una consulta que requiere información actual o en tiempo real.
+    Brave Answers y Brave Combinado requieren cada uno una clave de suscripción de Answers separada.
+  connection_ok: "\u2713 Prueba de conexión superada"
+  routing_agent_info: >-
+    Los agentes de enrutamiento clasifican las solicitudes con un prompt JSON
+    y guían la selección de agentes. Se ejecutan con prioridad 0; el caché y
+    las barandillas se deshabilitan automáticamente para evitar bucles.
   guard_rails_info: >-
-    Las barandillas se ejecutan en el agente local de mayor prioridad (valor más bajo,
-    normalmente 0) para un filtrado de contenido rápido y respetuoso con la privacidad.
-    Enfoque híbrido: reglas rápidas primero, luego IA si no se alcanza el umbral de confianza.
+    Las barandillas se ejecutan en el agente enrutador configurado para un filtrado
+    de contenido rápido y respetuoso con la privacidad. Enfoque híbrido: reglas rápidas
+    primero, luego IA si no se alcanza el umbral de confianza.
   no_router_agent_error: >-
-    No hay ningún agente enrutador (prioridad 0) configurado.
-    Añada un agente local ligero (p. ej. TinyLlama, Qwen) con prioridad 0 antes de
-    activar las barandillas.
+    No hay ningún agente enrutador configurado.
+    Use \"Añadir agente enrutador\" para añadir un agente Ollama ligero (p. ej. TinyLlama, Qwen)
+    antes de activar las barandillas.
   guard_rail_rules_info: >-
     Introduzca patrones regex personalizados (uno por línea) para bloquear el contenido
     coincidente. Los patrones se combinan con los predeterminados. Déjelo en blanco para
@@ -56,9 +73,22 @@ guard_rail_actions:
   warn: "Advertir (Prefijar con aviso)"
   block: "Bloquear (Impedir respuesta)"
 
+# ── Router log level selector labels ──────────────────────────────────────────
+router_log_levels:
+  none: "None"
+  complexity_only: "Complexity level only"
+  debug_info: "Debug information"
+  debug_with_query: "Debug with query logging (⚠ logs PII)"
+
+# ── Router fallback behaviour selector labels ──────────────────────────────────
+router_fallbacks:
+  default_complexity: "Use default complexity (fail open)"
+  skip_routing: "Skip routing (try all agents in priority order)"
+  block: "Block the request"
+
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:
-  fallback: "Tengo problemas para conectarme a mis agentes de IA en este momento."
+  fallback: "Tengo problemas para conectarme a mis agentes de IA en este momento. Intenta reformular tu solicitud o verifica la configuración de los agentes."
   no_agents: "No hay agentes de IA configurados. Por favor, añada agentes en la configuración de la integración."
   router_blocked: "No puedo procesar este tipo de solicitud."
   guard_rail_blocked: "No puedo procesar esta solicitud ya que puede contener contenido dañino."

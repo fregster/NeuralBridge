@@ -13,6 +13,13 @@ agent_types:
   home_assistant: "Home Assistant (Eingebaut)"
   existing_integration: "Bestehende Integration (Gemini, ChatGPT, usw.)"
   ollama: "Ollama (Extern)"
+  web_search: "Websuche (Echtzeit-Daten)"
+
+# ── Web search provider labels ────────────────────────────────────────────────
+search_providers:
+  brave: "Brave AI Suche"
+  brave_answers: "Brave Answers (Direkte Antwort)"
+  brave_combined: "Brave Kombiniert (Answers + Suche Fallback)"
 
 # ── Agent management UI ────────────────────────────────────────────────────────
 agent_management:
@@ -28,16 +35,26 @@ agent_management:
 # ── Description placeholder text used inside config flow steps ─────────────────
 placeholders:
   priority_info: >-
-    0 = Router/Filter (TinyLlama, Qwen), 0–100 = Verarbeitungspriorität.
-    Sicherheitsfilter für Agenten mit Priorität 0 deaktiviert (zur Vermeidung von Schleifen).
+    1–100 = Verarbeitungspriorität (niedrigerer Wert = höhere Priorität).
+    Fügen Sie dedizierte Router-Agenten über "Router-Agent hinzufügen" hinzu.
+  web_search_info: >-
+    Dieser Agent sendet zeitrelevante Anfragen an eine Websuche-API.
+    Das Routing erfolgt automatisch, wenn der Router die Anfrage als
+    aktualisierungsbedürftig einstuft.
+    Brave Answers und Brave Kombiniert erfordern jeweils einen separaten Answers-Abonnementschlüssel.
+  connection_ok: "\u2713 Verbindungstest bestanden"
+  routing_agent_info: >-
+    Router-Agenten klassifizieren eingehende Anfragen per JSON-Prompt und
+    steuern die Agentenauswahl. Sie laufen mit Priorität 0; Caching und
+    Sicherheitsfilter sind automatisch deaktiviert, um Schleifen zu vermeiden.
   guard_rails_info: >-
-    Sicherheitsfilter laufen auf dem Agenten mit der höchsten Priorität (niedrigster Wert,
-    typischerweise 0) für schnelles, datenschutzfreundliches Inhaltsfiltern.
-    Hybridansatz: zunächst schnelle Regeln, dann KI, falls der Schwellenwert nicht erreicht wird.
+    Sicherheitsfilter laufen auf dem konfigurierten Router-Agenten für schnelles,
+    datenschutzfreundliches Inhaltsfiltern. Hybridansatz: zunächst schnelle Regeln,
+    dann KI, falls der Schwellenwert nicht erreicht wird.
   no_router_agent_error: >-
-    Kein Router-Agent (Priorität 0) ist konfiguriert.
-    Fügen Sie einen leichtgewichtigen lokalen Agenten (z. B. TinyLlama, Qwen) mit Priorität 0
-    hinzu, bevor Sie Sicherheitsfilter aktivieren.
+    Kein Router-Agent ist konfiguriert.
+    Verwenden Sie \"Router-Agent hinzufügen\", um einen leichtgewichtigen Ollama-Agenten
+    (z. B. TinyLlama, Qwen) hinzuzufügen, bevor Sie Sicherheitsfilter aktivieren.
   guard_rail_rules_info: >-
     Geben Sie benutzerdefinierte Regex-Muster (eines pro Zeile) ein, um übereinstimmende Inhalte
     zu blockieren. Muster werden mit den integrierten Standards zusammengeführt. Leer lassen,
@@ -56,9 +73,22 @@ guard_rail_actions:
   warn: "Warnen (Antwort mit Warnung prefixen)"
   block: "Blockieren (Antwort verhindern)"
 
+# ── Router log level selector labels ──────────────────────────────────────────
+router_log_levels:
+  none: "None"
+  complexity_only: "Complexity level only"
+  debug_info: "Debug information"
+  debug_with_query: "Debug with query logging (⚠ logs PII)"
+
+# ── Router fallback behaviour selector labels ──────────────────────────────────
+router_fallbacks:
+  default_complexity: "Use default complexity (fail open)"
+  skip_routing: "Skip routing (try all agents in priority order)"
+  block: "Block the request"
+
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:
-  fallback: "Ich habe gerade Probleme, mich mit meinen KI-Agenten zu verbinden."
+  fallback: "Ich habe gerade Probleme, mich mit meinen KI-Agenten zu verbinden. Versuche, deine Anfrage umzuformulieren, oder überprüfe die Agenteneinstellungen."
   no_agents: "Keine KI-Agenten konfiguriert. Bitte fügen Sie Agenten in den Integrationseinstellungen hinzu."
   router_blocked: "Ich kann diese Art von Anfrage nicht bearbeiten."
   guard_rail_blocked: "Ich kann diese Anfrage nicht bearbeiten, da sie möglicherweise schädliche Inhalte enthält."

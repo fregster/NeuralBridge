@@ -2,274 +2,267 @@
 
 ## Overview
 
-NeuralBridge uses a **priority-based routing system** where you configure multiple AI agents, each with a priority score. The system routes requests through agents in priority order until one successfully handles the request.
+NeuralBridge uses a **priority-based routing system**. You configure multiple AI agents, each
+with a priority score. Requests are routed through agents in ascending priority order until one
+succeeds — the first success wins.
+
+---
 
 ## Priority System
 
-### Priority Levels
+| Priority | Role |
+|---|---|
+| **0** | Router agent (Ollama only). Runs before all processing agents. |
+| **1–20** | High priority. Fast, local agents. Tried first. |
+| **21–50** | Medium priority. |
+| **51–100** | Low priority / fallback. Cloud agents or expensive models. |
 
-- **Priority 0**: Router/Filter agents
-  - Small, fast models (TinyLlama, Qwen 0.5b-2b)
-  - Used for classification and filtering
-  - Determine if a request should be processed
-  - Run BEFORE processing agents
+Multiple agents can share the same priority — they are tried in the order they were added.
 
-- **Priority 1-100**: Processing agents
-  - Lower numbers = higher priority (tried first)
-  - Models that actually answer questions
-  - Tried in order until one succeeds
-
-### Example Priority Setup
-
-```
-Priority 0:  Qwen2.5:0.5b (Router/Filter)
-Priority 10: Home Assistant (Local intents)
-Priority 20: Ollama Llama3:8b (Medium queries)
-Priority 30: ChatGPT (Complex reasoning)
-Priority 40: Gemini Pro (Fallback)
-```
+---
 
 ## Agent Types
 
-### 1. Home Assistant (Built-in)
+### Home Assistant (Built-in)
 
-Uses Home Assistant's built-in conversation agent for local intent matching.
+Uses Home Assistant's native conversation agent for local intent matching.
 
-**Best for:**
-- Device control ("turn on the lights")
-- Home automation queries
-- Fast, local-only processing
+**Best for:** Device control, home automation commands
 
-**Configuration:**
-- Agent Name: Friendly name (e.g., "Home Assistant")
-- Priority: Typically 10-20 (high priority for local control)
-- Timeout: 5-10 seconds
+**Configuration fields:**
 
-### 2. Existing Integration
+| Field | Default | Description |
+|---|---|---|
+| Agent Name | — | Friendly label (e.g. "Local Intents") |
+| Priority | 50 | 1–100 |
+| Timeout | 5 s | 5–120 seconds |
+| Enabled | true | Enable or disable without deleting |
+| Assist Mode | false | Only accept `action_done` responses; fall through on all others |
 
-Connects to existing Home Assistant conversation agents (Gemini, ChatGPT, Claude, etc.)
+**Assist Mode:** When enabled, NeuralBridge only accepts a response from this agent if HA
+successfully matched and executed a device-control intent (speech output type `action_done`).
+Any other response (including "I don't understand") causes NeuralBridge to fall through to the
+next agent. This lets HA handle device commands while Ollama or cloud handles everything else.
 
-**Best for:**
-- Using integrations you already have configured
-- Cloud-based AI services
-- Complex reasoning and general knowledge
+---
 
-**Configuration:**
-- Agent Name: Friendly name (e.g., "ChatGPT Main")
-- Priority: 20-50 depending on use case
-- Entity ID: Select from dropdown
-- Timeout: 30-60 seconds
+### Existing Integration
 
-### 3. Ollama (External)
+Routes requests to a conversation agent already configured in Home Assistant — Gemini,
+ChatGPT, Claude, and others.
 
-Connects to an Ollama instance running locally or on your network.
+**Best for:** Complex reasoning, general knowledge, cloud AI
 
-**Best for:**
-- Privacy-focused deployments
-- Custom models
-- Router/filter agents (small models)
-- Cost-effective processing
+**Prerequisites:** The HA integration must be fully configured under
+Settings → Devices & Services before it appears in the entity selector.
 
-**Configuration:**
-- Agent Name: Friendly name (e.g., "Qwen Router", "Llama3 Main")
-- Priority: 0 for routers, 10-50 for processing
-- Ollama URL: http://localhost:11434 or network URL
-- Model Name: e.g., `qwen2.5:0.5b`, `llama3:8b`
-- Timeout: 10-60 seconds
+**Configuration fields:**
 
-## Configuration Workflow
+| Field | Default | Description |
+|---|---|---|
+| Agent Name | — | Friendly label (e.g. "Gemini Flash") |
+| Entity ID | — | Conversation agent entity selector |
+| Priority | 50 | 1–100 |
+| Timeout | 5 s | 5–120 seconds |
+| Enabled | true | Enable or disable without deleting |
 
-### Initial Setup
+---
 
-1. **Install Integration**
-   - Go to Settings → Devices & Services
-   - Click "+ Add Integration"
-   - Search for "NeuralBridge"
-   - Click Submit (no agents configured yet)
+### Ollama (Self-Hosted)
 
-2. **Add First Agent**
-   - Click "Configure" on the NeuralBridge integration
-   - Select "Add New Agent"
-   - Choose agent type and configure
+Connects to a locally running Ollama server via HTTP API.
 
-### Adding Router Agent (Priority 0)
+**Best for:** Privacy-first setups, router agents, cost savings, multi-turn conversations
 
-Router agents are optional but recommended for:
-- Safety filtering
-- Request classification
-- Determining if cloud processing is needed
+**Prerequisites:** Ollama must be running and the model must be pulled before adding this agent.
+NeuralBridge validates the URL and model name during setup.
 
-**Recommended Models:**
-- Qwen2.5:0.5b (very fast, good at classification)
-- TinyLlama:1.1b (extremely fast)
-- Phi-2:2.7b (small but capable)
+**Configuration fields:**
 
-**Example Configuration:**
-```
-Agent Name: Qwen Safety Filter
-Agent Type: Ollama
-Priority: 0
-Ollama URL: http://localhost:11434
-Model: qwen2.5:0.5b
-Timeout: 5 seconds
-```
+| Field | Default | Description |
+|---|---|---|
+| Agent Name | — | Friendly label (e.g. "Llama3 Local") |
+| Ollama URL | `http://localhost:11434` | Server URL |
+| Model | — | Model name (e.g. `llama3:8b`) — validated live |
+| Priority | 50 | 0–100 (0 = router agent) |
+| Timeout | 5 s | 5–120 seconds |
+| Enabled | true | Enable or disable without deleting |
+| System Prompt | *(empty)* | Per-agent system prompt. Falls back to the global default prompt when empty. |
+| Max Retries | 2 | Retry attempts on failure (exponential back-off) |
+| Retry Base Delay | 1.0 s | Initial delay between retries (doubles each attempt) |
+| Is Router | false | Enable JSON classification mode (set automatically when priority is 0) |
+| Enable Response Cache | true | Cache responses for this agent |
 
-### Adding Processing Agents
+**On Home Assistant OS:** Use the LAN IP of the machine running Ollama, not `localhost`.
 
-Start with local/fast agents and add progressively more capable (and slower) agents.
+---
 
-**Example: Local First**
-```
-Agent Name: Home Assistant
-Agent Type: Home Assistant (Built-in)
-Priority: 10
-Timeout: 5 seconds
+## Router Agents (Priority 0, Ollama Only)
+
+Router agents are optional. When configured, they run before all processing agents and
+classify each request, returning a JSON routing decision:
+
+```json
+{"local_ha": true, "complexity": 15}
 ```
 
-**Example: Medium Capability**
+| Field | Type | Description |
+|---|---|---|
+| `local_ha` | boolean | `true` when the request is a home-automation command — pins routing to LOCAL_HA agents |
+| `complexity` | integer (0–100) | `0` = block the request outright. Higher values prefer more capable agents. |
+
+NeuralBridge uses a built-in classification prompt automatically. You can override it with a
+**custom router prompt** per router agent.
+
+### Router-Specific Fields
+
+| Field | Default | Description |
+|---|---|---|
+| Router Timeout | 5 s | Separate, shorter timeout for the routing decision |
+| Fallback | `default_complexity` | Behaviour when the router errors or times out (see below) |
+| Log Level | `none` | How much routing detail to log (see below) |
+| Custom Prompt | *(empty)* | Override the built-in classification prompt |
+
+### Router Fallback Options
+
+| Value | Behaviour |
+|---|---|
+| `default_complexity` | Fail-open: treat as complexity 50, pass all agents through |
+| `skip_routing` | Skip routing entirely — pass all processing agents unchanged |
+| `block` | Block the request when the router fails |
+
+### Router Log Levels
+
+| Value | What is logged |
+|---|---|
+| `none` | Nothing (default) |
+| `complexity_only` | Complexity score and local_ha flag |
+| `debug_info` | Full routing decision details |
+| `debug_with_query` | Full details including the user's query text (⚠ logs PII) |
+
+### Recommended Router Models
+
+| Model | Size | Speed |
+|---|---|---|
+| `qwen2.5:0.5b` | 0.5B | Very fast — best all-round choice |
+| `tinyllama:1.1b` | 1.1B | Extremely fast — minimal resources |
+| `phi2:2.7b` | 2.7B | More capable — still fast |
+
+### Example Router Configuration
+
 ```
-Agent Name: Llama3 Local
-Agent Type: Ollama
-Priority: 20
-Ollama URL: http://localhost:11434
-Model: llama3:8b
-Timeout: 30 seconds
+Agent Name:    Qwen Router
+Agent Type:    Ollama
+Priority:      0
+URL:           http://192.168.1.100:11434
+Model:         qwen2.5:0.5b
+Router Timeout: 5 s
+Fallback:      default_complexity
+Log Level:     complexity_only
 ```
 
-**Example: High Capability Cloud**
+---
+
+## Guard Rails
+
+Guard rails check content before it reaches the agent (input) and before it is returned to
+the user (output). A `neuralbridge_guard_rail_triggered` HA event is fired on every flag.
+
+| Field | Default | Description |
+|---|---|---|
+| Enabled | false | Toggle guard rails for this agent |
+| Action | `notify_ask` | What to do when content is flagged |
+| AI Threshold | 0.7 | Confidence (0.5–1.0) required to flag |
+| Use Detoxify | false | Opt-in ML model for enhanced toxicity detection |
+| Detoxify Threshold | 0.7 | Confidence threshold for Detoxify |
+| Rules — Harmful | true | Check for harmful content |
+| Rules — Privacy | true | Check for privacy violations |
+| Rules — Security | true | Check for security risks |
+| Rules — Inappropriate | true | Check for inappropriate material |
+
+### Actions
+
+| Action | Behaviour |
+|---|---|
+| `block` | Response suppressed; user receives a blocked-content message |
+| `warn` | Response returned with a warning prefix |
+| `notify_ask` | Response held; user asked to confirm before it is shown |
+
+---
+
+## Global Settings
+
+Accessible from **Configure → menu options**:
+
+### Default Prompt (Ollama Global Fallback)
+
+A global system prompt used by any Ollama agent whose per-agent system prompt is empty.
+
+**Default value:**
 ```
-Agent Name: ChatGPT Fallback
-Agent Type: Existing Integration
-Priority: 30
-Entity ID: conversation.chatgpt
-Timeout: 60 seconds
+You are a voice assistant for Home Assistant.
+Answer questions about the world truthfully.
+Answer in the style of a witty British butler, answer only in plain text; keep it
+simple, to the point, and avoid swearing.
+
+Answer with time in 24-hour format and state the current timezone.
+When saying a date use the format day month year eg 5th of January 2025.
 ```
 
-## How Routing Works
+### Response Cache
 
-### Step 1: Router Agents (Priority 0)
+| Field | Default | Description |
+|---|---|---|
+| Cache Enabled | true | Toggle the response cache globally |
+| Cache TTL | 300 s | How long cached responses are kept |
 
-If you have any Priority 0 agents configured:
-1. Request is sent to router agent
-2. Router determines if request should be processed
-3. If blocked, return error message
-4. If allowed, continue to Step 2
+To purge the cache immediately: **Configure → Advanced Settings → Purge Cache Now**
 
-### Step 2: Processing Agents (Priority 1+)
+### Language
 
-Agents are tried in priority order (lowest first):
-1. Send request to agent with lowest priority number
-2. If agent succeeds, return response immediately
-3. If agent fails or times out, try next agent
-4. Continue until an agent succeeds or all fail
+Sets the language used for NeuralBridge's own UI strings and response messages.
+Default: `en_gb`.
 
-### Fallback
-
-If all agents fail:
-- Return standard error message
-- Log failure for debugging
-- User sees: "I'm having trouble connecting to my AI agents right now."
+---
 
 ## Example Configurations
 
-### Scenario 1: Privacy-First (All Local)
+### Privacy-First: All Local
 
 ```
-Priority 0:  Qwen2.5:0.5b via Ollama (Router)
-Priority 10: Home Assistant (Local intents)
-Priority 20: Llama3:8b via Ollama (General queries)
-Priority 30: Mistral:7b via Ollama (Fallback)
+Priority 10 │ Home Assistant  │ assist_mode=true
+Priority 20 │ Llama3 8B       │ system_prompt="you are a helpful assistant"
+Priority 30 │ Mixtral 8x7B    │ fallback for complex queries
 ```
 
-### Scenario 2: Hybrid (Local + Cloud)
+### Hybrid: Local + Cloud
 
 ```
-Priority 10: Home Assistant (Local intents)
-Priority 20: Llama3:8b via Ollama (Privacy-safe queries)
-Priority 30: Gemini Pro (Complex reasoning)
-Priority 40: ChatGPT (Fallback)
+Priority  0 │ Qwen2.5 0.5B      │ router — local_ha + complexity
+Priority 10 │ Home Assistant    │ assist_mode=true
+Priority 20 │ Llama3 8B         │ privacy-safe general queries
+Priority 30 │ Gemini Flash      │ complex reasoning
+Priority 40 │ ChatGPT           │ final fallback
 ```
 
-### Scenario 3: Cloud-Heavy (Fast Response)
+### Cost-Optimised
 
 ```
-Priority 10: Home Assistant (Device control only)
-Priority 20: Gemini Flash (Fast cloud)
-Priority 30: ChatGPT (General queries)
-Priority 40: Claude (Fallback)
+Priority  0 │ Qwen2.5 0.5B   │ router — filter + classify
+Priority 10 │ Home Assistant │ free, local
+Priority 20 │ Llama3 8B      │ free, local
+Priority 30 │ Gemini Flash   │ paid — only reached for hard queries
 ```
 
-### Scenario 4: Cost-Optimized
-
-```
-Priority 0:  Qwen2.5:0.5b via Ollama (Filter unnecessary requests)
-Priority 10: Home Assistant (Free local)
-Priority 20: Llama3:8b via Ollama (Free local)
-Priority 30: Gemini Flash (Low-cost cloud)
-```
-
-## Managing Agents
-
-### Viewing Configured Agents
-
-1. Go to NeuralBridge integration settings
-2. Click "Configure"
-3. Select "Manage Existing Agents"
-4. View list of all agents with their priorities
-
-### Deleting an Agent
-
-1. Go to "Manage Existing Agents"
-2. Select the agent to delete
-3. Choose "Delete Agent" action
-4. Confirm deletion
-
-### Modifying an Agent
-
-Currently, agents cannot be edited after creation. To modify:
-1. Delete the existing agent
-2. Add a new agent with updated configuration
+---
 
 ## Troubleshooting
 
-### Agent Not Responding
-
-- Check timeout settings (increase if needed)
-- For Ollama: Verify Ollama is running and accessible
-- For Existing Integration: Ensure the integration is configured and working
-- Check Home Assistant logs for error messages
-
-### All Agents Failing
-
-- Verify at least one agent is configured
-- Check network connectivity for cloud agents
-- Ensure Ollama models are pulled: `ollama pull model-name`
-- Review agent priorities (ensure processing agents have priority > 0)
-
-### Router Blocking Everything
-
-- Router agents (priority 0) might be too restrictive
-- Consider removing router agents for testing
-- Implement proper router logic (see developer docs)
-
-## Best Practices
-
-1. **Start Simple**: Begin with 1-2 agents and add more as needed
-2. **Test Each Agent**: Add agents one at a time and test
-3. **Use Appropriate Timeouts**: Fast models = short timeout, slow models = longer
-4. **Monitor Logs**: Enable debug logging to see routing decisions
-5. **Balance Cost/Speed/Privacy**: Consider your priorities when choosing agents
-
-## Advanced: Router Agent Logic
-
-Router agents (priority 0) currently allow all requests by default. To implement custom filtering:
-
-1. Use a small model trained for classification
-2. Implement custom logic in `conversation.py`
-3. Example use cases:
-   - Block inappropriate requests
-   - Filter out queries better handled locally
-   - Classify request type and route accordingly
-   - Privacy filtering (keep sensitive data local)
-
-See the developer documentation for implementation details.
+| Problem | Solution |
+|---|---|
+| Ollama connection fails | Check URL, run `ollama list`, verify port 11434 |
+| Cloud agent not in selector | Configure the HA integration first |
+| HA agent falls through unexpectedly | Disable Assist Mode or check intent matching |
+| Router always blocks | Set log level to `complexity_only`, check model output format |
+| Guard rails false-positive | Raise threshold, switch to `warn`, or disable a rule category |
+| Agent appears in list but gets skipped | Check if circuit breaker has tripped (look for WARNING in HA logs) |

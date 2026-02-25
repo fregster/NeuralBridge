@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
+import pytest
+
 from custom_components.neuralbridge.statistics import AgentStatistics, AgentStats
 
 
@@ -16,6 +20,8 @@ class TestAgentStats:
         assert stats.failures == 0
         assert stats.timeouts == 0
         assert stats.total_latency_ms == 0.0
+        assert stats.blocks == 0
+        assert stats.first_request_time is None
 
     def test_avg_latency_no_successes(self) -> None:
         """Test avg_latency_ms returns 0.0 when there are no successes."""
@@ -58,6 +64,10 @@ class TestAgentStats:
             "timeouts",
             "avg_latency_ms",
             "success_rate",
+            "blocks",
+            "block_rate",
+            "queries_per_hour",
+            "intent_hints",
         }
 
     def test_to_dict_values(self) -> None:
@@ -171,3 +181,184 @@ class TestAgentStatistics:
         result = agg.get_all()
         assert result["Llama3"]["avg_latency_ms"] == 200.0
         assert result["Llama3"]["successes"] == 2
+
+    def test_record_block_increments_counter(self) -> None:
+        """Test record_block increments the blocks counter for the agent."""
+        agg = AgentStatistics()
+        agg.record_request("id-1", "Router")
+        agg.record_block("id-1")
+        result = agg.get_all()
+        assert result["Router"]["blocks"] == 1
+
+    def test_record_block_unknown_agent_does_not_raise(self) -> None:
+        """Test record_block on an unknown agent does not raise."""
+        agg = AgentStatistics()
+        agg.record_block("unknown")  # Should not raise
+
+    def test_get_agent_stats_returns_none_for_unknown(self) -> None:
+        """Test get_agent_stats returns None for an agent with no recorded stats."""
+        agg = AgentStatistics()
+        assert agg.get_agent_stats("unknown") is None
+
+    def test_get_agent_stats_returns_stats_after_request(self) -> None:
+        """Test get_agent_stats returns AgentStats after at least one request."""
+        agg = AgentStatistics()
+        agg.record_request("id-1", "Llama3")
+        stats = agg.get_agent_stats("id-1")
+        assert stats is not None
+        assert stats.requests == 1
+
+    def test_first_request_time_set_on_first_request(self) -> None:
+        """Test first_request_time is set when the first request is recorded."""
+        agg = AgentStatistics()
+        with patch("custom_components.neuralbridge.statistics.time.monotonic", return_value=500.0):
+            agg.record_request("id-1", "Llama3")
+        stats = agg.get_agent_stats("id-1")
+        assert stats is not None
+        assert stats.first_request_time == pytest.approx(500.0)
+
+    def test_first_request_time_not_updated_on_subsequent_requests(self) -> None:
+        """Test first_request_time is only set on the first request, not updated."""
+        agg = AgentStatistics()
+        with patch("custom_components.neuralbridge.statistics.time.monotonic", return_value=500.0):
+            agg.record_request("id-1", "Llama3")
+        with patch("custom_components.neuralbridge.statistics.time.monotonic", return_value=600.0):
+            agg.record_request("id-1", "Llama3")
+        stats = agg.get_agent_stats("id-1")
+        assert stats is not None
+        assert stats.first_request_time == pytest.approx(500.0)  # Must not be updated to 600.0
+
+
+class TestAgentStatsNewProperties:
+    """Tests for the new queries_per_hour and block_rate properties."""
+
+    def test_queries_per_hour_no_requests(self) -> None:
+        """Test queries_per_hour returns 0.0 when no requests recorded."""
+        stats = AgentStats()
+        assert stats.queries_per_hour == pytest.approx(0.0)
+
+    def test_queries_per_hour_no_first_request_time(self) -> None:
+        """Test queries_per_hour returns 0.0 when first_request_time is None."""
+        stats = AgentStats(requests=5, first_request_time=None)
+        assert stats.queries_per_hour == pytest.approx(0.0)
+
+    def test_queries_per_hour_less_than_one_second_elapsed(self) -> None:
+        """Test queries_per_hour returns 0.0 when less than 1 second has elapsed."""
+        stats = AgentStats(requests=10, first_request_time=1000.0)
+        with patch("custom_components.neuralbridge.statistics.time.monotonic", return_value=1000.5):
+            assert stats.queries_per_hour == pytest.approx(0.0)
+
+    def test_queries_per_hour_computed_correctly(self) -> None:
+        """Test queries_per_hour correctly divides requests by elapsed hours."""
+        # 10 requests in exactly 1 hour → 10.0 q/h
+        stats = AgentStats(requests=10, first_request_time=0.0)
+        with patch(
+            "custom_components.neuralbridge.statistics.time.monotonic",
+            return_value=3600.0,
+        ):
+            assert stats.queries_per_hour == pytest.approx(10.0)
+
+    def test_queries_per_hour_partial_hour(self) -> None:
+        """Test queries_per_hour is computed correctly for sub-hour elapsed time."""
+        # 6 requests in 30 minutes → 12.0 q/h
+        stats = AgentStats(requests=6, first_request_time=0.0)
+        with patch(
+            "custom_components.neuralbridge.statistics.time.monotonic",
+            return_value=1800.0,
+        ):
+            assert stats.queries_per_hour == pytest.approx(12.0)
+
+    def test_block_rate_no_requests(self) -> None:
+        """Test block_rate returns 0.0 when no requests recorded."""
+        stats = AgentStats()
+        assert stats.block_rate == pytest.approx(0.0)
+
+    def test_block_rate_no_blocks(self) -> None:
+        """Test block_rate returns 0.0 when no blocks recorded."""
+        stats = AgentStats(requests=5, blocks=0)
+        assert stats.block_rate == pytest.approx(0.0)
+
+    def test_block_rate_all_blocked(self) -> None:
+        """Test block_rate returns 1.0 when all requests are blocked."""
+        stats = AgentStats(requests=4, blocks=4)
+        assert stats.block_rate == pytest.approx(1.0)
+
+    def test_block_rate_partial(self) -> None:
+        """Test block_rate returns the correct fraction."""
+        stats = AgentStats(requests=4, blocks=1)
+        assert stats.block_rate == pytest.approx(0.25)
+
+    def test_to_dict_includes_new_fields(self) -> None:
+        """Test to_dict includes blocks, block_rate, and queries_per_hour."""
+        stats = AgentStats(requests=4, blocks=1, first_request_time=0.0)
+        with patch(
+            "custom_components.neuralbridge.statistics.time.monotonic",
+            return_value=3600.0,
+        ):
+            result = stats.to_dict()
+        assert result["blocks"] == 1
+        assert result["block_rate"] == pytest.approx(0.25)
+        assert result["queries_per_hour"] == pytest.approx(4.0)
+
+    def test_intent_hints_default_is_empty_dict(self) -> None:
+        """AgentStats.intent_hints defaults to an empty dict."""
+        stats = AgentStats()
+        assert stats.intent_hints == {}
+
+    def test_to_dict_includes_intent_hints(self) -> None:
+        """to_dict returns the intent_hints dict."""
+        stats = AgentStats()
+        stats.intent_hints["timer"] = 3
+        result = stats.to_dict()
+        assert result["intent_hints"] == {"timer": 3}
+
+    def test_to_dict_intent_hints_copy_is_returned(self) -> None:
+        """to_dict returns a copy of intent_hints, not the original dict."""
+        stats = AgentStats()
+        stats.intent_hints["timer"] = 1
+        result = stats.to_dict()
+        result["intent_hints"]["timer"] = 99  # mutate the returned copy
+        assert stats.intent_hints["timer"] == 1  # original unchanged
+
+
+class TestAgentStatisticsIntentHint:
+    """Tests for AgentStatistics.record_intent_hint (Feature 8)."""
+
+    def test_record_intent_hint_increments_counter(self) -> None:
+        """record_intent_hint increments the counter for the given hint."""
+        stats = AgentStatistics()
+        stats.record_request("r1", "Router")
+        stats.record_intent_hint("r1", "timer")
+        agent_stats = stats.get_agent_stats("r1")
+        assert agent_stats is not None
+        assert agent_stats.intent_hints["timer"] == 1
+
+    def test_record_intent_hint_multiple_increments(self) -> None:
+        """record_intent_hint increments correctly across multiple calls."""
+        stats = AgentStatistics()
+        stats.record_request("r1", "Router")
+        stats.record_intent_hint("r1", "timer")
+        stats.record_intent_hint("r1", "timer")
+        stats.record_intent_hint("r1", "todo")
+        agent_stats = stats.get_agent_stats("r1")
+        assert agent_stats is not None
+        assert agent_stats.intent_hints["timer"] == 2
+        assert agent_stats.intent_hints["todo"] == 1
+
+    def test_record_intent_hint_unknown_agent_id_is_safe(self) -> None:
+        """record_intent_hint with an unknown agent_id does not raise."""
+        stats = AgentStatistics()
+        stats.record_intent_hint("nonexistent", "timer")  # should not raise
+
+    def test_record_intent_hint_different_agents_independent(self) -> None:
+        """Intent hint counters are per-agent and do not bleed between agents."""
+        stats = AgentStatistics()
+        stats.record_request("r1", "Router1")
+        stats.record_request("r2", "Router2")
+        stats.record_intent_hint("r1", "timer")
+        agent1 = stats.get_agent_stats("r1")
+        agent2 = stats.get_agent_stats("r2")
+        assert agent1 is not None
+        assert agent2 is not None
+        assert agent1.intent_hints == {"timer": 1}
+        assert agent2.intent_hints == {}
