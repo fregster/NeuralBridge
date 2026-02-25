@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Set up NeuralBridge",
-        "description": "NeuralBridge provides priority-based AI agent routing for Home Assistant's Assist pipeline.\n\nAfter setup, you can add AI agents with different priorities through the integration options.\n\n**Priority System:**\n- Routing Agents: Classify and route requests (added via \"Add Routing Agent\")\n- Priority 1\u2013100: Processing agents (lower numbers are tried first)\n\nClick Submit to continue."
+        "description": "NeuralBridge provides priority-based AI agent routing for Home Assistant's Assist pipeline.\n\nAfter setup, you can add AI agents with different priorities through the integration options.\n\n**Priority System:**\n- Routing Agents: Classify and route requests (added via \"Add Routing Agent\")\n- Priority 1–100: Processing agents (lower numbers are tried first)\n\nClick Submit to continue."
       }
     },
     "error": {
@@ -56,7 +56,9 @@
           "timeout": "Timeout",
           "system_prompt": "System Prompt",
           "agent_cache_enabled": "Enable Response Cache",
-          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent"
+          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "agent_min_complexity": "Minimum Complexity",
+          "agent_max_complexity": "Maximum Complexity"
         },
         "data_description": {
           "agent_name": "A friendly name for this agent (e.g. 'Qwen Router', 'Llama3 Main')",
@@ -66,7 +68,9 @@
           "timeout": "Maximum time to wait for a response from this agent",
           "system_prompt": "Optional system-level instructions prepended to every conversation (Ollama only). Leave blank for none.",
           "agent_cache_enabled": "Cache responses from this agent. Disable to always get a fresh response (useful for real-time data queries).",
-          "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent"
+          "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent",
+          "agent_min_complexity": "Minimum complexity score (1–100) for this agent. Requests scored below this threshold will not be routed here.",
+          "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here."
         }
       },
       "configure_existing": {
@@ -78,7 +82,9 @@
           "entity_id": "Conversation Agent",
           "timeout": "Timeout",
           "agent_cache_enabled": "Enable Response Cache",
-          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent"
+          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "agent_min_complexity": "Minimum Complexity",
+          "agent_max_complexity": "Maximum Complexity"
         },
         "data_description": {
           "agent_name": "A friendly name for this agent",
@@ -86,7 +92,9 @@
           "entity_id": "Select an existing conversation agent from your Home Assistant",
           "timeout": "Maximum time to wait for a response from this agent",
           "agent_cache_enabled": "Cache responses from this agent. Disable to always get a fresh response.",
-          "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent"
+          "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent",
+          "agent_min_complexity": "Minimum complexity score (1–100) for this agent. Requests scored below this threshold will not be routed here.",
+          "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here."
         }
       },
       "configure_local": {
@@ -98,7 +106,9 @@
           "timeout": "Timeout",
           "agent_cache_enabled": "Enable Response Cache",
           "assist_mode": "Assist Mode",
-          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent"
+          "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "agent_min_complexity": "Minimum Complexity",
+          "agent_max_complexity": "Maximum Complexity"
         },
         "data_description": {
           "agent_name": "A friendly name for this agent",
@@ -106,7 +116,9 @@
           "timeout": "Maximum time to wait for a response from this agent",
           "agent_cache_enabled": "Cache responses from this agent.",
           "assist_mode": "Only accept responses where HA successfully executed a home control intent (action_done). Non-intent responses fall through to lower-priority agents, enabling hybrid home control + LLM routing.",
-          "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent"
+          "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent",
+          "agent_min_complexity": "Minimum complexity score (1–100) for this agent. Requests scored below this threshold will not be routed here.",
+          "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here."
         }
       },
       "configure_web_search": {
@@ -123,6 +135,8 @@
           "timeout": "Timeout",
           "agent_cache_enabled": "Enable Response Cache",
           "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "agent_min_complexity": "Minimum Complexity",
+          "agent_max_complexity": "Maximum Complexity",
           "test_connection": "Test connection before saving"
         },
         "data_description": {
@@ -136,6 +150,8 @@
           "timeout": "Maximum time to wait for search results",
           "agent_cache_enabled": "Cache search results. Disable for queries that always need fresh data.",
           "guard_rail_enabled_for_agent": "Run guard rail checks on search results returned by this agent",
+          "agent_min_complexity": "Minimum complexity score (1–100) for this agent. Requests scored below this threshold will not be routed here.",
+          "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here.",
           "test_connection": "Tick to test your API key(s) without saving. Untick and submit again to save."
         }
       },
@@ -154,6 +170,8 @@
           "timeout": "Timeout",
           "agent_cache_enabled": "Enable Response Cache",
           "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "agent_min_complexity": "Minimum Complexity",
+          "agent_max_complexity": "Maximum Complexity",
           "test_connection": "Test connection before saving",
           "delete_agent": "Delete this Agent"
         },
@@ -169,6 +187,8 @@
           "timeout": "Maximum time to wait for search results",
           "agent_cache_enabled": "Cache search results. Disable for queries that always need fresh data.",
           "guard_rail_enabled_for_agent": "Run guard rail checks on search results returned by this agent",
+          "agent_min_complexity": "Minimum complexity score (1–100) for this agent. Requests scored below this threshold will not be routed here.",
+          "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here.",
           "test_connection": "Tick to test your API key(s) without saving. Untick and submit again to save.",
           "delete_agent": "Check this box and submit to permanently delete this agent (you will be asked to confirm)"
         }
@@ -217,6 +237,8 @@
           "system_prompt": "System Prompt",
           "agent_cache_enabled": "Enable Response Cache",
           "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "agent_min_complexity": "Minimum Complexity",
+          "agent_max_complexity": "Maximum Complexity",
           "delete_agent": "Delete this Agent"
         },
         "data_description": {
@@ -229,6 +251,8 @@
           "system_prompt": "Optional system-level instructions prepended to every conversation. Leave blank for none.",
           "agent_cache_enabled": "Cache responses from this agent. Disable to always get a fresh response.",
           "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent",
+          "agent_min_complexity": "Minimum complexity score (1–100) for this agent. Requests scored below this threshold will not be routed here.",
+          "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here.",
           "delete_agent": "Check this box and submit to permanently delete this agent (you will be asked to confirm)"
         }
       },
@@ -243,6 +267,8 @@
           "timeout": "Timeout",
           "agent_cache_enabled": "Enable Response Cache",
           "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "agent_min_complexity": "Minimum Complexity",
+          "agent_max_complexity": "Maximum Complexity",
           "delete_agent": "Delete this Agent"
         },
         "data_description": {
@@ -253,6 +279,8 @@
           "timeout": "Maximum time to wait for a response from this agent",
           "agent_cache_enabled": "Cache responses from this agent. Disable to always get a fresh response.",
           "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent",
+          "agent_min_complexity": "Minimum complexity score (1–100) for this agent. Requests scored below this threshold will not be routed here.",
+          "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here.",
           "delete_agent": "Check this box and submit to permanently delete this agent (you will be asked to confirm)"
         }
       },
@@ -267,6 +295,8 @@
           "agent_cache_enabled": "Enable Response Cache",
           "assist_mode": "Assist Mode",
           "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
+          "agent_min_complexity": "Minimum Complexity",
+          "agent_max_complexity": "Maximum Complexity",
           "delete_agent": "Delete this Agent"
         },
         "data_description": {
@@ -277,6 +307,8 @@
           "agent_cache_enabled": "Cache responses from this agent.",
           "assist_mode": "Only accept responses where HA successfully executed a home control intent (action_done). Non-intent responses fall through to lower-priority agents, enabling hybrid home control + LLM routing.",
           "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent",
+          "agent_min_complexity": "Minimum complexity score (1–100) for this agent. Requests scored below this threshold will not be routed here.",
+          "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here.",
           "delete_agent": "Check this box and submit to permanently delete this agent (you will be asked to confirm)"
         }
       },
@@ -296,16 +328,22 @@
         "data": {
           "enable_home_control": "Enable Home Control",
           "force_response_language": "Force Response Language",
+          "split_compound_commands": "Split Compound Commands",
           "response_cache_enabled": "Enable Response Cache",
           "response_cache_ttl": "Cache TTL",
-          "purge_cache_now": "Purge Cache Now"
+          "purge_cache_now": "Purge Cache Now",
+          "response_cache_semantic": "Enable Semantic Cache Keying",
+          "semantic_cache_ttl": "Semantic Cache TTL"
         },
         "data_description": {
           "enable_home_control": "Allow NeuralBridge to control Home Assistant devices. When enabled, the Assist UI shows 'This assistant can control your home'. Add a Home Assistant sub-agent at a low priority number to handle device commands, with LLM agents at higher priorities for general questions.",
           "force_response_language": "When enabled, Ollama agents are instructed to respond in the same language the user is speaking (e.g. speak French → agent replies in French). Disable this to let the model respond in its default trained language.",
+          "split_compound_commands": "When enabled, compound voice commands containing conjunctions (\"and\", \"then\", \"also\", \"after that\") are split into individual commands, each processed by the Local HA agent independently. Only applies when a Local HA agent is present in the pipeline.",
           "response_cache_enabled": "Cache agent responses to avoid repeated calls for identical inputs.",
           "response_cache_ttl": "How long (in seconds) a cached response remains valid before expiring.",
-          "purge_cache_now": "Immediately discard all currently cached responses. Useful after changing agent configurations."
+          "purge_cache_now": "Immediately discard all currently cached responses. Useful after changing agent configurations.",
+          "response_cache_semantic": "When enabled, paraphrase variants of the same question (e.g. 'What is the weather?' and 'How is the weather today?') share the same cache entry.",
+          "semantic_cache_ttl": "How long (in seconds) a semantically-keyed cache entry remains valid. Should be shorter than the exact TTL due to the looser key matching."
         }
       },
       "configure_guard_rails": {
@@ -328,6 +366,22 @@
           "guard_rail_enabled": "Enable hybrid rule-based and AI content filtering on agent responses",
           "guard_rail_action": "What to do when the guard rail flags a response as unsafe",
           "guard_rail_ai_threshold": "Confidence threshold below which AI checking is triggered (0.5 = check often, 1.0 = rules only)"
+        }
+      },
+      "configure_high_stakes": {
+        "title": "High-Stakes Action Confirmation",
+        "description": "{info}",
+        "data": {
+          "high_stakes_enabled": "Enable High-Stakes Confirmation",
+          "high_stakes_domains": "Protected Domains",
+          "high_stakes_secret_enabled": "Require Passphrase",
+          "high_stakes_secret": "Passphrase"
+        },
+        "data_description": {
+          "high_stakes_enabled": "When enabled, actions targeting the selected domains require explicit confirmation before execution",
+          "high_stakes_domains": "HA domains whose actions will be intercepted and held pending confirmation",
+          "high_stakes_secret_enabled": "Require the user to say a specific passphrase instead of a simple yes/no to confirm the action",
+          "high_stakes_secret": "The passphrase the user must say to confirm a high-stakes action (leave blank to use yes/no)"
         }
       },
       "language_settings": {

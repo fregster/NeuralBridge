@@ -25,12 +25,14 @@ from custom_components.neuralbridge.const import (
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
     AGENT_TYPE_WEB_SEARCH,
+    COMPOUND_COMMAND_SEPARATOR,
     CONF_AGENT_ASSIST_MODE,
     CONF_AGENT_CACHE_ENABLED,
     CONF_AGENT_ENABLED,
     CONF_AGENT_NAME,
     CONF_AGENT_TYPE,
     CONF_AGENTS,
+    CONF_ANNOUNCE_MEDIA_PLAYERS,
     CONF_ENABLE_HOME_CONTROL,
     CONF_ENTITY_ID,
     CONF_FORCE_RESPONSE_LANGUAGE,
@@ -38,11 +40,16 @@ from custom_components.neuralbridge.const import (
     CONF_GUARD_RAIL_ENABLED,
     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
     CONF_GUARD_RAIL_RULES,
+    CONF_HIGH_STAKES_DOMAINS,
+    CONF_HIGH_STAKES_ENABLED,
+    CONF_HIGH_STAKES_SECRET,
+    CONF_HIGH_STAKES_SECRET_ENABLED,
     CONF_IS_ROUTER,
     CONF_MAX_RETRIES,
     CONF_OLLAMA_MODEL,
     CONF_OLLAMA_URL,
     CONF_PRIORITY,
+    CONF_RESPONSE_VERBOSITY,
     CONF_RETRY_BASE_DELAY,
     CONF_ROUTER_CUSTOM_PROMPT,
     CONF_ROUTER_FALLBACK,
@@ -50,18 +57,23 @@ from custom_components.neuralbridge.const import (
     CONF_SEARCH_API_KEY,
     CONF_SEARCH_PROVIDER,
     CONF_SEARCH_RESULT_COUNT,
+    CONF_SPLIT_COMPOUND_COMMANDS,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DATA_CIRCUIT_BREAKER,
     DEFAULT_ROUTER_COMPLEXITY,
     DOMAIN,
+    EVENT_ANNOUNCE_SENT,
     EVENT_GUARD_RAIL_TRIGGERED,
+    EVENT_HIGH_STAKES_TRIGGERED,
     FALLBACK_RESPONSE,
     GUARD_RAIL_ACTION_BLOCK,
     GUARD_RAIL_ACTION_NOTIFY_ASK,
     GUARD_RAIL_ACTION_WARN,
     GUARD_RAIL_BLOCKED_RESPONSE,
+    MAX_COMPOUND_FRAGMENTS,
     NO_AGENTS_RESPONSE,
+    ROUTER_CONFIDENCE_LOW,
     ROUTER_FALLBACK_BLOCK,
     ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
     ROUTER_FALLBACK_SKIP_ROUTING,
@@ -72,13 +84,19 @@ from custom_components.neuralbridge.const import (
     ROUTER_SKIP_ROUTING_COMPLEXITY,
     SEARCH_PROVIDER_BRAVE,
     SIGNAL_STATS_UPDATED,
+    VERBOSITY_BRIEF,
+    VERBOSITY_NORMAL,
+    VERBOSITY_VERBOSE,
 )
 from custom_components.neuralbridge.conversation import (
     NeuralBridgeAgent,
     RouterDecision,
     _apply_router_decision,
+    _extract_announce_text,
     _get_language_name,
     _parse_router_response,
+    _split_compound_input,
+    _truncate_to_first_sentence,
     async_setup_entry,
 )
 from custom_components.neuralbridge.entity_context import EntityContextCache
@@ -1142,6 +1160,7 @@ async def test_check_with_routers_block_stops_at_first_router(hass: HomeAssistan
         user_text: str,
         area_context: str | None = None,
         language: str | None = None,
+        agent_types: list[str] | None = None,
     ) -> None:
         nonlocal call_count
         call_count += 1
@@ -4043,6 +4062,7 @@ async def test_check_with_routers_passes_area_context_to_classify(
         user_text: str,
         area_context: str | None = None,
         language: str | None = None,
+        agent_types: list[str] | None = None,
     ) -> RouterDecision:
         calls.append((user_text, area_context, language))
         return RouterDecision(local_ha=True, complexity=10)
@@ -4929,3 +4949,1467 @@ async def test_process_with_ollama_renders_ha_context_in_system_prompt(
     system_content = next(m["content"] for m in captured_messages[0] if m["role"] == "system")
     assert "TZ=Australia/Sydney" in system_content
     assert "LOC=Test Home" in system_content
+
+
+# ===========================================================================
+# Feature 6 — _truncate_to_first_sentence helper
+# ===========================================================================
+
+
+def test_truncate_to_first_sentence_at_period() -> None:
+    """Returns text up to and including the first period."""
+    result = _truncate_to_first_sentence("Done. Here is some extra context.")
+    assert result == "Done."
+
+
+def test_truncate_to_first_sentence_at_question_mark() -> None:
+    """Returns text up to and including the first question mark."""
+    result = _truncate_to_first_sentence("Are you sure? Please confirm.")
+    assert result == "Are you sure?"
+
+
+def test_truncate_to_first_sentence_at_exclamation() -> None:
+    """Returns text up to and including the first exclamation mark."""
+    result = _truncate_to_first_sentence("OK! And here is more.")
+    assert result == "OK!"
+
+
+def test_truncate_to_first_sentence_no_boundary_returns_unchanged() -> None:
+    """Returns the full text when no sentence-ending punctuation is found."""
+    result = _truncate_to_first_sentence("No punctuation here")
+    assert result == "No punctuation here"
+
+
+def test_truncate_to_first_sentence_already_single_sentence() -> None:
+    """Returns single-sentence text unchanged."""
+    result = _truncate_to_first_sentence("The light is on.")
+    assert result == "The light is on."
+
+
+def test_truncate_to_first_sentence_strips_trailing_whitespace() -> None:
+    """Trailing whitespace after the boundary is stripped."""
+    result = _truncate_to_first_sentence("Done.    More text follows.")
+    assert result == "Done."
+
+
+# ===========================================================================
+# Feature 6 — _process_with_ollama verbosity injection
+# ===========================================================================
+
+
+async def test_process_with_ollama_brief_appends_brief_instruction(
+    hass: HomeAssistant,
+) -> None:
+    """Brief verbosity appends the brief instruction to the Ollama system prompt."""
+    ollama_agent = _make_ollama_agent(system_prompt="You are a helpful assistant.")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [ollama_agent],
+            CONF_RESPONSE_VERBOSITY: VERBOSITY_BRIEF,
+        },
+    )
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    captured_messages: list[list[dict]] = []
+    mock_client = MagicMock()
+
+    async def _capture(messages: list[dict]) -> str:
+        captured_messages.append(messages)
+        return "OK"
+
+    mock_client.chat = _capture
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient",
+        return_value=mock_client,
+    ):
+        result = await conv_agent._process_with_ollama(
+            ollama_agent,
+            ConversationInput(
+                text="Hello",
+                context=Context(),
+                conversation_id=None,
+                device_id=None,
+                language="en",
+                satellite_id=None,
+                agent_id=None,
+            ),
+        )
+
+    assert result is not None
+    system_msgs = [m for m in captured_messages[0] if m["role"] == "system"]
+    assert len(system_msgs) == 1
+    assert "one to five words" in system_msgs[0]["content"]
+
+
+async def test_process_with_ollama_verbose_appends_verbose_instruction(
+    hass: HomeAssistant,
+) -> None:
+    """Verbose verbosity appends the verbose instruction to the Ollama system prompt."""
+    ollama_agent = _make_ollama_agent(system_prompt="You are a helpful assistant.")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [ollama_agent],
+            CONF_RESPONSE_VERBOSITY: VERBOSITY_VERBOSE,
+        },
+    )
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    captured_messages: list[list[dict]] = []
+    mock_client = MagicMock()
+
+    async def _capture(messages: list[dict]) -> str:
+        captured_messages.append(messages)
+        return "Here is a detailed answer."
+
+    mock_client.chat = _capture
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient",
+        return_value=mock_client,
+    ):
+        result = await conv_agent._process_with_ollama(
+            ollama_agent,
+            ConversationInput(
+                text="Hello",
+                context=Context(),
+                conversation_id=None,
+                device_id=None,
+                language="en",
+                satellite_id=None,
+                agent_id=None,
+            ),
+        )
+
+    assert result is not None
+    system_msgs = [m for m in captured_messages[0] if m["role"] == "system"]
+    assert len(system_msgs) == 1
+    assert "detailed" in system_msgs[0]["content"]
+
+
+async def test_process_with_ollama_normal_verbosity_no_instruction(
+    hass: HomeAssistant,
+) -> None:
+    """Normal (default) verbosity does not inject any verbosity instruction."""
+    ollama_agent = _make_ollama_agent(system_prompt="You are a helpful assistant.")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [ollama_agent],
+            CONF_RESPONSE_VERBOSITY: VERBOSITY_NORMAL,
+        },
+    )
+    entry.add_to_hass(hass)
+    conv_agent = NeuralBridgeAgent(hass, entry)
+
+    captured_messages: list[list[dict]] = []
+    mock_client = MagicMock()
+
+    async def _capture(messages: list[dict]) -> str:
+        captured_messages.append(messages)
+        return "A balanced answer."
+
+    mock_client.chat = _capture
+
+    with patch(
+        "custom_components.neuralbridge.conversation.OllamaClient",
+        return_value=mock_client,
+    ):
+        await conv_agent._process_with_ollama(
+            ollama_agent,
+            ConversationInput(
+                text="Hello",
+                context=Context(),
+                conversation_id=None,
+                device_id=None,
+                language="en",
+                satellite_id=None,
+                agent_id=None,
+            ),
+        )
+
+    system_msgs = [m for m in captured_messages[0] if m["role"] == "system"]
+    assert len(system_msgs) == 1
+    assert "one to five words" not in system_msgs[0]["content"]
+    assert "detailed" not in system_msgs[0]["content"]
+
+
+# ===========================================================================
+# Feature 6 — _process_with_existing verbosity handling
+# ===========================================================================
+
+# This test module targets Python 3.12's HA, which does not ship
+# homeassistant.components.conversation.chat_log.  Patch in a lightweight mock
+# so that the inline import inside _process_with_existing does not raise
+# ModuleNotFoundError.  The mock ContextVar honours .set()/.reset() to satisfy
+# the chat-log isolation pattern used by NeuralBridge.
+
+_CHAT_LOG_PATCH = "homeassistant.components.conversation.chat_log"
+
+
+def _make_chat_log_mock() -> MagicMock:
+    """Return a mock that satisfies the current_chat_log ContextVar API."""
+    mock_module = MagicMock()
+    mock_var = MagicMock()
+    mock_var.set.return_value = MagicMock()  # opaque token
+    mock_module.current_chat_log = mock_var
+    return mock_module
+
+
+async def test_process_with_existing_brief_prepends_prefix(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Brief verbosity prepends '[Brief response]' to text for EXISTING (cloud) agents."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [],
+            CONF_RESPONSE_VERBOSITY: VERBOSITY_BRIEF,
+        },
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+    agent_cfg = {
+        CONF_ENTITY_ID: "conversation.openai",
+        CONF_AGENT_NAME: "OpenAI",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+    }
+
+    service_response = {"response": {"speech": {"plain": {"speech": "OK"}}}}
+    captured_texts: list[str] = []
+
+    async def _capture_call(domain: str, service: str, data: dict, **kwargs: object) -> dict:
+        captured_texts.append(str(data.get("text", "")))
+        return service_response
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = hass.config.language
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = _capture_call
+    agent.hass = mock_hass
+
+    with patch.dict("sys.modules", {_CHAT_LOG_PATCH: _make_chat_log_mock()}):
+        result = await agent._process_with_existing(
+            agent_cfg,
+            ConversationInput(
+                text="Turn off the lights",
+                context=Context(),
+                conversation_id=None,
+                device_id=None,
+                language="en",
+                satellite_id=None,
+                agent_id=None,
+            ),
+        )
+
+    assert result is not None
+    assert captured_texts[0].startswith("[Brief response]")
+    assert "Turn off the lights" in captured_texts[0]
+
+
+async def test_process_with_existing_verbose_prepends_prefix(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Verbose verbosity prepends '[Verbose response]' to text for EXISTING (cloud) agents."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [],
+            CONF_RESPONSE_VERBOSITY: VERBOSITY_VERBOSE,
+        },
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+    agent_cfg = {
+        CONF_ENTITY_ID: "conversation.openai",
+        CONF_AGENT_NAME: "OpenAI",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+    }
+
+    service_response = {"response": {"speech": {"plain": {"speech": "Here is a detailed answer."}}}}
+    captured_texts: list[str] = []
+
+    async def _capture_call(domain: str, service: str, data: dict, **kwargs: object) -> dict:
+        captured_texts.append(str(data.get("text", "")))
+        return service_response
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = hass.config.language
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = _capture_call
+    agent.hass = mock_hass
+
+    with patch.dict("sys.modules", {_CHAT_LOG_PATCH: _make_chat_log_mock()}):
+        result = await agent._process_with_existing(
+            agent_cfg,
+            ConversationInput(
+                text="Tell me about the weather",
+                context=Context(),
+                conversation_id=None,
+                device_id=None,
+                language="en",
+                satellite_id=None,
+                agent_id=None,
+            ),
+        )
+
+    assert result is not None
+    assert captured_texts[0].startswith("[Verbose response]")
+    assert "Tell me about the weather" in captured_texts[0]
+
+
+async def test_process_with_existing_normal_does_not_modify_text(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Normal verbosity does not modify the user text for EXISTING agents."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [],
+            CONF_RESPONSE_VERBOSITY: VERBOSITY_NORMAL,
+        },
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+    agent_cfg = {
+        CONF_ENTITY_ID: "conversation.openai",
+        CONF_AGENT_NAME: "OpenAI",
+        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+    }
+
+    service_response = {"response": {"speech": {"plain": {"speech": "Normal reply"}}}}
+    captured_texts: list[str] = []
+
+    async def _capture_call(domain: str, service: str, data: dict, **kwargs: object) -> dict:
+        captured_texts.append(str(data.get("text", "")))
+        return service_response
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = hass.config.language
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = _capture_call
+    agent.hass = mock_hass
+
+    with patch.dict("sys.modules", {_CHAT_LOG_PATCH: _make_chat_log_mock()}):
+        await agent._process_with_existing(
+            agent_cfg,
+            ConversationInput(
+                text="What time is it?",
+                context=Context(),
+                conversation_id=None,
+                device_id=None,
+                language="en",
+                satellite_id=None,
+                agent_id=None,
+            ),
+        )
+
+    assert captured_texts[0] == "What time is it?"
+
+
+async def test_process_with_existing_local_ha_brief_truncates_speech(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """LOCAL_HA + brief mode truncates a multi-sentence speech_text at the first sentence."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [],
+            CONF_RESPONSE_VERBOSITY: VERBOSITY_BRIEF,
+        },
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+    agent_cfg = {
+        CONF_ENTITY_ID: "conversation.homeassistant",
+        CONF_AGENT_NAME: "Home Assistant",
+        CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA,
+    }
+
+    multi_sentence = "I have turned on the kitchen lights. The brightness is now at 100%."
+    service_response = {"response": {"speech": {"plain": {"speech": multi_sentence}}}}
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = hass.config.language
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(return_value=service_response)
+    agent.hass = mock_hass
+
+    with patch.dict("sys.modules", {_CHAT_LOG_PATCH: _make_chat_log_mock()}):
+        result = await agent._process_with_existing(
+            agent_cfg,
+            ConversationInput(
+                text="Turn on kitchen lights",
+                context=Context(),
+                conversation_id=None,
+                device_id=None,
+                language="en",
+                satellite_id=None,
+                agent_id=None,
+            ),
+        )
+
+    assert result is not None
+    speech = result.response.speech["plain"]["speech"]
+    assert speech == "I have turned on the kitchen lights."
+
+
+async def test_process_with_existing_local_ha_brief_leaves_short_response(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """LOCAL_HA + brief mode leaves a single-sentence response unchanged."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [],
+            CONF_RESPONSE_VERBOSITY: VERBOSITY_BRIEF,
+        },
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+    agent_cfg = {
+        CONF_ENTITY_ID: "conversation.homeassistant",
+        CONF_AGENT_NAME: "Home Assistant",
+        CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA,
+    }
+
+    single_sentence = "Done."
+    service_response = {"response": {"speech": {"plain": {"speech": single_sentence}}}}
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = hass.config.language
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(return_value=service_response)
+    agent.hass = mock_hass
+
+    with patch.dict("sys.modules", {_CHAT_LOG_PATCH: _make_chat_log_mock()}):
+        result = await agent._process_with_existing(
+            agent_cfg,
+            ConversationInput(
+                text="Turn on lights",
+                context=Context(),
+                conversation_id=None,
+                device_id=None,
+                language="en",
+                satellite_id=None,
+                agent_id=None,
+            ),
+        )
+
+    assert result is not None
+    assert result.response.speech["plain"]["speech"] == "Done."
+
+
+async def test_process_with_existing_local_ha_normal_does_not_truncate(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """LOCAL_HA + normal verbosity leaves multi-sentence speech_text unchanged."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [],
+            CONF_RESPONSE_VERBOSITY: VERBOSITY_NORMAL,
+        },
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+    agent_cfg = {
+        CONF_ENTITY_ID: "conversation.homeassistant",
+        CONF_AGENT_NAME: "Home Assistant",
+        CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA,
+    }
+
+    multi_sentence = "I have turned on the kitchen lights. The brightness is now at 100%."
+    service_response = {"response": {"speech": {"plain": {"speech": multi_sentence}}}}
+
+    mock_hass = MagicMock()
+    mock_hass.config.language = hass.config.language
+    mock_hass.states.get.return_value = MagicMock()
+    mock_hass.services.async_call = AsyncMock(return_value=service_response)
+    agent.hass = mock_hass
+
+    with patch.dict("sys.modules", {_CHAT_LOG_PATCH: _make_chat_log_mock()}):
+        result = await agent._process_with_existing(
+            agent_cfg,
+            ConversationInput(
+                text="Turn on kitchen lights",
+                context=Context(),
+                conversation_id=None,
+                device_id=None,
+                language="en",
+                satellite_id=None,
+                agent_id=None,
+            ),
+        )
+
+    assert result is not None
+    speech = result.response.speech["plain"]["speech"]
+    assert speech == multi_sentence
+
+
+# ---------------------------------------------------------------------------
+# Feature 2 — Compound Command Splitting: _split_compound_input
+# ---------------------------------------------------------------------------
+
+
+def test_split_compound_input_splits_on_and() -> None:
+    """_split_compound_input splits 'A and B' into two fragments."""
+    result = _split_compound_input("turn off the lights and set the thermostat to 22")
+    assert result == ["turn off the lights", "set the thermostat to 22"]
+
+
+def test_split_compound_input_splits_on_then() -> None:
+    """_split_compound_input splits on 'then'."""
+    result = _split_compound_input("turn off the lights then lock the door")
+    assert result == ["turn off the lights", "lock the door"]
+
+
+def test_split_compound_input_splits_on_also() -> None:
+    """_split_compound_input splits on 'also'."""
+    result = _split_compound_input("pause the music also dim the lights")
+    assert result == ["pause the music", "dim the lights"]
+
+
+def test_split_compound_input_splits_on_after_that() -> None:
+    """_split_compound_input splits on 'after that'."""
+    result = _split_compound_input("turn on the fan after that close the blinds")
+    assert result == ["turn on the fan", "close the blinds"]
+
+
+def test_split_compound_input_splits_on_and_then_as_single_point() -> None:
+    """'and then' counts as one split point, producing exactly two fragments."""
+    result = _split_compound_input("turn off the lights and then lock the door")
+    assert result == ["turn off the lights", "lock the door"]
+
+
+def test_split_compound_input_no_conjunction_returns_original() -> None:
+    """_split_compound_input returns [text] unchanged when no conjunction is present."""
+    text = "turn off the lights"
+    result = _split_compound_input(text)
+    assert result == [text]
+
+
+def test_split_compound_input_case_insensitive() -> None:
+    """_split_compound_input is case-insensitive for conjunctions."""
+    result = _split_compound_input("turn off the lights AND set the thermostat to 22")
+    assert result == ["turn off the lights", "set the thermostat to 22"]
+
+
+def test_split_compound_input_caps_at_max_fragments() -> None:
+    """_split_compound_input returns at most MAX_COMPOUND_FRAGMENTS fragments."""
+    # Build a command with more conjunctions than the limit allows
+    parts = [f"command {i}" for i in range(MAX_COMPOUND_FRAGMENTS + 2)]
+    text = " and ".join(parts)
+    result = _split_compound_input(text)
+    assert len(result) == MAX_COMPOUND_FRAGMENTS
+    assert result == parts[:MAX_COMPOUND_FRAGMENTS]
+
+
+def test_split_compound_input_three_fragments() -> None:
+    """_split_compound_input handles exactly three fragments (at the limit)."""
+    result = _split_compound_input("close the blinds and lock the door and turn off the lights")
+    assert len(result) == MAX_COMPOUND_FRAGMENTS
+    assert result == ["close the blinds", "lock the door", "turn off the lights"]
+
+
+def test_split_compound_input_strips_whitespace() -> None:
+    """_split_compound_input strips leading/trailing whitespace from fragments."""
+    result = _split_compound_input("  turn off the lights  and  set the thermostat  ")
+    assert result == ["turn off the lights", "set the thermostat"]
+
+
+# ---------------------------------------------------------------------------
+# Feature 2 — Compound Command Splitting: _process_compound_fragments
+# ---------------------------------------------------------------------------
+
+
+async def test_process_compound_fragments_combines_successful_results(
+    hass: HomeAssistant,
+) -> None:
+    """_process_compound_fragments joins fragment responses with the separator."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [], CONF_SPLIT_COMPOUND_COMMANDS: True},
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    call_count = 0
+    responses = ["Lights turned off.", "Thermostat set to 22."]
+
+    async def fake_try_processing(_agents: list, _input: ConversationInput) -> "ConversationResult":
+        nonlocal call_count
+        resp = agent._create_result(responses[call_count])
+        call_count += 1
+        return resp
+
+    with patch.object(agent, "_try_processing_agents", side_effect=fake_try_processing):
+        user_input = _make_input("turn off the lights and set the thermostat to 22")
+        result = await agent._process_compound_fragments(
+            ["turn off the lights", "set the thermostat to 22"],
+            [],
+            user_input,
+        )
+
+    combined = result.response.speech["plain"]["speech"]
+    assert combined == f"Lights turned off.{COMPOUND_COMMAND_SEPARATOR}Thermostat set to 22."
+
+
+async def test_process_compound_fragments_includes_failure_text(
+    hass: HomeAssistant,
+) -> None:
+    """_process_compound_fragments includes the fallback text for failed fragments."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [], CONF_SPLIT_COMPOUND_COMMANDS: True},
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    # Second fragment fails — _try_processing_agents returns a result with error speech
+    call_count = 0
+    fallback = agent._localized("responses", "fallback")
+
+    async def fake_try_processing(_agents: list, _input: ConversationInput) -> "ConversationResult":
+        nonlocal call_count
+        if call_count == 0:
+            call_count += 1
+            return agent._create_result("Lights turned off.")
+        call_count += 1
+        return agent._create_error_result(fallback)
+
+    with patch.object(agent, "_try_processing_agents", side_effect=fake_try_processing):
+        user_input = _make_input("turn off the lights and set the thermostat to 22")
+        result = await agent._process_compound_fragments(
+            ["turn off the lights", "set the thermostat to 22"],
+            [],
+            user_input,
+        )
+
+    combined = result.response.speech["plain"]["speech"]
+    assert combined == f"Lights turned off.{COMPOUND_COMMAND_SEPARATOR}{fallback}"
+
+
+async def test_process_compound_fragments_uses_conversation_id(
+    hass: HomeAssistant,
+) -> None:
+    """_process_compound_fragments preserves the original conversation_id in the combined result."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [], CONF_SPLIT_COMPOUND_COMMANDS: True},
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    async def fake_try_processing(_agents: list, _input: ConversationInput) -> "ConversationResult":
+        return agent._create_result("OK")
+
+    with patch.object(agent, "_try_processing_agents", side_effect=fake_try_processing):
+        user_input = _make_input("A and B", conversation_id="conv-123")
+        result = await agent._process_compound_fragments(["A", "B"], [], user_input)
+
+    assert result.conversation_id == "conv-123"
+
+
+# ---------------------------------------------------------------------------
+# Feature 2 — Compound Command Splitting: _compute_result integration
+# ---------------------------------------------------------------------------
+
+
+async def test_compute_result_compound_disabled_by_default(hass: HomeAssistant) -> None:
+    """Compound splitting is disabled by default; full text is passed as-is."""
+    local_ha_cfg = {
+        "id": "ha-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA,
+        CONF_AGENT_ENABLED: True,
+        CONF_AGENT_NAME: "HA",
+        CONF_PRIORITY: 10,
+        CONF_TIMEOUT: 30,
+        CONF_AGENT_CACHE_ENABLED: False,
+    }
+    # CONF_SPLIT_COMPOUND_COMMANDS not set → defaults to False
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_AGENTS: [local_ha_cfg]})
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    captured_texts: list[str] = []
+
+    async def spy_try_processing(
+        agents: list, user_input: ConversationInput
+    ) -> "ConversationResult":
+        captured_texts.append(user_input.text)
+        return agent._create_result("Done.")
+
+    compound_input = _make_input("turn off the lights and set the thermostat to 22")
+    with patch.object(agent, "_try_processing_agents", side_effect=spy_try_processing):
+        await agent._compute_result(compound_input)
+
+    # Should be called exactly once with the full text (no splitting)
+    assert len(captured_texts) == 1
+    assert captured_texts[0] == "turn off the lights and set the thermostat to 22"
+
+
+async def test_compute_result_compound_splits_when_enabled_with_local_ha(
+    hass: HomeAssistant,
+) -> None:
+    """When split_compound_commands=True with a LOCAL_HA agent, compound input is split."""
+    local_ha_cfg = {
+        "id": "ha-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA,
+        CONF_AGENT_ENABLED: True,
+        CONF_AGENT_NAME: "HA",
+        CONF_PRIORITY: 10,
+        CONF_TIMEOUT: 30,
+        CONF_AGENT_CACHE_ENABLED: False,
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [local_ha_cfg], CONF_SPLIT_COMPOUND_COMMANDS: True},
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    captured_texts: list[str] = []
+    call_count = 0
+    responses = ["Lights turned off.", "Thermostat set."]
+
+    async def spy_try_processing(
+        agents: list, user_input: ConversationInput
+    ) -> "ConversationResult":
+        nonlocal call_count
+        captured_texts.append(user_input.text)
+        resp = agent._create_result(responses[call_count % len(responses)])
+        call_count += 1
+        return resp
+
+    compound_input = _make_input("turn off the lights and set the thermostat to 22")
+    with patch.object(agent, "_try_processing_agents", side_effect=spy_try_processing):
+        result = await agent._compute_result(compound_input)
+
+    # _try_processing_agents should have been called once per fragment
+    assert len(captured_texts) == 2
+    assert captured_texts[0] == "turn off the lights"
+    assert captured_texts[1] == "set the thermostat to 22"
+
+    combined_speech = result.response.speech["plain"]["speech"]
+    expected = f"Lights turned off.{COMPOUND_COMMAND_SEPARATOR}Thermostat set."
+    assert combined_speech == expected
+
+
+async def test_compute_result_compound_no_split_without_local_ha(
+    hass: HomeAssistant,
+) -> None:
+    """Even with split_compound_commands=True, no split occurs if no LOCAL_HA agent."""
+    ollama_cfg = {
+        "id": "ollama-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_OLLAMA,
+        CONF_AGENT_ENABLED: True,
+        CONF_AGENT_NAME: "Ollama",
+        CONF_PRIORITY: 10,
+        CONF_TIMEOUT: 30,
+        CONF_AGENT_CACHE_ENABLED: False,
+        CONF_OLLAMA_URL: "http://localhost:11434",
+        CONF_OLLAMA_MODEL: "llama3",
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [ollama_cfg], CONF_SPLIT_COMPOUND_COMMANDS: True},
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    captured_texts: list[str] = []
+
+    async def spy_try_processing(
+        agents: list, user_input: ConversationInput
+    ) -> "ConversationResult":
+        captured_texts.append(user_input.text)
+        return agent._create_result("Done.")
+
+    compound_input = _make_input("turn off the lights and set the thermostat to 22")
+    with patch.object(agent, "_try_processing_agents", side_effect=spy_try_processing):
+        await agent._compute_result(compound_input)
+
+    # Full text should pass through unchanged
+    assert len(captured_texts) == 1
+    assert captured_texts[0] == "turn off the lights and set the thermostat to 22"
+
+
+async def test_compute_result_compound_no_split_single_fragment(
+    hass: HomeAssistant,
+) -> None:
+    """When split_compound_commands=True but input has no conjunction, no split occurs."""
+    local_ha_cfg = {
+        "id": "ha-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA,
+        CONF_AGENT_ENABLED: True,
+        CONF_AGENT_NAME: "HA",
+        CONF_PRIORITY: 10,
+        CONF_TIMEOUT: 30,
+        CONF_AGENT_CACHE_ENABLED: False,
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [local_ha_cfg], CONF_SPLIT_COMPOUND_COMMANDS: True},
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    captured_texts: list[str] = []
+
+    async def spy_try_processing(
+        agents: list, user_input: ConversationInput
+    ) -> "ConversationResult":
+        captured_texts.append(user_input.text)
+        return agent._create_result("Done.")
+
+    simple_input = _make_input("turn off the lights")
+    with patch.object(agent, "_try_processing_agents", side_effect=spy_try_processing):
+        await agent._compute_result(simple_input)
+
+    # No split — single call with the original text
+    assert len(captured_texts) == 1
+    assert captured_texts[0] == "turn off the lights"
+
+
+async def test_compute_result_compound_caps_at_max_fragments(
+    hass: HomeAssistant,
+) -> None:
+    """Compound splitting caps at MAX_COMPOUND_FRAGMENTS even if more conjunctions exist."""
+    local_ha_cfg = {
+        "id": "ha-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA,
+        CONF_AGENT_ENABLED: True,
+        CONF_AGENT_NAME: "HA",
+        CONF_PRIORITY: 10,
+        CONF_TIMEOUT: 30,
+        CONF_AGENT_CACHE_ENABLED: False,
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [local_ha_cfg], CONF_SPLIT_COMPOUND_COMMANDS: True},
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    captured_texts: list[str] = []
+    call_count = 0
+
+    async def spy_try_processing(
+        agents: list, user_input: ConversationInput
+    ) -> "ConversationResult":
+        nonlocal call_count
+        captured_texts.append(user_input.text)
+        call_count += 1
+        return agent._create_result(f"done {call_count}")
+
+    # Four fragments joined by "and" — only the first MAX_COMPOUND_FRAGMENTS are processed
+    long_input = _make_input("cmd1 and cmd2 and cmd3 and cmd4")
+    with patch.object(agent, "_try_processing_agents", side_effect=spy_try_processing):
+        await agent._compute_result(long_input)
+
+    assert len(captured_texts) == MAX_COMPOUND_FRAGMENTS
+
+
+# ---------------------------------------------------------------------------
+# Feature 11 — _extract_announce_text module helper
+# ---------------------------------------------------------------------------
+
+
+def test_extract_announce_text_empty_returns_none() -> None:
+    """Empty text returns None."""
+    assert _extract_announce_text("") is None
+    assert _extract_announce_text("   ") is None
+
+
+def test_extract_announce_text_regex_match_with_content() -> None:
+    """Trigger phrase followed by content returns the content."""
+    result = _extract_announce_text("announce: dinner is ready")
+    assert result == "dinner is ready"
+
+
+def test_extract_announce_text_regex_match_empty_content_returns_none() -> None:
+    """Trigger phrase with no following content returns None."""
+    result = _extract_announce_text("announce: ")
+    assert result is None
+
+
+def test_extract_announce_text_no_match_no_hint_returns_none() -> None:
+    """Non-trigger phrase without intent_hint returns None."""
+    result = _extract_announce_text("turn on the lights")
+    assert result is None
+
+
+def test_extract_announce_text_intent_hint_announce_returns_full_text() -> None:
+    """When intent_hint='announce' but no trigger phrase, returns the full text."""
+    result = _extract_announce_text("dinner is ready", intent_hint="announce")
+    assert result == "dinner is ready"
+
+
+def test_extract_announce_text_broadcast_trigger() -> None:
+    """'broadcast' trigger phrase is recognised."""
+    result = _extract_announce_text("broadcast the meeting is starting")
+    assert result == "the meeting is starting"
+
+
+def test_extract_announce_text_tell_everyone_trigger() -> None:
+    """'tell everyone' trigger phrase is recognised."""
+    result = _extract_announce_text("tell everyone that pizza has arrived")
+    assert result == "pizza has arrived"
+
+
+# ---------------------------------------------------------------------------
+# Feature 14b — _apply_router_decision with ROUTER_CONFIDENCE_LOW
+# ---------------------------------------------------------------------------
+
+
+def test_apply_router_decision_confidence_low_returns_all_agents_unchanged() -> None:
+    """With confidence=low, Phase 3 flag-based promotion is skipped."""
+    local = {CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA, "id": "local"}
+    ollama = {CONF_AGENT_TYPE: AGENT_TYPE_OLLAMA, "id": "ollama"}
+    # local_ha=False would normally exclude LOCAL_HA, but confidence=low skips
+    decision = RouterDecision(local_ha=False, complexity=50, confidence=ROUTER_CONFIDENCE_LOW)
+    result = _apply_router_decision(decision, [local, ollama])
+    assert result == [local, ollama]
+
+
+# ---------------------------------------------------------------------------
+# Feature 11 — broadcast announcement paths inside _compute_result
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_compute_result_regex_fast_path_triggers_broadcast(
+    hass: HomeAssistant,
+) -> None:
+    """When announce_media_players configured, regex fast path sends broadcast."""
+    local_ha_cfg = {
+        "id": "ha-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA,
+        CONF_AGENT_ENABLED: True,
+        CONF_AGENT_NAME: "HA",
+        CONF_PRIORITY: 10,
+        CONF_TIMEOUT: 30,
+        CONF_AGENT_CACHE_ENABLED: False,
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [local_ha_cfg],
+            CONF_ANNOUNCE_MEDIA_PLAYERS: ["media_player.living_room"],
+        },
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+    expected = agent._create_result("Message sent to 1 speaker.")
+
+    with patch.object(
+        agent, "_send_broadcast_announcement", new_callable=AsyncMock, return_value=expected
+    ) as mock_bcast:
+        result = await agent._compute_result(_make_input("announce: lights off"))
+
+    mock_bcast.assert_awaited_once()
+    assert result is expected
+
+
+@pytest.mark.asyncio
+async def test_compute_result_router_intent_hint_announce_triggers_broadcast(
+    hass: HomeAssistant,
+) -> None:
+    """When router returns intent_hint='announce', broadcast is triggered."""
+    router_cfg = {
+        "id": "router-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_OLLAMA,
+        CONF_AGENT_ENABLED: True,
+        CONF_AGENT_NAME: "Router",
+        CONF_PRIORITY: 99,
+        CONF_TIMEOUT: 5,
+        CONF_AGENT_CACHE_ENABLED: False,
+        CONF_IS_ROUTER: True,
+        CONF_ROUTER_LOG_LEVEL: ROUTER_LOG_LEVEL_NONE,
+        CONF_ROUTER_FALLBACK: ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
+        CONF_ROUTER_CUSTOM_PROMPT: "",
+    }
+    local_ha_cfg = {
+        "id": "ha-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA,
+        CONF_AGENT_ENABLED: True,
+        CONF_AGENT_NAME: "HA",
+        CONF_PRIORITY: 10,
+        CONF_TIMEOUT: 30,
+        CONF_AGENT_CACHE_ENABLED: False,
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [router_cfg, local_ha_cfg],
+            CONF_ANNOUNCE_MEDIA_PLAYERS: ["media_player.kitchen"],
+        },
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+    expected = agent._create_result("Message sent to 1 speaker.")
+
+    announce_decision = RouterDecision(local_ha=False, complexity=10, intent_hint="announce")
+
+    with (
+        patch.object(
+            agent, "_check_with_routers", new_callable=AsyncMock, return_value=announce_decision
+        ),
+        patch.object(
+            agent, "_send_broadcast_announcement", new_callable=AsyncMock, return_value=expected
+        ) as mock_bcast,
+    ):
+        # Use an input without a trigger phrase so the regex fast-path is skipped;
+        # the router intent_hint="announce" path (lines 761-764) must fire instead.
+        result = await agent._compute_result(_make_input("please say hello to the family"))
+
+    mock_bcast.assert_awaited_once()
+    assert result is expected
+
+
+@pytest.mark.asyncio
+async def test_find_tts_entity_returns_first_tts(hass: HomeAssistant) -> None:
+    """_find_tts_entity returns the first entity_id starting with tts."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    with patch(
+        "homeassistant.core.StateMachine.async_entity_ids",
+        return_value=["light.living", "tts.cloud_say", "media_player.kitchen"],
+    ):
+        assert agent._find_tts_entity() == "tts.cloud_say"
+
+
+@pytest.mark.asyncio
+async def test_find_tts_entity_returns_none_when_missing(hass: HomeAssistant) -> None:
+    """_find_tts_entity returns None when no tts entity exists."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    with patch("homeassistant.core.StateMachine.async_entity_ids", return_value=["light.living"]):
+        assert agent._find_tts_entity() is None
+
+
+@pytest.mark.asyncio
+async def test_send_broadcast_announcement_no_tts_entity(hass: HomeAssistant) -> None:
+    """_send_broadcast_announcement returns error when no TTS entity found."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    with patch.object(agent, "_find_tts_entity", return_value=None):
+        result = await agent._send_broadcast_announcement(
+            "hello", ["media_player.kitchen"], _make_input("hello")
+        )
+    assert "No text-to-speech" in result.response.speech["plain"]["speech"]
+
+
+@pytest.mark.asyncio
+async def test_send_broadcast_announcement_fires_event_and_calls_tts(
+    hass: HomeAssistant,
+) -> None:
+    """_send_broadcast_announcement calls tts.speak for each player and fires event."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+    players = ["media_player.living_room", "media_player.kitchen"]
+
+    fired_events: list[tuple] = []
+
+    with (
+        patch.object(agent, "_find_tts_entity", return_value="tts.cloud_say"),
+        patch("homeassistant.core.ServiceRegistry.async_call", new_callable=AsyncMock) as mock_call,
+        patch(
+            "homeassistant.core.EventBus.async_fire",
+            side_effect=lambda et, data=None: fired_events.append((et, data)),
+        ),
+    ):
+        result = await agent._send_broadcast_announcement(
+            "pizza is here", players, _make_input("announce: pizza is here")
+        )
+
+    assert mock_call.call_count == 2
+    assert any(et == EVENT_ANNOUNCE_SENT for et, _ in fired_events)
+    assert "2 speaker" in result.response.speech["plain"]["speech"]
+
+
+@pytest.mark.asyncio
+async def test_send_broadcast_single_player_grammar(hass: HomeAssistant) -> None:
+    """Single player uses singular 'speaker.' text."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    with (
+        patch.object(agent, "_find_tts_entity", return_value="tts.cloud_say"),
+        patch("homeassistant.core.ServiceRegistry.async_call", new_callable=AsyncMock),
+        patch("homeassistant.core.EventBus.async_fire"),
+    ):
+        result = await agent._send_broadcast_announcement(
+            "dinner time", ["media_player.kitchen"], _make_input("announce: dinner time")
+        )
+    speech = result.response.speech["plain"]["speech"]
+    assert "1 speaker." in speech
+
+
+@pytest.mark.asyncio
+async def test_send_broadcast_long_text_truncated_in_event(hass: HomeAssistant) -> None:
+    """Text longer than 50 chars is truncated with ellipsis in the event."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    event_data: list[dict] = []
+    long_text = "a" * 60
+
+    with (
+        patch.object(agent, "_find_tts_entity", return_value="tts.cloud_say"),
+        patch("homeassistant.core.ServiceRegistry.async_call", new_callable=AsyncMock),
+        patch(
+            "homeassistant.core.EventBus.async_fire",
+            side_effect=lambda et, data=None: event_data.append(data or {}),
+        ),
+    ):
+        await agent._send_broadcast_announcement(
+            long_text, ["media_player.kitchen"], _make_input("announce something")
+        )
+    assert event_data[0]["text_preview"].endswith("\u2026")
+
+
+# ---------------------------------------------------------------------------
+# Feature 4 — _check_pending_response: high-stakes pending path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_confirmation_check_hs_pending_resolved(
+    hass: HomeAssistant,
+) -> None:
+    """When high-stakes pending exists and user says 'yes', returns original result."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    original = agent._create_result("lights locked")
+    await agent._high_stakes_cache.store_pending("conv-hs", original, [])
+
+    result = await agent._handle_confirmation_check(_make_input("yes", conversation_id="conv-hs"))
+    assert result is not None
+    assert result.response.speech["plain"]["speech"] == "lights locked"
+
+
+@pytest.mark.asyncio
+async def test_handle_confirmation_check_hs_pending_fallthrough_on_unrecognised(
+    hass: HomeAssistant,
+) -> None:
+    """Unrecognised response with hs pending returns None (fall-through)."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    original = agent._create_result("door unlocked")
+    await agent._high_stakes_cache.store_pending("conv-hs2", original, [])
+
+    result = await agent._handle_confirmation_check(
+        _make_input("maybe", conversation_id="conv-hs2")
+    )
+    # "maybe" is not yes/no, so high-stakes returns None to fall through
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Feature 4 — _resolve_high_stakes_confirmation: all branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_high_stakes_passphrase_correct(hass: HomeAssistant) -> None:
+    """Correct passphrase returns the original result."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [],
+            CONF_HIGH_STAKES_SECRET_ENABLED: True,
+            CONF_HIGH_STAKES_SECRET: "opensesame",
+        },
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    original = agent._create_result("door unlocked")
+    hs_pending = (original, [])
+
+    result = await agent._resolve_high_stakes_confirmation(
+        _make_input("opensesame", conversation_id="c1"), hs_pending
+    )
+    assert result is not None
+    assert result.response.speech["plain"]["speech"] == "door unlocked"
+
+
+@pytest.mark.asyncio
+async def test_resolve_high_stakes_passphrase_wrong(hass: HomeAssistant) -> None:
+    """Wrong passphrase returns cancelled error result."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [],
+            CONF_HIGH_STAKES_SECRET_ENABLED: True,
+            CONF_HIGH_STAKES_SECRET: "opensesame",
+        },
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    original = agent._create_result("door unlocked")
+    hs_pending = (original, [])
+
+    result = await agent._resolve_high_stakes_confirmation(
+        _make_input("wrongphrase", conversation_id="c2"), hs_pending
+    )
+    assert result is not None
+    speech = result.response.speech["plain"]["speech"]
+    assert "cancel" in speech.lower() or "action" in speech.lower()
+
+
+@pytest.mark.asyncio
+async def test_resolve_high_stakes_yes_confirms(hass: HomeAssistant) -> None:
+    """'yes' in simple mode returns the original result."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [], CONF_HIGH_STAKES_SECRET_ENABLED: False},
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    original = agent._create_result("door locked")
+    hs_pending = (original, [])
+
+    result = await agent._resolve_high_stakes_confirmation(
+        _make_input("yes", conversation_id="c3"), hs_pending
+    )
+    assert result is not None
+    assert result.response.speech["plain"]["speech"] == "door locked"
+
+
+@pytest.mark.asyncio
+async def test_resolve_high_stakes_no_cancels(hass: HomeAssistant) -> None:
+    """'no' in simple mode returns a cancellation error."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [], CONF_HIGH_STAKES_SECRET_ENABLED: False},
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    original = agent._create_result("door locked")
+    hs_pending = (original, [])
+
+    result = await agent._resolve_high_stakes_confirmation(
+        _make_input("no", conversation_id="c4"), hs_pending
+    )
+    assert result is not None
+    speech = result.response.speech["plain"]["speech"]
+    assert "cancel" in speech.lower() or "action" in speech.lower()
+
+
+@pytest.mark.asyncio
+async def test_resolve_high_stakes_unrecognised_falls_through(
+    hass: HomeAssistant,
+) -> None:
+    """Unrecognised input in simple mode returns None to fall through."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [], CONF_HIGH_STAKES_SECRET_ENABLED: False},
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    original = agent._create_result("door locked")
+    hs_pending = (original, [])
+
+    result = await agent._resolve_high_stakes_confirmation(
+        _make_input("maybe", conversation_id="c5"), hs_pending
+    )
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Feature 4 — _check_high_stakes: enabled paths
+# ---------------------------------------------------------------------------
+
+
+def _make_local_ha_cfg(agent_id: str = "ha-1") -> dict:
+    return {
+        "id": agent_id,
+        CONF_AGENT_TYPE: AGENT_TYPE_LOCAL_HA,
+        CONF_AGENT_ENABLED: True,
+        CONF_AGENT_NAME: "HA",
+        CONF_PRIORITY: 10,
+        CONF_TIMEOUT: 30,
+        CONF_AGENT_CACHE_ENABLED: False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_check_high_stakes_disabled_returns_none(hass: HomeAssistant) -> None:
+    """When high_stakes_enabled=False (default), returns None."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [_make_local_ha_cfg()], CONF_HIGH_STAKES_ENABLED: False},
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    result_obj = agent._create_result("I've unlocked the front door")
+    ret = await agent._check_high_stakes(
+        _make_local_ha_cfg(), result_obj, _make_input("unlock the front door")
+    )
+    assert ret is None
+
+
+@pytest.mark.asyncio
+async def test_check_high_stakes_non_local_ha_returns_none(hass: HomeAssistant) -> None:
+    """When agent is not LOCAL_HA, returns None even if enabled."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AGENTS: [], CONF_HIGH_STAKES_ENABLED: True},
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    ollama_cfg = _make_ollama_agent()
+    result_obj = agent._create_result("door unlocked")
+    ret = await agent._check_high_stakes(ollama_cfg, result_obj, _make_input("unlock the door"))
+    assert ret is None
+
+
+@pytest.mark.asyncio
+async def test_check_high_stakes_domain_match_returns_confirm_prompt(
+    hass: HomeAssistant,
+) -> None:
+    """Matching a high-stakes domain returns the confirmation prompt and fires event."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [_make_local_ha_cfg()],
+            CONF_HIGH_STAKES_ENABLED: True,
+            CONF_HIGH_STAKES_DOMAINS: ["lock"],
+        },
+    )
+    entry.add_to_hass(hass)
+
+    mock_hass = MagicMock()
+    fired: list[str] = []
+    mock_hass.bus.async_fire.side_effect = lambda et, data=None: fired.append(et)
+    agent = NeuralBridgeAgent(mock_hass, entry)
+
+    result_obj = agent._create_result("I've unlocked the front lock")
+    ret = await agent._check_high_stakes(
+        _make_local_ha_cfg(),
+        result_obj,
+        _make_input("unlock the front lock", conversation_id="hs-test"),
+    )
+    assert ret is not None
+    speech = ret.response.speech["plain"]["speech"]
+    assert "confirm" in speech.lower() or "sure" in speech.lower() or "yes" in speech.lower()
+    assert EVENT_HIGH_STAKES_TRIGGERED in fired
+
+
+@pytest.mark.asyncio
+async def test_check_high_stakes_secret_enabled_returns_passphrase_prompt(
+    hass: HomeAssistant,
+) -> None:
+    """When secret is enabled, _check_high_stakes returns the passphrase prompt instead."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [_make_local_ha_cfg()],
+            CONF_HIGH_STAKES_ENABLED: True,
+            CONF_HIGH_STAKES_DOMAINS: ["lock"],
+            CONF_HIGH_STAKES_SECRET_ENABLED: True,
+            CONF_HIGH_STAKES_SECRET: "sesame",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    mock_hass = MagicMock()
+    fired: list[str] = []
+    mock_hass.bus.async_fire.side_effect = lambda et, data=None: fired.append(et)
+    agent = NeuralBridgeAgent(mock_hass, entry)
+
+    result_obj = agent._create_result("I've unlocked the front lock")
+    ret = await agent._check_high_stakes(
+        _make_local_ha_cfg(),
+        result_obj,
+        _make_input("unlock the front lock", conversation_id="hs-secret"),
+    )
+    assert ret is not None
+    speech = ret.response.speech["plain"]["speech"]
+    # The passphrase prompt should differ from a plain yes/no confirmation
+    assert speech != ""
+    assert EVENT_HIGH_STAKES_TRIGGERED in fired
+
+
+@pytest.mark.asyncio
+async def test_check_high_stakes_no_domain_match_returns_none(
+    hass: HomeAssistant,
+) -> None:
+    """When speech does not match any high-stakes domain, returns None."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [_make_local_ha_cfg()],
+            CONF_HIGH_STAKES_ENABLED: True,
+            CONF_HIGH_STAKES_DOMAINS: ["lock", "alarm"],
+        },
+    )
+    entry.add_to_hass(hass)
+    agent = NeuralBridgeAgent(hass, entry)
+
+    result_obj = agent._create_result("I've turned on the light")
+    ret = await agent._check_high_stakes(
+        _make_local_ha_cfg(), result_obj, _make_input("turn on the light")
+    )
+    assert ret is None
+
+
+@pytest.mark.asyncio
+async def test_handle_successful_result_with_high_stakes_match(
+    hass: HomeAssistant,
+) -> None:
+    """_handle_successful_result returns confirmation prompt when high-stakes matches."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_AGENTS: [_make_local_ha_cfg()],
+            CONF_HIGH_STAKES_ENABLED: True,
+            CONF_HIGH_STAKES_DOMAINS: ["lock"],
+        },
+    )
+    entry.add_to_hass(hass)
+
+    mock_hass = MagicMock()
+    agent = NeuralBridgeAgent(mock_hass, entry)
+
+    local_cfg = _make_local_ha_cfg()
+    result_obj = agent._create_result("I've locked the front lock")
+
+    with patch.object(agent, "_check_guardrails", new_callable=AsyncMock, return_value=None):
+        ret = await agent._handle_successful_result(
+            local_cfg,
+            result_obj,
+            _make_input("lock the door", conversation_id="hs-flow"),
+            agent_id="local_ha",
+            elapsed_ms=42.0,
+        )
+
+    assert ret is not None
+    speech = ret.response.speech["plain"]["speech"]
+    assert "confirm" in speech.lower() or "sure" in speech.lower() or "yes" in speech.lower()

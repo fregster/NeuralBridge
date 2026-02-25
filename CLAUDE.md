@@ -9,6 +9,12 @@ For detailed project context, technical requirements, and coding standards, refe
 
 **Project**: NeuralBridge - A priority-based AI routing service for Home Assistant's Assist pipeline
 
+> **PYTHON 3.13 IS THE ONLY SUPPORTED RUNTIME — NO EXCEPTIONS**
+> Minimum HA version is 2026.1, which requires Python 3.13+. Python 3.12 has an
+> incompatible `homeassistant` package (e.g. `ConversationInput` lacks `satellite_id`).
+> **ALWAYS** run tests via `make check` or `.venv/bin/python -m pytest`.
+> **NEVER** use the system `pytest`, `python3`, `ruff`, `black`, or `mypy` directly.
+
 **Critical Principles** (In Order of Importance):
 1. **Security First** - Security > Performance (always)
 2. **Privacy Default** - Privacy > Convenience (always)
@@ -56,12 +62,14 @@ For detailed project context, technical requirements, and coding standards, refe
 
 ## Pre-Commit Checklist
 
-Before ANY code commit, **run in this order**:
-- [ ] Ruff passes (`ruff check custom_components tests`) — **run BEFORE tests**
-- [ ] Black formatted (`black .`)
-- [ ] Mypy passes (`mypy custom_components`)
-- [ ] All tests pass (`pytest`)
-- [ ] 100% test coverage (`pytest --cov --cov-fail-under=100`)
+Before ANY code commit, **run `make check`** (this is the single source of truth):
+- [ ] `make check` passes completely — that's it, one command
+
+If you need to run steps individually (all via `.venv/bin/python -m <tool>` or `make <target>`):
+- [ ] Ruff passes (`make lint`) — **run BEFORE tests**
+- [ ] Black formatted (`make format`)
+- [ ] Mypy passes (`make type`)
+- [ ] All tests pass with 100% coverage (`make test`)
 - [ ] No security issues
 - [ ] Line length ≤ 115
 - [ ] Function complexity ≤ 15

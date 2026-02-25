@@ -105,6 +105,27 @@ GUARD_RAIL_CATEGORY_INAPPROPRIATE: Final = "inappropriate"
 # Guard rail event
 EVENT_GUARD_RAIL_TRIGGERED: Final = f"{DOMAIN}_guard_rail_triggered"
 
+# Broadcast announcement (Feature 11 — Announce Media Players)
+CONF_ANNOUNCE_MEDIA_PLAYERS: Final = "announce_media_players"
+DEFAULT_ANNOUNCE_MEDIA_PLAYERS: Final[list[str]] = []
+EVENT_ANNOUNCE_SENT: Final = f"{DOMAIN}_announce_sent"
+
+# High-stakes action confirmation (Feature 4)
+CONF_HIGH_STAKES_ENABLED: Final = "high_stakes_enabled"
+CONF_HIGH_STAKES_DOMAINS: Final = "high_stakes_domains"
+CONF_HIGH_STAKES_SECRET_ENABLED: Final = "high_stakes_secret_enabled"  # noqa: S105
+CONF_HIGH_STAKES_SECRET: Final = "high_stakes_secret"  # noqa: S105
+DEFAULT_HIGH_STAKES_ENABLED: Final = False
+DEFAULT_HIGH_STAKES_DOMAINS: Final[list[str]] = [
+    "lock",
+    "alarm_control_panel",
+    "cover",
+    "garage_door",
+]
+DEFAULT_HIGH_STAKES_SECRET_ENABLED: Final = False
+DEFAULT_HIGH_STAKES_SECRET: Final = ""
+EVENT_HIGH_STAKES_TRIGGERED: Final = f"{DOMAIN}_high_stakes_triggered"
+
 # Circuit breaker
 DEFAULT_CIRCUIT_BREAKER_THRESHOLD: Final = 3
 DEFAULT_CIRCUIT_BREAKER_COOLDOWN: Final = 60  # seconds
@@ -139,6 +160,12 @@ CONF_RESPONSE_CACHE_TTL: Final = "response_cache_ttl"
 DEFAULT_RESPONSE_CACHE_ENABLED: Final = True
 DEFAULT_RESPONSE_CACHE_TTL: Final = 300  # seconds
 
+# Semantic/normalised cache keying (Feature 9)
+CONF_RESPONSE_CACHE_SEMANTIC: Final = "response_cache_semantic"
+DEFAULT_RESPONSE_CACHE_SEMANTIC: Final = False
+CONF_SEMANTIC_CACHE_TTL: Final = "semantic_cache_ttl"
+DEFAULT_SEMANTIC_CACHE_TTL: Final = 60  # seconds (shorter due to fuzzier key)
+
 # Response cache (per-agent override)
 CONF_AGENT_CACHE_ENABLED: Final = "agent_cache_enabled"
 DEFAULT_AGENT_CACHE_ENABLED: Final = True
@@ -164,6 +191,13 @@ DEFAULT_ENABLE_HOME_CONTROL: Final = True
 CONF_AGENT_ASSIST_MODE: Final = "assist_mode"
 DEFAULT_AGENT_ASSIST_MODE: Final = False  # Defaulted to True for LOCAL_HA at config time
 
+# Per-agent complexity filter (Feature 7 — Multi-User / Speaker Profile Routing)
+# Router assigns a complexity score 1-100; agents can declare a range they handle.
+CONF_AGENT_MIN_COMPLEXITY: Final = "agent_min_complexity"
+CONF_AGENT_MAX_COMPLEXITY: Final = "agent_max_complexity"
+DEFAULT_AGENT_MIN_COMPLEXITY: Final = 1
+DEFAULT_AGENT_MAX_COMPLEXITY: Final = 100
+
 # Retry / exponential back-off
 CONF_MAX_RETRIES: Final = "max_retries"
 DEFAULT_MAX_RETRIES: Final = 2
@@ -171,8 +205,10 @@ CONF_RETRY_BASE_DELAY: Final = "retry_base_delay"
 DEFAULT_RETRY_BASE_DELAY: Final = 1.0  # seconds
 
 # Router agent JSON classification prompt
-# Sent to is_router Ollama agents to classify and route incoming requests.
-# Returns a JSON object with local_ha, web_search, and complexity fields.
+# Sent to router agents (is_router=True, or priority == 0) to classify and route
+# incoming requests. Supports Ollama backends and HA conversation agents.
+# Returns a JSON object with local_ha, web_search, complexity, intent_hint, and
+# confidence fields.
 # Use .replace("{user_text}", user_text) when building the final prompt.
 # Edit custom_components/neuralbridge/prompts/router_classification.txt to customise.
 ROUTER_CLASSIFICATION_PROMPT: Final = load_prompt(
@@ -180,7 +216,7 @@ ROUTER_CLASSIFICATION_PROMPT: Final = load_prompt(
     fallback=(
         "You are a smart home request classifier.\n"
         "Analyse the user message and respond with ONLY a valid JSON object — no other text.\n"
-        "The JSON must contain exactly these four fields:\n"
+        "The JSON must contain exactly these five fields:\n"
         '  "local_ha": boolean — true if this is a home automation or device control request, '
         "false for general questions or knowledge queries.\n"
         '  "web_search": boolean — true if the answer requires real-time or current information '
@@ -190,16 +226,19 @@ ROUTER_CLASSIFICATION_PROMPT: Final = load_prompt(
         "Use 0 to signal that the request should be BLOCKED.\n"
         '  "intent_hint": string or null — "timer", "reminder", "todo", '
         '"shopping_list", "announce", or null.\n'
+        '  "confidence": "high" or "low" — your confidence in the above classification. '
+        'Use "low" when the request is ambiguous or unclear.\n'
         "Respond with complexity 0 ONLY for harmful, illegal, abusive, or clearly "
         "inappropriate requests.\n"
         "When web_search is true, local_ha should be false.\n"
         "Examples:\n"
-        '  Home control: {"local_ha": true, "web_search": false, "complexity": 5, "intent_hint": null}\n'
-        '  Timer: {"local_ha": true, "web_search": false, "complexity": 5, "intent_hint": "timer"}\n'
-        '  To-do: {"local_ha": true, "web_search": false, "complexity": 5, "intent_hint": "todo"}\n'
-        '  General knowledge: {"local_ha": false, "web_search": false, "complexity": 30, "intent_hint": null}\n'
-        '  Current news/data: {"local_ha": false, "web_search": true, "complexity": 40, "intent_hint": null}\n'
-        '  Block: {"local_ha": false, "web_search": false, "complexity": 0, "intent_hint": null}\n\n'
+        '  Home control: {"local_ha": true, "web_search": false, "complexity": 5, "intent_hint": null, "confidence": "high"}\n'
+        '  Timer: {"local_ha": true, "web_search": false, "complexity": 5, "intent_hint": "timer", "confidence": "high"}\n'
+        '  To-do: {"local_ha": true, "web_search": false, "complexity": 5, "intent_hint": "todo", "confidence": "high"}\n'
+        '  General knowledge: {"local_ha": false, "web_search": false, "complexity": 30, "intent_hint": null, "confidence": "high"}\n'
+        '  Current news/data: {"local_ha": false, "web_search": true, "complexity": 40, "intent_hint": null, "confidence": "high"}\n'
+        '  Ambiguous: {"local_ha": false, "web_search": false, "complexity": 50, "intent_hint": null, "confidence": "low"}\n'
+        '  Block: {"local_ha": false, "web_search": false, "complexity": 0, "intent_hint": null, "confidence": "high"}\n\n'
         "User message: {user_text}"
     ),
 )
@@ -270,6 +309,29 @@ DEFAULT_SEARCH_TIMEOUT: Final = 15  # seconds — network round-trip is slower t
 # Router response key for web search routing
 ROUTER_RESPONSE_KEY_WEB_SEARCH: Final = "web_search"
 
+# Feature 14b — Router confidence field
+ROUTER_RESPONSE_KEY_CONFIDENCE: Final = "confidence"
+ROUTER_CONFIDENCE_HIGH: Final = "high"
+ROUTER_CONFIDENCE_LOW: Final = "low"
+VALID_ROUTER_CONFIDENCE_VALUES: Final = frozenset({"high", "low"})
+
 # Feature 10 — Language passthrough: force Ollama to respond in the user's language
 CONF_FORCE_RESPONSE_LANGUAGE: Final = "force_response_language"
 DEFAULT_FORCE_RESPONSE_LANGUAGE: Final = True
+
+# Feature 2 — Compound Command Splitting
+CONF_SPLIT_COMPOUND_COMMANDS: Final = "split_compound_commands"
+DEFAULT_SPLIT_COMPOUND_COMMANDS: Final = False
+MAX_COMPOUND_FRAGMENTS: Final = 3
+COMPOUND_COMMAND_SEPARATOR: Final = " · "
+
+# Feature 6 — Response Verbosity
+CONF_RESPONSE_VERBOSITY: Final = "response_verbosity"
+VERBOSITY_BRIEF: Final = "brief"
+VERBOSITY_NORMAL: Final = "normal"
+VERBOSITY_VERBOSE: Final = "verbose"
+DEFAULT_RESPONSE_VERBOSITY: Final = VERBOSITY_NORMAL
+VERBOSITY_INSTRUCTION_BRIEF: Final = (
+    "Respond with the shortest possible acknowledgement — one to five words."
+)
+VERBOSITY_INSTRUCTION_VERBOSE: Final = "Give detailed, explanatory responses."

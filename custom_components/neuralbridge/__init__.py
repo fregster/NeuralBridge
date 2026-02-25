@@ -16,7 +16,9 @@ if TYPE_CHECKING:
 from .circuit_breaker import CircuitBreaker
 from .const import (
     CONF_RESPONSE_CACHE_ENABLED,
+    CONF_RESPONSE_CACHE_SEMANTIC,
     CONF_RESPONSE_CACHE_TTL,
+    CONF_SEMANTIC_CACHE_TTL,
     DATA_CIRCUIT_BREAKER,
     DATA_ENTITY_CONTEXT,
     DATA_RESPONSE_CACHE,
@@ -25,7 +27,9 @@ from .const import (
     DEFAULT_CIRCUIT_BREAKER_COOLDOWN,
     DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
     DEFAULT_RESPONSE_CACHE_ENABLED,
+    DEFAULT_RESPONSE_CACHE_SEMANTIC,
     DEFAULT_RESPONSE_CACHE_TTL,
+    DEFAULT_SEMANTIC_CACHE_TTL,
     DOMAIN,
     SERVICE_CLEAR_CONVERSATION,
 )
@@ -53,7 +57,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     merged_config = {**entry.data, **entry.options}
     cache_enabled = merged_config.get(CONF_RESPONSE_CACHE_ENABLED, DEFAULT_RESPONSE_CACHE_ENABLED)
     cache_ttl = merged_config.get(CONF_RESPONSE_CACHE_TTL, DEFAULT_RESPONSE_CACHE_TTL)
-    response_cache = ResponseCache(enabled=cache_enabled, ttl_seconds=cache_ttl)
+    cache_semantic = merged_config.get(
+        CONF_RESPONSE_CACHE_SEMANTIC, DEFAULT_RESPONSE_CACHE_SEMANTIC
+    )
+    cache_semantic_ttl = merged_config.get(CONF_SEMANTIC_CACHE_TTL, DEFAULT_SEMANTIC_CACHE_TTL)
+    response_cache = ResponseCache(
+        enabled=cache_enabled,
+        ttl_seconds=cache_ttl,
+        semantic=cache_semantic,
+        semantic_ttl_seconds=cache_semantic_ttl,
+    )
     session_memory = SessionMemory()
     circuit_breaker = CircuitBreaker(
         failure_threshold=DEFAULT_CIRCUIT_BREAKER_THRESHOLD,

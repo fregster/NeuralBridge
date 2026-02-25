@@ -252,7 +252,7 @@ def calculate_priority(
 ) -> int:
     """Calculate agent priority from configuration.
 
-    Priority 0 indicates a router/filter agent. Priority 1-100
+    Priority 0 (or `is_router=True`) indicates a router/filter agent. Priority 1-100
     indicates processing agents, with lower values having higher
     priority.
 

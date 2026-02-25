@@ -59,6 +59,10 @@ placeholders:
     Geben Sie benutzerdefinierte Regex-Muster (eines pro Zeile) ein, um übereinstimmende Inhalte
     zu blockieren. Muster werden mit den integrierten Standards zusammengeführt. Leer lassen,
     um nur die Standards zu verwenden.
+  high_stakes_info: >-
+    Wenn aktiviert, werden Aktionen auf den ausgewählten HA-Domänen abgefangen und der Benutzer
+    wird gebeten, die Aktion zu bestätigen, bevor sie ausgeführt wird. Optional kann ein
+    Passwort für höhere Sicherheit verlangt werden.
 
 # ── Guard rail rule category labels ───────────────────────────────────────────
 guard_rail_categories:
@@ -96,6 +100,11 @@ responses:
   guard_rail_notify_ask: >-
     Diese Antwort könnte schädliche oder sensible Informationen enthalten.
     Möchten Sie fortfahren?
+  announce_confirmation: "Ansage an {count} Lautsprecher gesendet."
+  announce_no_tts: "Es ist keine Text-zu-Sprache (TTS)-Integration konfiguriert. Bitte eine TTS-Integration hinzufügen."
+  high_stakes_confirmation: "Bist du sicher? Diese Aktion kann nicht rückgängig gemacht werden. Bitte mit 'ja' oder 'nein' bestätigen."
+  high_stakes_passphrase_prompt: "Diese Aktion erfordert eine Bestätigung. Bitte sage dein Passwort, um fortzufahren."
+  high_stakes_cancelled: "Aktion abgebrochen."
 
 # ── Language settings step ────────────────────────────────────────────────────
 language_settings:

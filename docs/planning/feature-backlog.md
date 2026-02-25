@@ -1,61 +1,31 @@
 # NeuralBridge Feature Backlog
 
 > Features identified from smart home voice interaction analysis (Alexa parity and beyond).
-> Features 1, 3, and 5 are already implemented (see git history).
+> Features 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13 are implemented (see git history).
+> Feature 14 is partially implemented (14b: `confidence` field in `RouterDecision`;
+> 14c: agent-type manifest passed to router prompt).
 > Features below are planned but not yet implemented.
 
 ---
 
-## Feature 2 — Compound Command Splitting
+## Already Implemented (reference summary)
 
-**Problem:** "Turn off the lights *and* set the thermostat to 22" fails as a single sentence when LOCAL_HA cannot match the composite intent.
-
-**Plan:**
-1. Add a `_split_compound_input(text)` module-level helper — detects conjunctions ("and", "then", "also", "after that") and splits on them.
-2. Only activate when LOCAL_HA agents are in the pipeline (no point splitting cloud LLM queries).
-3. For each fragment, run the full pipeline independently and collect results.
-4. Combine responses: join speech text with " · " (or a configurable separator).
-5. If any fragment fails, include its failure text in the combined response rather than silently dropping it.
-6. Add config toggle `CONF_SPLIT_COMPOUND_COMMANDS` (default `false` — opt-in to avoid breaking existing setups).
-7. **Constraint:** max 3 fragments to prevent abuse/resource exhaustion.
-
-**Files affected:** `conversation.py`, `const.py`, `config_flow.py`, `strings.json`, language YAMLs.
-
----
-
-## Feature 4 — High-Stakes Action Confirmation
-
-**Problem:** Destructive HA actions (unlock door, disarm alarm, open garage) execute immediately with no second check — against the project's security-first principle.
-
-**Plan:**
-1. Add `CONF_HIGH_STAKES_DOMAINS` setting — user-configurable list of HA domains requiring confirmation. Defaults: `lock`, `alarm_control_panel`, `cover`, `garage_door`.
-2. Add `CONF_HIGH_STAKES_ENABLED` toggle (default `false`).
-3. In the LOCAL_HA processing path, after receiving an `action_done` response, inspect the intent response's targeted entity domain against the configured list.
-4. If matched: store the pending result in a new `_high_stakes_cache` (same pattern as `_guard_rail_cache`) and return a confirmation prompt ("Are you sure you want to unlock the front door?").
-5. On the next turn, detect "yes"/"no" in `_handle_confirmation_check` — already handles guard rail confirms; extend it to also check `_high_stakes_cache`.
-6. Fire HA event `neuralbridge_high_stakes_triggered` so automations can layer on a PIN pad or push notification.
-7. **Privacy:** log domain + entity friendly name only — never the full intent payload.
-
-**Files affected:** `conversation.py`, `const.py`, `config_flow.py`, `strings.json`, language YAMLs.
-
----
-
-## Feature 6 — Response Verbosity / Brief Mode
-
-**Problem:** No equivalent to Alexa's Brief Mode ("OK" vs "I've turned on the kitchen lights").
-
-**Plan:**
-1. Add `CONF_RESPONSE_VERBOSITY` setting with three levels: `brief`, `normal` (default), `verbose`.
-2. Inject the level into the system prompt as a short instruction appended after the base prompt:
-   - `brief`: *"Respond with the shortest possible acknowledgement — one to five words."*
-   - `verbose`: *"Give detailed, explanatory responses."*
-3. For Ollama agents: append the instruction to the system prompt at build time in `_process_with_ollama`.
-4. For existing/cloud agents: prepend a brief modifier to `user_input.text` before the service call (e.g. `"[Brief response] Turn off the lights"`).
-5. For LOCAL_HA: post-process the response — if `brief` and the HA response is already short, leave it; if long, truncate at the first sentence.
-6. Add per-agent override `CONF_AGENT_VERBOSITY` so agents can be configured independently (router = always brief, cloud = always verbose).
-7. Config flow: radio-button selector.
-
-**Files affected:** `conversation.py`, `const.py`, `config_flow.py`, `strings.json`, language YAMLs.
+| Feature | Summary | Key files |
+|---|---|---|
+| 1 | Guard rail content filtering (input + output) | `guard_rail.py`, `conversation.py` |
+| 2 | Compound command splitting (`CONF_SPLIT_COMPOUND_COMMANDS`) | `conversation.py`, `const.py`, `config_flow.py` |
+| 3 | Web search agent with Brave Search API | `web_search_client.py`, `conversation.py` |
+| 4 | High-stakes action confirmation (`CONF_HIGH_STAKES_ENABLED`) | `conversation.py`, `guard_rail.py`, `const.py` |
+| 5 | Session memory + context window management | `session_memory.py`, `ollama_client.py` |
+| 6 | Response verbosity / Brief Mode (`CONF_RESPONSE_VERBOSITY`) | `conversation.py`, `const.py`, `config_flow.py` |
+| 8 | Timer / reminder `intent_hint` routing signal | `conversation.py`, `router_classification.txt`, `statistics.py` |
+| 9 | Semantic (normalised) cache keying | `response_cache.py`, `conversation.py` |
+| 10 | Language passthrough to router + Ollama prompts | `conversation.py` |
+| 11 | Broadcast / announcement via `tts.speak` | `conversation.py`, `config_flow.py` |
+| 12 | Shopping / to-do list routing via `intent_hint` | `entity_context.py`, `router_classification.txt` |
+| 13 | Brave Answers provider + combined provider | `web_search_client.py`, `config_flow.py` |
+| 14b | `confidence` field in `RouterDecision`; skip flag-promotion when `"low"` | `conversation.py`, `const.py` |
+| 14c | Agent-type manifest appended to router prompt | `conversation.py` |
 
 ---
 
@@ -79,129 +49,336 @@
 
 ---
 
-## Feature 8 — Timer / Reminder Awareness
+## Feature 14 — Agent Benchmark Profiling
 
-**Problem:** Timer intents work via LOCAL_HA but there is no dedicated routing signal, so timers risk being routed to cloud agents unnecessarily.
+**Problem:** When a user adds a new Ollama agent (e.g. `qwen3:0.6b` vs `llama3.1:8b`) or an existing integration (cloud LLM), NeuralBridge has no intrinsic understanding of that agent's performance characteristics or capabilities. Priority is set manually and blindly. There is no way for the user to make informed tuning decisions ("which of my agents is fastest?", "which can follow instructions reliably?") and no data to power future advanced routing modes (e.g. "Route to the fastest capable agent for this complexity score").
 
-**Plan:**
-1. Extend `ROUTER_CLASSIFICATION_PROMPT` with an optional fourth JSON field: `"intent_hint"` — values: `"timer"`, `"reminder"`, `"shopping_list"`, `"announce"`, `"todo"` (and `null` for everything else).
-2. Add `intent_hint: str | None` field to `RouterDecision` (default `None`; backward-compatible — parsers that omit it produce `None`).
-3. In `_apply_router_decision`: when `intent_hint` is `"timer"` or `"reminder"`, force `local_ha = True` and promote LOCAL_HA agents with `assist_mode = True`.
-4. Add timer/reminder examples to the router classification prompt.
-5. Record `intent_hint` in `AgentStatistics` so the sensor shows how many timer requests were handled locally.
-6. **No new agent type** — purely a routing signal improvement.
-
-**Files affected:** `conversation.py`, `const.py`, `prompts/router_classification.txt`, `statistics.py`.
+**Design decisions:**
+- **No static taxonomy** — no hardcoded model name → tier mappings (maintenance burden). All data is discovered at runtime.
+- **Three complementary layers:** (1) metadata discovery from the agent's own API, (2) active benchmark probe suite run asynchronously in the background, (3) passive telemetry continuously enriched from real traffic.
+- **User control first** — results are exposed as sensor attributes for informed tuning decisions. Future routing enhancements are empowered by the stored profile but not wired in this feature.
+- **Ollama cold-start aware** — a configurable warm-up delay before first probe run ensures the model is loaded. After the first successful run the benchmark does NOT re-run automatically — only on explicit toggle or manual service call.
+- **Failed/pending agents always retry** — `re_benchmark_on_save` remains `true` until a successful profile exists, so every config save retries until the agent is reachable.
 
 ---
 
-## Feature 9 — Semantic Cache Keying
+### Layer 1 — Metadata Discovery (free, one-shot at registration)
 
-**Problem:** "What's the weather?" and "How is the weather today?" miss the cache because exact-text keying is used.
+**Ollama agents** — call `/api/show` immediately after agent is saved (no inference, near-instant).  Extracts:
+- `details.family` → `model_family` (e.g. `"qwen3"`, `"llama3"`)
+- `details.parameter_size` → `parameter_count_billions` (e.g. `7.0`, `0.6`)
+- `details.quantization_level` → `quantization` (e.g. `"Q4_K_M"`, `"F16"`)
+- `modelinfo["general.context_length"]` → `context_window` (e.g. `32768`)
+- `details.format` → model format (`"gguf"` etc.)
+- `size` (bytes) from the `/api/show` response root
 
-**Plan:**
-1. Add `CONF_RESPONSE_CACHE_SEMANTIC` toggle (default `false` — opt-in; exact match is safer).
-2. Implement `_normalise_cache_key(text)` in `response_cache.py`:
-   - Lowercase + strip punctuation.
-   - Remove common filler words ("please", "can you", "what's", "what is", "how is", "tell me").
-   - Normalise number words ("twenty two" → "22").
-   - Light suffix stripping (remove `-ing`, `-ed`, `-s` endings on words > 4 chars).
-3. `ResponseCache.get()` and `.store()` accept a `normalise: bool = False` flag.
-4. Store both normalised key and original text; on lookup, return a hit only when normalised forms match (avoids false collisions e.g. "lock door" vs "block door").
-5. Add `CONF_SEMANTIC_CACHE_TTL` (default 60 s — shorter than exact-match TTL since semantic matching is less precise).
-6. **No new pip dependency** — avoid `sentence-transformers` to keep the integration lightweight.
-
-**Files affected:** `response_cache.py`, `conversation.py`, `const.py`, `config_flow.py`, `strings.json`.
+**Existing integration / cloud agents** — no universal introspection API. Store `model_name` from the agent config; all other metadata fields remain `null` until probes populate the performance metrics.
 
 ---
 
-## Feature 10 — Language Auto-Detection / Passthrough
+### Layer 2 — Active Benchmark Probe Suite (async background, ~10-30 s)
 
-**Problem:** `user_input.language` from the HA pipeline is available but NeuralBridge does not consume it to influence agent selection or prompt language.
+Eight probes in chat format. Each probe is time-boxed individually (15 s default). The suite runs as `asyncio.create_task()` — never blocks the event loop or real conversations.
 
-**Plan:**
-1. HA already supplies `user_input.language` (e.g. `"en"`, `"de"`, `"fr-FR"`) — no third-party detection library needed.
-2. In `_process_with_ollama`: when `user_input.language` differs from the integration's configured `CONF_LANGUAGE`, append *"Respond in {lang_name}."* to the system prompt.
-3. In `_classify_with_router`: append `Language: {language}` below the entity context line in the classification prompt to help the model avoid misclassifying non-English home commands.
-4. In `_process_with_existing`: already passes `language` through — no change needed.
-5. Add `CONF_FORCE_RESPONSE_LANGUAGE` toggle (default `true`) — opt-out for users who prefer the agent responds in its trained language.
-6. Area context and entity context injections should preserve any localised HA area/entity names as-is (they are already friendly names from HA state).
+| # | Probe name | Prompt (user turn) | Pass criterion | Dimension |
+|---|---|---|---|---|
+| 1 | `instruction_exact` | `"Reply with only the number 42. Nothing else."` | Response stripped == `"42"` | `instruction_following` |
+| 2 | `instruction_format` | `"List three colours. Use a numbered list."` | Contains `"1."`, `"2."`, `"3."` | `instruction_following` |
+| 3 | `math_basic` | `"What is 17 multiplied by 23? Reply with only the number."` | Contains `"391"` | `reasoning` |
+| 4 | `reasoning_time` | `"A train travels at 60 mph for 90 miles. How many minutes does the journey take? Reply with only the number."` | Contains `"90"` | `reasoning` |
+| 5 | `smart_home_intent` | `"You are a smart home assistant. The user says: 'turn off the kitchen lights'. What HA domain handles this? Reply with one word."` | Contains `"light"` | `smart_home_intent` |
+| 6 | `factual_recall` | `"What is the chemical symbol for gold? Reply with only the symbol."` | Response stripped (case-insensitive) == `"au"` | `factual` |
+| 7 | `multi_turn_memory` | System: no system prompt. Turn 1: `"My secret code is BANANA"`. Turn 2: `"What is my secret code? Reply with only the code."` | Contains `"banana"` (case-insensitive) | `memory` |
+| 8 | `conciseness` | `"In exactly one word, describe the colour of the sky on a clear daytime day."` | Word count of stripped response == 1 AND contains `"blue"` | `instruction_following` |
 
-**Files affected:** `conversation.py`, `const.py`, `config_flow.py`, `strings.json`, language YAMLs.
+**Scoring:**
+- Each probe: `1` = pass, `0` = fail
+- `score_instruction_following`: probes 1 + 2 + 8 (0-3)
+- `score_reasoning`: probes 3 + 4 (0-2)
+- `score_smart_home_intent`: probe 5 (0-1)
+- `score_factual`: probe 6 (0-1)
+- `score_memory`: probe 7 (0-1)
+- `capability_score`: sum of all probes (0-8)
 
----
+**Performance metrics extracted per probe (Ollama only):**
+- `eval_count` / `eval_duration` → tokens/sec for that probe
+- `prompt_eval_count` / `prompt_eval_duration` → prompt ingestion speed
+- Median and P95 latency across all probes → `median_latency_ms`, `p95_latency_ms`
+- Median tokens/sec across probes → `probe_tokens_per_sec`
+- Median prompt ingestion speed → `probe_prompt_tps`
 
-## Feature 11 — Proactive / Broadcast Announcements
+**Warm-up lifecycle:**
+```
+Agent saved (new) → metadata discovery runs immediately
+                  → BenchmarkProfile(status=SCHEDULED, re_benchmark_on_save=True) stored
+                  → asyncio.create_task(warm_up_then_probe(delay=CONF_BENCHMARK_WARM_UP_DELAY))
+                     ... delay elapses ...
+                  → probes run → status=COMPLETE, re_benchmark_on_save=False
+                               OR status=FAILED, re_benchmark_on_save=True (stays true)
 
-**Problem:** "Announce dinner is ready on all speakers" is a high-volume Alexa pattern with no dedicated NeuralBridge routing path.
-
-**Plan:**
-1. Detect announcement intent via `intent_hint == "announce"` (Feature 8) **or** a regex pre-check in `_compute_result`: `r"^(announce|broadcast|tell everyone|say on all(?: the)? speakers?):?\s+"`.
-2. Extract the announcement text (the content after the trigger phrase).
-3. Add `CONF_ANNOUNCE_MEDIA_PLAYERS` config option — multiselect of `media_player.*` entities (empty = feature disabled).
-4. When an announce intent is detected, call `tts.speak` (or `media_player.play_media`) for each configured entity concurrently via `asyncio.gather`.
-5. Return a confirmation `ConversationResult` ("Announcing to 3 speakers.") to the Assist UI rather than the TTS text itself.
-6. **Privacy:** announcement text is not cached and not logged at info level — only `"Announcement sent to N speakers"` at debug.
-7. Feature disabled by default; opt-in via config flow options step.
-
-**Files affected:** `conversation.py`, `const.py`, `config_flow.py`, `strings.json`, language YAMLs, `entity_context.py` (add `media_player` to relevant domains).
-
----
-
-## Feature 12 — Shopping / To-Do List Integration
-
-**Problem:** "Add milk to the shopping list" routes to cloud/Ollama when LOCAL_HA can handle it directly via the HA `todo` domain.
-
-**Plan:**
-1. Add `"todo"` and `"shopping_list"` to the router classification prompt's `local_ha = true` examples.
-2. Extend `RELEVANT_DOMAINS` in `entity_context.py` to include `"todo"` and `"shopping_list"` so the entity context summary advertises available lists to the router model.
-3. Use `intent_hint == "todo"` (Feature 8) to force LOCAL_HA routing for list management requests.
-4. In the LOCAL_HA path: HA's native conversation agent already handles `HassSetTodo`, `HassListTodo` etc. intents — no new service calls needed; correct routing is all that is required.
-5. Ensure the assist-mode fall-through check treats `action_done` on todo intents as a success (not a fall-through to cloud).
-6. **Low implementation cost** — mostly routing signal changes plus one entity domain addition.
-
-**Files affected:** `entity_context.py`, `prompts/router_classification.txt`, `conversation.py`, `const.py`.
+Agent saved (edit, re_benchmark_on_save=True) → probes run immediately (no warm-up delay, already loaded)
+Agent saved (edit, re_benchmark_on_save=False) → no probe run
+Service call neuralbridge.run_benchmark(agent_id) → probes run immediately, ignores toggle
+```
 
 ---
 
-## Feature 13 — Brave Answers Provider (Direct-Answer Web Search)
+### Layer 3 — Passive Telemetry (continuous enrichment from real traffic)
 
-**Problem:** The current `BraveSearchProvider` returns a list of web results (titles + snippets) that must be summarised before speech output.  Smart home voice queries ("Who is the UK Prime Minister?", "How many grams in an ounce?", "What time is it in Tokyo?") are better served by a *direct answer* — a single, concise, speakable sentence — rather than five page titles.
+Modify `OllamaClient.generate()` and `OllamaClient.chat()` to return an `OllamaResponse` dataclass instead of a bare `str | None`:
 
-Brave exposes a completely separate **Answers API** (`https://api.search.brave.com/res/v1/answer`) that returns a factual answer string when one is available.  This is a far better fit for the Q&A pattern that dominates voice assistant usage.
+```python
+@dataclass
+class OllamaResponse:
+    content: str
+    eval_count: int | None = None          # output tokens
+    eval_duration_ns: int | None = None    # time to generate output tokens
+    prompt_eval_count: int | None = None   # input tokens processed
+    prompt_eval_duration_ns: int | None = None
 
-**Important: Separate API subscriptions required.** Brave Search and Brave Answers are distinct products with distinct subscription plans and distinct API keys (both delivered via `X-Subscription-Token` but sourced from different dashboard subscriptions).  The combined provider therefore requires *two* API keys.  The Answers API is also OpenAI-SDK-compatible and supports streaming, so it is called via a simple REST JSON request (no streaming needed for this integration).
+    @property
+    def tokens_per_second(self) -> float | None: ...  # eval_count / (eval_duration_ns / 1e9)
+    @property
+    def prompt_tokens_per_second(self) -> float | None: ...
+```
 
-**Plan:**
-1. Add constants to `const.py`:
-   - `SEARCH_PROVIDER_BRAVE_ANSWERS = "brave_answers"`
-   - `SEARCH_PROVIDER_BRAVE_COMBINED = "brave_combined"`
-   - `CONF_SEARCH_ANSWERS_API_KEY = "search_answers_api_key"` — second key used by the combined provider and the answers-only provider.
-   - Update `SEARCH_PROVIDERS` list to include all three keys.
-2. Implement `BraveAnswersProvider` in `web_search_client.py`:
-   - Queries `https://api.search.brave.com/res/v1/answer` with the **Answers subscription key**.
-   - Parses the `answer` / `text` field from the JSON response.
-   - Returns a single `SearchResult(title="", url="", snippet=<answer>)`, or an empty list if no answer is present.
-3. Add `BraveAnswersCombinedProvider` (provider key `"brave_combined"`):
-   - Accepts both `api_key` (Search key) and `answers_api_key` (Answers key).
-   - First calls `BraveAnswersProvider.search()` using the Answers key.
-   - If it returns a non-empty result, returns it immediately (fast path).
-   - Otherwise falls back to `BraveSearchProvider.search()` using the Search key.
-4. Register all three keys in `SEARCH_PROVIDER_MAP`.  Because the combined provider has a different constructor signature, `WebSearchClient.__init__` must branch on provider key to pass both keys when constructing `BraveAnswersCombinedProvider`.
-5. Update `config_flow.py`:
-   - Expose three provider options in the dropdown: `Brave Search` (current), `Brave Answers`, `Brave (Answers + Search fallback)`.
-   - When provider is `brave_answers` or `brave_combined`, show `CONF_SEARCH_ANSWERS_API_KEY` (password field, labelled "Answers API Key").
-   - When provider is `brave_combined`, also show the existing `CONF_SEARCH_API_KEY` (labelled "Search API Key").
-   - When provider is `brave_search` only, show `CONF_SEARCH_API_KEY` as today.
-   - **Test connection checkbox:** add `vol.Optional("test_connection", default=False): selector.BooleanSelector()` to both `configure_web_search` and `edit_agent_web_search` forms.  When checked + submitted, run validation and return to the same form with a `"connection_ok"` description placeholder indicating success, or an `errors["base"]` entry on failure — without saving.  When unchecked + submitted, behave as today (validate then save).
-   - `_validate_web_search_connection` accepts an optional `answers_api_key` argument and validates whichever keys are required for the chosen provider.
-6. Update `_format_results`: when the result list contains exactly one item whose `url` is empty (i.e. a direct-answer), skip the "Here is what I found:" preamble and return the answer text directly.
-7. No new pip dependency — same `aiohttp` session pattern throughout.
-8. **Privacy:** neither key is ever logged.  Query text is not logged (same policy as existing provider).
+After every successful Ollama call in `_process_with_ollama`, update `BenchmarkProfile.realworld_tokens_per_sec` with a rolling weighted average (new = 0.2 × sample + 0.8 × existing, initialised from first sample). Store `realworld_sample_count` so the sensor can show confidence ("based on N real requests").
 
-**Files affected:** `web_search_client.py`, `const.py`, `config_flow.py`, `strings.json`, language YAMLs (all 5), `tests/unit/test_web_search_client.py`.
+---
 
-**Expected coverage delta:** ~40 new test cases — answers happy path, empty answer response, combined provider answers-path, combined provider search-fallback, both keys validated independently, test_connection=True branch (success + each error code), `_format_results` direct-answer path.
+### New module: `agent_benchmark.py`
+
+**`BenchmarkStatus`** — `StrEnum`: `PENDING`, `SCHEDULED`, `RUNNING`, `COMPLETE`, `FAILED`, `SKIPPED`
+
+**`BenchmarkProbe`** — dataclass:  `name`, `dimension`, `messages: list[dict]`, `expected_contains: list[str] | None`, `expected_exact: str | None`, `word_count_check: bool`, `timeout_seconds`
+
+**`ProbeResult`** — dataclass: `probe_name`, `dimension`, `passed`, `latency_ms`, `eval_count`, `eval_duration_ns`, `prompt_eval_count`, `prompt_eval_duration_ns`  *(response text NOT stored — privacy; probes contain no PII but establish the principle)*
+
+**`BenchmarkProfile`** — dataclass (fully serialisable to dict for HA storage):
+```
+agent_id, agent_name, agent_type, status, re_benchmark_on_save,
+benchmark_timestamp, benchmark_duration_ms, error,
+model_name, model_family, parameter_count_billions, quantization,
+context_window, model_size_bytes,
+median_latency_ms, p95_latency_ms,
+probe_tokens_per_sec, probe_prompt_tps,
+realworld_tokens_per_sec, realworld_sample_count,
+score_instruction_following, score_reasoning, score_smart_home_intent,
+score_factual, score_memory, capability_score,
+probe_results: dict[str, bool]  # probe_name → pass/fail (no response text)
+```
+
+**`AgentBenchmarker`** — manages all profiles:
+- `async_load()` / `async_save()` — HA storage (`neuralbridge.benchmark`, version 1)
+- `ensure_profile(agent_config)` — idempotent create-or-return
+- `remove_profile(agent_id)` — called when agent is deleted from config
+- `async_run_metadata(agent_id, agent_config)` — Ollama `/api/show` call only
+- `async_schedule_benchmark(agent_id, agent_config, delay_seconds)` — create_task with warm-up
+- `async_run_benchmark(agent_id, agent_config)` — full probe suite (sets status=RUNNING, fires events, handles exceptions)
+- `update_realworld_telemetry(agent_id, response: OllamaResponse)` — rolling average update
+- `cancel_pending(agent_id)` — cancel warm-up task if agent is deleted before it fires
+
+---
+
+### HA Events fired
+
+| Event | Payload |
+|---|---|
+| `neuralbridge_benchmark_started` | `{agent_id, agent_name, agent_type}` |
+| `neuralbridge_benchmark_complete` | `{agent_id, agent_name, capability_score, median_latency_ms, probe_tokens_per_sec, status}` |
+| `neuralbridge_benchmark_failed` | `{agent_id, agent_name, error}` |
+
+---
+
+### HA Service
+
+`neuralbridge.run_benchmark` — service with `agent_id: str` field. Triggers immediate probe run regardless of `re_benchmark_on_save` state. Registered in `__init__.py`.
+
+---
+
+### Sensor changes (`sensor.py`)
+
+Add `benchmark` sub-dict to `NeuralBridgeAgentSensor.extra_state_attributes`:
+
+```python
+"benchmark": {
+    "status": "complete",
+    "capability_score": 6,          # /8
+    "score_instruction_following": 3,
+    "score_reasoning": 2,
+    "score_smart_home_intent": 1,
+    "score_factual": 0,
+    "score_memory": 0,
+    "median_latency_ms": 1240.0,
+    "p95_latency_ms": 1890.0,
+    "probe_tokens_per_sec": 42.3,
+    "probe_prompt_tps": 310.5,
+    "realworld_tokens_per_sec": 38.1,
+    "realworld_sample_count": 17,
+    "model_family": "qwen3",
+    "parameter_count_billions": 0.6,
+    "quantization": "Q4_K_M",
+    "context_window": 32768,
+    "last_benchmarked": 1740000000.0,
+    "re_benchmark_on_save": false,
+}
+```
+
+`NeuralBridgeAgentSensor` receives a reference to `AgentBenchmarker` and reads from it on each `async_update_ha_state()` call (same dispatcher signal pattern as `AgentStatistics`).
+
+---
+
+### Config flow changes (`config_flow.py`)
+
+**Per-agent options form** (both add and edit flows) — add:
+- `CONF_AGENT_RE_BENCHMARK` (`re_benchmark_on_save`) — `BooleanSelector`, default `True` for new agents, auto-set to `False` after first successful run and exposed as editable toggle for re-runs.
+- Help text: *"Re-run benchmark when this agent is saved. Enabled automatically until a benchmark result exists."*
+
+**Global options form** — add:
+- `CONF_BENCHMARK_WARM_UP_DELAY` — `NumberSelector(min=10, max=300, step=5, unit_of_measurement="s")`, default `60`. Help: *"Seconds to wait after HA starts before benchmarking newly added agents (allows Ollama to load the model)."*
+
+---
+
+### New constants (`const.py`)
+
+```python
+CONF_AGENT_RE_BENCHMARK: Final = "re_benchmark_on_save"
+CONF_BENCHMARK_WARM_UP_DELAY: Final = "benchmark_warm_up_delay"
+DEFAULT_BENCHMARK_WARM_UP_DELAY: Final = 60
+BENCHMARK_STORAGE_KEY: Final = f"{DOMAIN}.benchmark"
+BENCHMARK_STORAGE_VERSION: Final = 1
+EVENT_BENCHMARK_STARTED: Final = f"{DOMAIN}_benchmark_started"
+EVENT_BENCHMARK_COMPLETE: Final = f"{DOMAIN}_benchmark_complete"
+EVENT_BENCHMARK_FAILED: Final = f"{DOMAIN}_benchmark_failed"
+SERVICE_RUN_BENCHMARK: Final = "run_benchmark"
+DATA_BENCHMARKER: Final = "benchmarker"
+```
+
+---
+
+### Files affected
+
+| File | Change |
+|---|---|
+| `agent_benchmark.py` | **New** — entire module (probes, profile, benchmarker) |
+| `ollama_client.py` | `generate()` + `chat()` return `OllamaResponse` instead of `str \| None`; add `async_show_model()` for `/api/show` |
+| `conversation.py` | Import + wire `AgentBenchmarker`; capture `OllamaResponse.eval_*` for passive telemetry; trigger metadata + schedule on agent add/edit |
+| `sensor.py` | Accept `AgentBenchmarker` reference; add `benchmark` sub-dict to agent sensor attributes |
+| `statistics.py` | No changes — passive telemetry lives in `BenchmarkProfile`, not `AgentStats` |
+| `__init__.py` | Instantiate + load `AgentBenchmarker`; register `neuralbridge.run_benchmark` service; store in `hass.data` under `DATA_BENCHMARKER` |
+| `config_flow.py` | `re_benchmark_on_save` toggle + `benchmark_warm_up_delay` global option |
+| `const.py` | New constants above |
+| `strings.json` | Labels + descriptions for new config fields and events |
+| Language YAMLs (5) | Translated strings for new fields |
+
+---
+
+### Test plan (`tests/unit/test_agent_benchmark.py` + `tests/integration/test_benchmark_integration.py`)
+
+**Unit — `BenchmarkProfile` dataclass:**
+- `test_profile_defaults` — status=PENDING, re_benchmark_on_save=True, all scores 0
+- `test_profile_serialization_round_trip` — to_dict() → from_dict() preserves all fields
+- `test_profile_serialization_partial` — missing optional fields deserialize to None gracefully
+
+**Unit — probe evaluation logic:**
+- `test_probe_instruction_exact_pass` / `_fail` / `_whitespace_trimmed`
+- `test_probe_instruction_format_pass` / `_fail_missing_numbers`
+- `test_probe_math_pass` / `_fail_wrong_answer` / `_fail_with_surrounding_text`
+- `test_probe_reasoning_time_pass` / `_fail`
+- `test_probe_smart_home_intent_pass` / `_fail_unrelated_word`
+- `test_probe_factual_pass_lowercase` / `_pass_uppercase` / `_fail`
+- `test_probe_multi_turn_memory_pass` / `_fail_no_recall`
+- `test_probe_conciseness_pass` / `_fail_multi_word` / `_fail_wrong_colour`
+
+**Unit — scoring:**
+- `test_score_instruction_following_all_pass` — 3/3
+- `test_score_instruction_following_partial` — 1/3
+- `test_score_reasoning_all_pass` / `_partial` / `_none`
+- `test_capability_score_is_sum_of_all_probes`
+- `test_capability_score_max_eight`
+- `test_capability_score_zero_no_passes`
+
+**Unit — `AgentBenchmarker.async_run_metadata` (Ollama):**
+- `test_metadata_ollama_full_response` — all fields extracted correctly
+- `test_metadata_ollama_missing_context_window` — falls back to None
+- `test_metadata_ollama_missing_quantization` — falls back to None
+- `test_metadata_ollama_connection_error` — status stays PENDING, error logged, no crash
+- `test_metadata_ollama_non_200` — error handled gracefully
+- `test_metadata_existing_integration_skipped` — no HTTP call made, returns immediately
+
+**Unit — `AgentBenchmarker.async_run_benchmark` (probe suite):**
+- `test_run_benchmark_all_pass` — status=COMPLETE, re_benchmark_on_save=False
+- `test_run_benchmark_all_fail` — status=COMPLETE (not FAILED — probes ran, agent just scored 0), re_benchmark_on_save=False
+- `test_run_benchmark_partial_pass` — mixed results, scores computed correctly
+- `test_run_benchmark_probe_timeout` — timed-out probe counted as fail, others continue
+- `test_run_benchmark_agent_offline` — connection error → status=FAILED, re_benchmark_on_save=True
+- `test_run_benchmark_unexpected_exception` — status=FAILED, error captured, re_benchmark_on_save=True
+- `test_run_benchmark_extracts_eval_stats` — tokens/sec computed from eval_count/eval_duration
+- `test_run_benchmark_missing_eval_stats` — graceful when Ollama omits eval fields
+- `test_run_benchmark_median_latency_computed` — median across 8 probe timings
+- `test_run_benchmark_p95_latency_computed` — P95 across 8 probe timings
+- `test_run_benchmark_duration_recorded` — total elapsed time stored
+- `test_run_benchmark_events_fired` — started + complete events fired
+- `test_run_benchmark_failed_event_fired` — failed event fired on connection error
+- `test_run_benchmark_sets_status_running_during_execution`
+- `test_home_assistant_agent_skipped` — LOCAL_HA agent gets status=SKIPPED, no probes
+- `test_re_benchmark_toggle_stays_true_after_failure` — FAILED → toggle remains True
+- `test_re_benchmark_toggle_cleared_after_success` — COMPLETE → toggle set False
+
+**Unit — warm-up scheduling:**
+- `test_schedule_warm_up_runs_after_delay` — task fires after configured delay
+- `test_schedule_warm_up_cancelled_on_agent_delete` — `cancel_pending()` prevents probe run
+- `test_schedule_warm_up_cancelled_on_shutdown` — all tasks cancelled on unload
+- `test_no_warm_up_when_re_benchmark_on_save` — immediate run, no delay
+
+**Unit — passive telemetry:**
+- `test_update_realworld_telemetry_first_sample` — initialises from first value
+- `test_update_realworld_telemetry_rolling_average` — weighted average applied
+- `test_update_realworld_telemetry_missing_eval_stats` — no-op when eval stats absent
+- `test_update_realworld_sample_count_increments`
+
+**Unit — storage:**
+- `test_async_load_empty_store` — no saved data, starts with empty dict
+- `test_async_load_restores_profiles` — saved profiles deserialize correctly
+- `test_async_save_persists_all_profiles` — all profiles written
+- `test_remove_profile_cleans_up` — deleted agent profile removed from store
+
+**Unit — `OllamaClient` changes:**
+- `test_generate_returns_ollama_response_with_eval_stats`
+- `test_generate_returns_ollama_response_missing_eval_stats`
+- `test_chat_returns_ollama_response_with_eval_stats`
+- `test_tokens_per_second_property_calculation`
+- `test_prompt_tokens_per_second_property_calculation`
+- `test_tokens_per_second_returns_none_when_stats_missing`
+- `test_async_show_model_success`
+- `test_async_show_model_connection_error`
+- `test_async_show_model_non_200`
+
+**Integration — `tests/integration/test_benchmark_integration.py`:**
+- `test_benchmark_scheduled_on_new_agent_add` — config entry setup triggers warm-up task
+- `test_benchmark_complete_updates_sensor_attributes` — sensor.benchmark sub-dict populated
+- `test_benchmark_complete_event_fired_to_hass` — HA event published
+- `test_benchmark_failed_event_fired_to_hass` — failed event published
+- `test_benchmark_re_run_on_edit_with_toggle` — edit + toggle=True triggers probes
+- `test_benchmark_no_re_run_on_edit_without_toggle` — edit + toggle=False, no probes
+- `test_service_run_benchmark_triggers_probes` — service call triggers run
+- `test_benchmark_sensor_skipped_for_local_ha_agent` — LOCAL_HA sensor shows SKIPPED
+
+---
+
+### Future routing integration (NOT in this feature — empowered by it)
+
+The `BenchmarkProfile.capability_score` and `probe_tokens_per_sec` fields are the foundation for a future **Advanced Routing Mode**:
+- Route low-complexity queries (router score ≤ 30) to the fastest agent (`probe_tokens_per_sec` highest) that has `capability_score ≥ 2`
+- Route reasoning-heavy queries to the agent with highest `score_reasoning`
+- Route smart home intents to LOCAL_HA first; if it fails, fall through to the agent with highest `score_smart_home_intent`
+- "Fast mode" = minimise `median_latency_ms`; "Quality mode" = maximise `capability_score`
+
+This feature plants the data; the routing logic follows separately.
+
+**Files affected:** `agent_benchmark.py` (new), `ollama_client.py`, `conversation.py`, `sensor.py`, `__init__.py`, `config_flow.py`, `const.py`, `strings.json`, language YAMLs (5).
+
+**Expected test delta:** ~60 new test cases across unit + integration suites.
 
 ---
 
@@ -209,13 +386,5 @@ Brave exposes a completely separate **Answers API** (`https://api.search.brave.c
 
 | Priority | Feature | Rationale |
 |---|---|---|
-| 1 | **8** — Timer/reminder + `intent_hint` | Foundational for features 11 and 12 |
-| 2 | **12** — To-do list routing | Cheapest win once `intent_hint` exists |
-| 3 | **13** — Brave Answers provider | Low effort; self-contained; high voice UX improvement |
-| 4 | **2** — Compound splitting | High user impact; self-contained |
-| 5 | **4** — High-stakes confirmation | Security pillar; medium effort |
-| 6 | **9** — Semantic cache | Performance win; no new dependencies |
-| 7 | **10** — Language passthrough | Low effort; important for i18n users |
-| 8 | **6** — Verbosity / brief mode | Quality of life; low effort |
-| 9 | **11** — Broadcast announcements | Requires TTS setup; medium effort |
-| 10 | **7** — Multi-user profiles | Highest complexity; needs HA user profile prerequisites |
+| 1 | **14** — Agent Benchmark Profiling (main layers) | High value for informed tuning; 14b + 14c already done |
+| 2 | **7** — Multi-user profiles | Highest complexity; needs HA user profile prerequisites |

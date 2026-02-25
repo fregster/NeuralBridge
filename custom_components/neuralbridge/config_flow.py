@@ -23,6 +23,8 @@ from .const import (
     CONF_AGENT_ASSIST_MODE,
     CONF_AGENT_CACHE_ENABLED,
     CONF_AGENT_ENABLED,
+    CONF_AGENT_MAX_COMPLEXITY,
+    CONF_AGENT_MIN_COMPLEXITY,
     CONF_AGENT_NAME,
     CONF_AGENT_TYPE,
     CONF_AGENTS,
@@ -37,6 +39,10 @@ from .const import (
     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
     CONF_GUARD_RAIL_RULES,
     CONF_GUARD_RAIL_USE_DETOXIFY,
+    CONF_HIGH_STAKES_DOMAINS,
+    CONF_HIGH_STAKES_ENABLED,
+    CONF_HIGH_STAKES_SECRET,
+    CONF_HIGH_STAKES_SECRET_ENABLED,
     CONF_IS_ROUTER,
     CONF_LANGUAGE,
     CONF_MAX_RETRIES,
@@ -44,6 +50,7 @@ from .const import (
     CONF_OLLAMA_URL,
     CONF_PRIORITY,
     CONF_RESPONSE_CACHE_ENABLED,
+    CONF_RESPONSE_CACHE_SEMANTIC,
     CONF_RESPONSE_CACHE_TTL,
     CONF_RETRY_BASE_DELAY,
     CONF_ROUTER_CUSTOM_PROMPT,
@@ -54,11 +61,15 @@ from .const import (
     CONF_SEARCH_MAX_SNIPPET_LEN,
     CONF_SEARCH_PROVIDER,
     CONF_SEARCH_RESULT_COUNT,
+    CONF_SEMANTIC_CACHE_TTL,
+    CONF_SPLIT_COMPOUND_COMMANDS,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DATA_RESPONSE_CACHE,
     DEFAULT_AGENT_CACHE_ENABLED,
     DEFAULT_AGENT_ENABLED,
+    DEFAULT_AGENT_MAX_COMPLEXITY,
+    DEFAULT_AGENT_MIN_COMPLEXITY,
     DEFAULT_DEFAULT_PROMPT,
     DEFAULT_ENABLE_HOME_CONTROL,
     DEFAULT_FORCE_RESPONSE_LANGUAGE,
@@ -68,12 +79,17 @@ from .const import (
     DEFAULT_GUARD_RAIL_ENABLED,
     DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
     DEFAULT_GUARD_RAIL_USE_DETOXIFY,
+    DEFAULT_HIGH_STAKES_DOMAINS,
+    DEFAULT_HIGH_STAKES_ENABLED,
+    DEFAULT_HIGH_STAKES_SECRET,
+    DEFAULT_HIGH_STAKES_SECRET_ENABLED,
     DEFAULT_IS_ROUTER,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_RETRIES,
     DEFAULT_OLLAMA_URL,
     DEFAULT_PRIORITY,
     DEFAULT_RESPONSE_CACHE_ENABLED,
+    DEFAULT_RESPONSE_CACHE_SEMANTIC,
     DEFAULT_RESPONSE_CACHE_TTL,
     DEFAULT_RETRY_BASE_DELAY,
     DEFAULT_ROUTER_CUSTOM_PROMPT,
@@ -83,6 +99,8 @@ from .const import (
     DEFAULT_SEARCH_MAX_SNIPPET_LEN,
     DEFAULT_SEARCH_RESULT_COUNT,
     DEFAULT_SEARCH_TIMEOUT,
+    DEFAULT_SEMANTIC_CACHE_TTL,
+    DEFAULT_SPLIT_COMPOUND_COMMANDS,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     DOMAIN,
@@ -186,6 +204,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 "configure_routing_agent",
                 "manage_agents",
                 "configure_guard_rails",
+                "configure_high_stakes",
                 "advanced_settings",
                 "language_settings",
                 "done",
@@ -583,6 +602,12 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                             else False
                         ),
                     ),
+                    CONF_AGENT_MIN_COMPLEXITY: int(
+                        user_input.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY)
+                    ),
+                    CONF_AGENT_MAX_COMPLEXITY: int(
+                        user_input.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY)
+                    ),
                 }
 
                 agents = list(self.config_entry.data.get(CONF_AGENTS, []))
@@ -629,6 +654,20 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
                         default=DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_AGENT_MIN_COMPLEXITY, default=DEFAULT_AGENT_MIN_COMPLEXITY
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AGENT_MAX_COMPLEXITY, default=DEFAULT_AGENT_MAX_COMPLEXITY
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
                 }
             ),
             errors=errors,
@@ -663,6 +702,12 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         if user_input[CONF_PRIORITY] > 0
                         else False
                     ),
+                ),
+                CONF_AGENT_MIN_COMPLEXITY: int(
+                    user_input.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY)
+                ),
+                CONF_AGENT_MAX_COMPLEXITY: int(
+                    user_input.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY)
                 ),
             }
 
@@ -705,6 +750,20 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
                         default=DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_AGENT_MIN_COMPLEXITY, default=DEFAULT_AGENT_MIN_COMPLEXITY
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AGENT_MAX_COMPLEXITY, default=DEFAULT_AGENT_MAX_COMPLEXITY
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
                 }
             ),
             description_placeholders={
@@ -739,6 +798,12 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         if user_input[CONF_PRIORITY] > 0
                         else False
                     ),
+                ),
+                CONF_AGENT_MIN_COMPLEXITY: int(
+                    user_input.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY)
+                ),
+                CONF_AGENT_MAX_COMPLEXITY: int(
+                    user_input.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY)
                 ),
             }
 
@@ -781,6 +846,20 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
                         default=DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_AGENT_MIN_COMPLEXITY, default=DEFAULT_AGENT_MIN_COMPLEXITY
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AGENT_MAX_COMPLEXITY, default=DEFAULT_AGENT_MAX_COMPLEXITY
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
                 }
             ),
             description_placeholders={
@@ -960,6 +1039,12 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_GUARD_RAIL_ENABLED_FOR_AGENT: user_input.get(
                         CONF_GUARD_RAIL_ENABLED_FOR_AGENT, DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT
                     ),
+                    CONF_AGENT_MIN_COMPLEXITY: int(
+                        user_input.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY)
+                    ),
+                    CONF_AGENT_MAX_COMPLEXITY: int(
+                        user_input.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY)
+                    ),
                 }
                 agents = list(self.config_entry.data.get(CONF_AGENTS, []))
                 agents.append(agent_config)
@@ -1036,6 +1121,24 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
                         default=DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_AGENT_MIN_COMPLEXITY, default=DEFAULT_AGENT_MIN_COMPLEXITY
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1,
+                            max=100,
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AGENT_MAX_COMPLEXITY, default=DEFAULT_AGENT_MAX_COMPLEXITY
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1,
+                            max=100,
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
                     vol.Optional("test_connection", default=False): selector.BooleanSelector(),
                 }
             ),
@@ -1137,6 +1240,18 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_GUARD_RAIL_ENABLED_FOR_AGENT: user_input.get(
                         CONF_GUARD_RAIL_ENABLED_FOR_AGENT, DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT
                     ),
+                    CONF_AGENT_MIN_COMPLEXITY: int(
+                        user_input.get(
+                            CONF_AGENT_MIN_COMPLEXITY,
+                            agent.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY),
+                        )
+                    ),
+                    CONF_AGENT_MAX_COMPLEXITY: int(
+                        user_input.get(
+                            CONF_AGENT_MAX_COMPLEXITY,
+                            agent.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY),
+                        )
+                    ),
                 }
                 agents = list(self.config_entry.data.get(CONF_AGENTS, []))
                 agents = [updated if a.get("id") == agent_id else a for a in agents]
@@ -1231,6 +1346,22 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                             DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                         ),
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_AGENT_MIN_COMPLEXITY,
+                        default=agent.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AGENT_MAX_COMPLEXITY,
+                        default=agent.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
                     vol.Optional("test_connection", default=False): selector.BooleanSelector(),
                     vol.Optional("delete_agent", default=False): selector.BooleanSelector(),
                 }
@@ -1355,6 +1486,18 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_GUARD_RAIL_ENABLED_FOR_AGENT: user_input.get(
                         CONF_GUARD_RAIL_ENABLED_FOR_AGENT, DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT
                     ),
+                    CONF_AGENT_MIN_COMPLEXITY: int(
+                        user_input.get(
+                            CONF_AGENT_MIN_COMPLEXITY,
+                            agent.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY),
+                        )
+                    ),
+                    CONF_AGENT_MAX_COMPLEXITY: int(
+                        user_input.get(
+                            CONF_AGENT_MAX_COMPLEXITY,
+                            agent.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY),
+                        )
+                    ),
                 }
                 agents = list(self.config_entry.data.get(CONF_AGENTS, []))
                 agents = [updated if a.get("id") == agent_id else a for a in agents]
@@ -1418,6 +1561,22 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                             DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                         ),
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_AGENT_MIN_COMPLEXITY,
+                        default=agent.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AGENT_MAX_COMPLEXITY,
+                        default=agent.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
                     vol.Optional("delete_agent", default=False): selector.BooleanSelector(),
                 }
             ),
@@ -1454,6 +1613,18 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 CONF_GUARD_RAIL_ENABLED_FOR_AGENT: user_input.get(
                     CONF_GUARD_RAIL_ENABLED_FOR_AGENT, DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT
+                ),
+                CONF_AGENT_MIN_COMPLEXITY: int(
+                    user_input.get(
+                        CONF_AGENT_MIN_COMPLEXITY,
+                        agent.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY),
+                    )
+                ),
+                CONF_AGENT_MAX_COMPLEXITY: int(
+                    user_input.get(
+                        CONF_AGENT_MAX_COMPLEXITY,
+                        agent.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY),
+                    )
                 ),
             }
             agents = list(self.config_entry.data.get(CONF_AGENTS, []))
@@ -1512,6 +1683,22 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                             DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                         ),
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_AGENT_MIN_COMPLEXITY,
+                        default=agent.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AGENT_MAX_COMPLEXITY,
+                        default=agent.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
                     vol.Optional("delete_agent", default=False): selector.BooleanSelector(),
                 }
             ),
@@ -1547,6 +1734,18 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_AGENT_ASSIST_MODE: user_input.get(CONF_AGENT_ASSIST_MODE, True),
                 CONF_GUARD_RAIL_ENABLED_FOR_AGENT: user_input.get(
                     CONF_GUARD_RAIL_ENABLED_FOR_AGENT, DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT
+                ),
+                CONF_AGENT_MIN_COMPLEXITY: int(
+                    user_input.get(
+                        CONF_AGENT_MIN_COMPLEXITY,
+                        agent.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY),
+                    )
+                ),
+                CONF_AGENT_MAX_COMPLEXITY: int(
+                    user_input.get(
+                        CONF_AGENT_MAX_COMPLEXITY,
+                        agent.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY),
+                    )
                 ),
             }
             agents = list(self.config_entry.data.get(CONF_AGENTS, []))
@@ -1605,6 +1804,22 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                             DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
                         ),
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_AGENT_MIN_COMPLEXITY,
+                        default=agent.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AGENT_MAX_COMPLEXITY,
+                        default=agent.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=100, mode=selector.NumberSelectorMode.SLIDER
+                        )
+                    ),
                     vol.Optional("delete_agent", default=False): selector.BooleanSelector(),
                 }
             ),
@@ -1664,6 +1879,12 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 user_input.get(CONF_RESPONSE_CACHE_TTL, DEFAULT_RESPONSE_CACHE_TTL)
             )
             purge_now: bool = user_input.get("purge_cache_now", False)
+            cache_semantic: bool = user_input.get(
+                CONF_RESPONSE_CACHE_SEMANTIC, DEFAULT_RESPONSE_CACHE_SEMANTIC
+            )
+            cache_semantic_ttl: int = int(
+                user_input.get(CONF_SEMANTIC_CACHE_TTL, DEFAULT_SEMANTIC_CACHE_TTL)
+            )
             max_retries: int = int(user_input.get(CONF_MAX_RETRIES, DEFAULT_MAX_RETRIES))
             retry_base_delay: float = float(
                 user_input.get(CONF_RETRY_BASE_DELAY, DEFAULT_RETRY_BASE_DELAY)
@@ -1674,15 +1895,21 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             force_response_language: bool = user_input.get(
                 CONF_FORCE_RESPONSE_LANGUAGE, DEFAULT_FORCE_RESPONSE_LANGUAGE
             )
+            split_compound_commands: bool = user_input.get(
+                CONF_SPLIT_COMPOUND_COMMANDS, DEFAULT_SPLIT_COMPOUND_COMMANDS
+            )
 
             current_data = {
                 **self.config_entry.data,
                 CONF_RESPONSE_CACHE_ENABLED: cache_enabled,
                 CONF_RESPONSE_CACHE_TTL: cache_ttl,
+                CONF_RESPONSE_CACHE_SEMANTIC: cache_semantic,
+                CONF_SEMANTIC_CACHE_TTL: cache_semantic_ttl,
                 CONF_MAX_RETRIES: max_retries,
                 CONF_RETRY_BASE_DELAY: retry_base_delay,
                 CONF_ENABLE_HOME_CONTROL: enable_home_control,
                 CONF_FORCE_RESPONSE_LANGUAGE: force_response_language,
+                CONF_SPLIT_COMPOUND_COMMANDS: split_compound_commands,
             }
             self.hass.config_entries.async_update_entry(
                 self.config_entry,
@@ -1695,7 +1922,12 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 if purge_now:
                     purged = response_cache.invalidate()
                     _LOGGER.info("Response cache purged: %d entries removed", purged)
-                response_cache.configure(enabled=cache_enabled, ttl_seconds=cache_ttl)
+                response_cache.configure(
+                    enabled=cache_enabled,
+                    ttl_seconds=cache_ttl,
+                    semantic=cache_semantic,
+                    semantic_ttl_seconds=cache_semantic_ttl,
+                )
 
             return await self.async_step_init()
 
@@ -1704,11 +1936,18 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_RESPONSE_CACHE_ENABLED, DEFAULT_RESPONSE_CACHE_ENABLED
         )
         current_ttl = entry_data.get(CONF_RESPONSE_CACHE_TTL, DEFAULT_RESPONSE_CACHE_TTL)
+        current_semantic = entry_data.get(
+            CONF_RESPONSE_CACHE_SEMANTIC, DEFAULT_RESPONSE_CACHE_SEMANTIC
+        )
+        current_semantic_ttl = entry_data.get(CONF_SEMANTIC_CACHE_TTL, DEFAULT_SEMANTIC_CACHE_TTL)
         current_max_retries = entry_data.get(CONF_MAX_RETRIES, DEFAULT_MAX_RETRIES)
         current_retry_delay = entry_data.get(CONF_RETRY_BASE_DELAY, DEFAULT_RETRY_BASE_DELAY)
         current_home_control = entry_data.get(CONF_ENABLE_HOME_CONTROL, DEFAULT_ENABLE_HOME_CONTROL)
         current_force_lang = entry_data.get(
             CONF_FORCE_RESPONSE_LANGUAGE, DEFAULT_FORCE_RESPONSE_LANGUAGE
+        )
+        current_split_compound = entry_data.get(
+            CONF_SPLIT_COMPOUND_COMMANDS, DEFAULT_SPLIT_COMPOUND_COMMANDS
         )
 
         return self.async_show_form(
@@ -1720,6 +1959,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     ): selector.BooleanSelector(),
                     vol.Required(
                         CONF_FORCE_RESPONSE_LANGUAGE, default=current_force_lang
+                    ): selector.BooleanSelector(),
+                    vol.Required(
+                        CONF_SPLIT_COMPOUND_COMMANDS, default=current_split_compound
                     ): selector.BooleanSelector(),
                     vol.Required(
                         CONF_RESPONSE_CACHE_ENABLED, default=current_enabled
@@ -1736,6 +1978,20 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         )
                     ),
                     vol.Optional("purge_cache_now", default=False): selector.BooleanSelector(),
+                    vol.Required(
+                        CONF_RESPONSE_CACHE_SEMANTIC, default=current_semantic
+                    ): selector.BooleanSelector(),
+                    vol.Required(
+                        CONF_SEMANTIC_CACHE_TTL, default=current_semantic_ttl
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=10,
+                            max=300,
+                            step=10,
+                            unit_of_measurement="seconds",
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
                     vol.Required(
                         CONF_MAX_RETRIES, default=current_max_retries
                     ): selector.NumberSelector(
@@ -1988,6 +2244,111 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             errors=errors,
             description_placeholders={
                 "info": self._s("placeholders", "guard_rail_rules_info"),
+            },
+        )
+
+    # ── High-stakes routing ───────────────────────────────────────────────────
+
+    async def async_step_configure_high_stakes(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure high-stakes action confirmation (Feature 4).
+
+        Presents a form with four settings:
+        - Enable/disable the feature globally
+        - The list of HA domains whose actions require confirmation
+        - Whether a passphrase (rather than plain yes/no) is required
+        - The passphrase itself (only stored/used when the toggle is on)
+
+        Args:
+            user_input: Submitted form data, or None on first render.
+
+        Returns:
+            Form flow result.
+        """
+        if user_input is not None:
+            new_data = {
+                **self.config_entry.data,
+                CONF_HIGH_STAKES_ENABLED: user_input.get(
+                    CONF_HIGH_STAKES_ENABLED, DEFAULT_HIGH_STAKES_ENABLED
+                ),
+                CONF_HIGH_STAKES_DOMAINS: user_input.get(
+                    CONF_HIGH_STAKES_DOMAINS, DEFAULT_HIGH_STAKES_DOMAINS
+                ),
+                CONF_HIGH_STAKES_SECRET_ENABLED: user_input.get(
+                    CONF_HIGH_STAKES_SECRET_ENABLED, DEFAULT_HIGH_STAKES_SECRET_ENABLED
+                ),
+                CONF_HIGH_STAKES_SECRET: user_input.get(
+                    CONF_HIGH_STAKES_SECRET, DEFAULT_HIGH_STAKES_SECRET
+                ),
+            }
+            self.hass.config_entries.async_update_entry(
+                self.config_entry,
+                data=new_data,
+            )
+            return await self.async_step_init()
+
+        config = self.config_entry.data
+        current_enabled = config.get(CONF_HIGH_STAKES_ENABLED, DEFAULT_HIGH_STAKES_ENABLED)
+        current_domains = config.get(CONF_HIGH_STAKES_DOMAINS, DEFAULT_HIGH_STAKES_DOMAINS)
+        current_secret_enabled = config.get(
+            CONF_HIGH_STAKES_SECRET_ENABLED, DEFAULT_HIGH_STAKES_SECRET_ENABLED
+        )
+        # Never pre-populate the passphrase field — force the user to re-enter
+        # it each time so it is not silently retained in the UI.
+
+        domain_options = [
+            "alarm_control_panel",
+            "binary_sensor",
+            "button",
+            "climate",
+            "cover",
+            "fan",
+            "garage_door",
+            "input_boolean",
+            "light",
+            "lock",
+            "media_player",
+            "scene",
+            "script",
+            "switch",
+            "vacuum",
+            "water_heater",
+        ]
+
+        return self.async_show_form(
+            step_id="configure_high_stakes",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_HIGH_STAKES_ENABLED, default=current_enabled
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_HIGH_STAKES_DOMAINS,
+                        default=list(current_domains),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=domain_options,
+                            multiple=True,
+                            mode=selector.SelectSelectorMode.LIST,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_HIGH_STAKES_SECRET_ENABLED,
+                        default=current_secret_enabled,
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_HIGH_STAKES_SECRET,
+                        default=DEFAULT_HIGH_STAKES_SECRET,
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            type=selector.TextSelectorType.PASSWORD,
+                        )
+                    ),
+                }
+            ),
+            description_placeholders={
+                "info": self._s("placeholders", "high_stakes_info"),
             },
         )
 

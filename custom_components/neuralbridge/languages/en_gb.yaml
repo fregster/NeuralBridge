@@ -50,6 +50,10 @@ placeholders:
   guard_rail_rules_info: >-
     Enter custom regex patterns (one per line) to block matching content.
     Patterns are merged with the built-in defaults. Leave blank to use defaults only.
+  high_stakes_info: >-
+    When enabled, actions targeting the selected HA domains are intercepted and
+    the user is asked to confirm before the action is executed. Optionally require
+    a passphrase for stronger security. Leave the passphrase blank to use yes/no confirmation.
   web_search_info: >-
     The web search agent is routed to automatically by the routing agent when
     a query is identified as time-sensitive or requiring current data
@@ -100,6 +104,11 @@ responses:
   guard_rail_notify_ask: >-
     This response may contain harmful or sensitive information.
     Would you like to continue?
+  announce_confirmation: "Announcement broadcast to {count} speaker(s)."
+  announce_no_tts: "No text-to-speech (TTS) integration is configured. Please add a TTS integration to use broadcast announcements."
+  high_stakes_confirmation: "Are you sure? This action may be irreversible. Please confirm with 'yes' or 'no'."
+  high_stakes_passphrase_prompt: "This action requires confirmation. Please say your passphrase to proceed."
+  high_stakes_cancelled: "Action cancelled."
 
 # ── Language settings step ────────────────────────────────────────────────────
 language_settings:

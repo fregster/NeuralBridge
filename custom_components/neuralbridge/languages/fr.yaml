@@ -58,6 +58,10 @@ placeholders:
     Saisissez des expressions régulières personnalisées (une par ligne) pour bloquer le contenu
     correspondant. Les motifs sont fusionnés avec les défauts intégrés. Laissez vide pour
     utiliser uniquement les défauts.
+  high_stakes_info: >-
+    Lorsqu'il est activé, les actions ciblant les domaines HA sélectionnés sont interceptées
+    et l'utilisateur est invité à confirmer avant l'exécution de l'action. Vous pouvez
+    exiger une phrase de passe pour une sécurité accrue.
 
 # ── Guard rail rule category labels ───────────────────────────────────────────
 guard_rail_categories:
@@ -93,6 +97,11 @@ responses:
   guard_rail_notify_ask: >-
     Cette réponse pourrait contenir des informations nuisibles ou sensibles.
     Voulez-vous continuer ?
+  announce_confirmation: "Annonce envoyée à {count} haut-parleur(s)."
+  announce_no_tts: "Aucune intégration de synthèse vocale (TTS) n'est configurée. Veuillez ajouter une intégration TTS."
+  high_stakes_confirmation: "Êtes-vous sûr ? Cette action peut être irréversible. Confirmez avec 'oui' ou 'non'."
+  high_stakes_passphrase_prompt: "Cette action nécessite une confirmation. Veuillez dire votre phrase de passe pour continuer."
+  high_stakes_cancelled: "Action annulée."
 
 # ── Language settings step ────────────────────────────────────────────────────
 language_settings:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,6 +23,7 @@ from custom_components.neuralbridge.guard_rail import (
     GuardRailCache,
     GuardRailChecker,
     GuardRailResult,
+    HighStakesCache,
 )
 
 
@@ -819,3 +821,84 @@ class TestGuardRailCheckerOptionalLibraries:
             result = await checker.check_input("profane text here")
         mock_model.predict.assert_not_called()
         assert result.is_safe is False
+
+
+# ---------------------------------------------------------------------------
+# Feature 4 — HighStakesCache
+# ---------------------------------------------------------------------------
+
+
+class TestHighStakesCache:
+    """Tests for the HighStakesCache class."""
+
+    async def test_store_and_get_pending(self) -> None:
+        """store_pending stores data; get_pending returns it before TTL expires."""
+        cache = HighStakesCache(ttl_seconds=60)
+        mock_result = MagicMock()
+        entity_ids = ["lock.front_door"]
+
+        await cache.store_pending("conv-1", mock_result, entity_ids)
+        retrieved = await cache.get_pending("conv-1")
+
+        assert retrieved is not None
+        result, ids = retrieved
+        assert result is mock_result
+        assert ids == entity_ids
+
+    async def test_get_pending_returns_none_when_not_stored(self) -> None:
+        """get_pending returns None for a conversation with no stored entry."""
+        cache = HighStakesCache()
+        assert await cache.get_pending("nonexistent") is None
+
+    async def test_get_pending_returns_none_after_expiry(self) -> None:
+        """get_pending returns None and removes entry when TTL has expired."""
+        cache = HighStakesCache(ttl_seconds=0)
+        mock_result = MagicMock()
+
+        # Manually insert an expired entry
+        key = "hs:conv-exp"
+        cache._cache[key] = ({"result": mock_result, "entity_ids": []}, time.time() - 1)
+
+        assert await cache.get_pending("conv-exp") is None
+        assert key not in cache._cache
+
+    async def test_clear_pending_removes_entry(self) -> None:
+        """clear_pending removes a stored entry."""
+        cache = HighStakesCache(ttl_seconds=60)
+        mock_result = MagicMock()
+
+        await cache.store_pending("conv-2", mock_result, [])
+        assert await cache.get_pending("conv-2") is not None
+
+        await cache.clear_pending("conv-2")
+        assert await cache.get_pending("conv-2") is None
+
+    async def test_clear_pending_noop_when_not_stored(self) -> None:
+        """clear_pending is a no-op when the entry doesn't exist."""
+        cache = HighStakesCache()
+        # Should not raise
+        await cache.clear_pending("missing-conv")
+
+    async def test_cleanup_evicts_expired_entries(self) -> None:
+        """_cleanup removes expired entries automatically."""
+        cache = HighStakesCache(max_size=10, ttl_seconds=60)
+        # Insert one expired and one valid entry
+        cache._cache["hs:old"] = ({"result": MagicMock(), "entity_ids": []}, time.time() - 1)
+        valid_result = MagicMock()
+        await cache.store_pending("new", valid_result, [])
+
+        assert "hs:old" not in cache._cache
+        assert await cache.get_pending("new") is not None
+
+    async def test_cleanup_trims_to_max_size(self) -> None:
+        """_cleanup evicts oldest entries when max_size is exceeded."""
+        cache = HighStakesCache(max_size=2, ttl_seconds=3600)
+        # Fill the cache beyond max_size by direct insertion
+        for i in range(3):
+            cache._cache[f"hs:conv-{i}"] = (
+                {"result": MagicMock(), "entity_ids": []},
+                time.time() + 3600 + i,  # increasing expiry so oldest is conv-0
+            )
+        # Trigger cleanup
+        await cache._cleanup()
+        assert len(cache._cache) <= 2

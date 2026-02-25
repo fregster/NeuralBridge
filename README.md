@@ -143,7 +143,7 @@ Every agent is assigned a priority from **0 to 100**.
 
 | Priority | Role | Behaviour |
 |---|---|---|
-| **0** | Router / Filter | Runs first. Classifies the request and returns a routing decision. Use small, fast Ollama models here. |
+| **0** | Router / Filter | Setting priority to 0 automatically enables the **Is Router** flag. Runs before all processing agents to classify the request. |
 | **1–20** | High priority | Tried first among processing agents. Ideal for fast local agents. |
 | **21–50** | Medium priority | Tried after high-priority agents fail. |
 | **51–100** | Low priority / Fallback | Last resort. Cloud agents or expensive models fit here. |
@@ -158,10 +158,14 @@ Every agent is assigned a priority from **0 to 100**.
 
 ## Router Agents
 
-Router agents (priority 0) are Ollama agents that run before all processing agents. They classify each incoming request and return a JSON routing decision:
+Router agents run before all processing agents and classify each incoming request into
+a JSON routing decision. Any agent type can be a router — Ollama (recommended for
+speed), an Existing Integration, or Home Assistant itself. Enable classification mode
+by toggling **Is Router** on the agent. Setting **Priority** to `0` enables this flag
+automatically for backward compatibility.
 
 ```json
-{"local_ha": true, "web_search": false, "complexity": 15, "intent_hint": null}
+{"local_ha": true, "web_search": false, "complexity": 15, "intent_hint": null, "confidence": "high"}
 ```
 
 | Field | Type | Description |
@@ -170,6 +174,7 @@ Router agents (priority 0) are Ollama agents that run before all processing agen
 | `web_search` | boolean | `true` when the query requires real-time data (news, live scores, current weather). Routes to a Web Search agent when set |
 | `complexity` | integer (0–100) | Estimated complexity. `0` = block the request outright. Higher values prefer more capable agents |
 | `intent_hint` | string \| null | Optional intent tag: `"timer"`, `"reminder"`, `"todo"`, `"shopping_list"`, `"announce"`, or `null` |
+| `confidence` | string | `"high"` (default) or `"low"`. When `"low"`, flag-based routing promotion is skipped and all eligible agents are returned in priority order |
 
 The built-in classification prompt is loaded from `prompts/router_classification.txt` and used automatically. Each router agent can override it with a **custom router prompt**. To customise the built-in prompt for all agents, edit `custom_components/neuralbridge/prompts/router_classification.txt`.
 
@@ -214,7 +219,7 @@ A Web Search agent routes the query to a search provider when the router sets `w
 | Provider | `brave`, `brave_answers`, or `brave_combined` |
 | API Key | Brave Search subscription token (never logged) |
 | Answers API Key | Separate key for the Brave Answers endpoint (required for `brave_answers` / `brave_combined`) |
-| Priority | 1–100 — set higher than Ollama/HA agents so it is only used when the router flags the query |
+| Priority | 0–100 set higher than Ollama/HA agents so it is only used when the router flags the query |
 | Result Count | Number of search results to return (default: 5) |
 | Max Snippet Length | Maximum characters per result snippet (default: 200) |
 | Timeout | HTTP timeout in seconds (default: 15) |
@@ -394,12 +399,12 @@ NeuralBridge installs with zero agents. It is fully operational once you add at 
 | Name | Friendly label (e.g. "Llama3 Local") |
 | URL | Ollama server URL (default: `http://localhost:11434`) |
 | Model | Model name (e.g. `llama3:8b`) — validated live |
-| Priority | 0–100 (0 = router agent) |
+| Priority | 0–100 (priority 0 auto-enables Is Router; alternatively set Is Router directly) |
 | Timeout | 5–120 seconds |
 | System Prompt | Per-agent prompt (falls back to global default if empty) |
 | Max Retries | Retry attempts on failure (default: 2) |
 | Retry Base Delay | Seconds between retries — exponential back-off (default: 1.0) |
-| Is Router | Enable JSON classification mode (set automatically when priority is 0) |
+| Is Router | Enable JSON classification mode (set automatically when priority is 0; can also be enabled on any agent type). |
 | Force Response Language | Reply in the user's language (default: enabled) |
 
 **Web Search**

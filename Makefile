@@ -14,11 +14,11 @@
 .DEFAULT_GOAL := check
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
-PYTHON     ?= python3
-BLACK      ?= black
-RUFF       ?= ruff
-MYPY       ?= mypy
-PYTEST     ?= pytest
+PYTHON     ?= .venv/bin/python
+BLACK      ?= .venv/bin/python -m black
+RUFF       ?= .venv/bin/python -m ruff
+MYPY       ?= .venv/bin/python -m mypy
+PYTEST     ?= .venv/bin/python -m pytest
 
 SRC        := custom_components tests
 

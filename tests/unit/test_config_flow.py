@@ -33,6 +33,10 @@ from custom_components.neuralbridge.const import (
     CONF_GUARD_RAIL_ENABLED,
     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
     CONF_GUARD_RAIL_RULES,
+    CONF_HIGH_STAKES_DOMAINS,
+    CONF_HIGH_STAKES_ENABLED,
+    CONF_HIGH_STAKES_SECRET,
+    CONF_HIGH_STAKES_SECRET_ENABLED,
     CONF_IS_ROUTER,
     CONF_LANGUAGE,
     CONF_MAX_RETRIES,
@@ -60,9 +64,14 @@ from custom_components.neuralbridge.const import (
     DEFAULT_GUARD_RAIL_ACTION,
     DEFAULT_GUARD_RAIL_AI_THRESHOLD,
     DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
+    DEFAULT_HIGH_STAKES_DOMAINS,
+    DEFAULT_HIGH_STAKES_ENABLED,
+    DEFAULT_HIGH_STAKES_SECRET,
+    DEFAULT_HIGH_STAKES_SECRET_ENABLED,
     DEFAULT_LANGUAGE,
     DEFAULT_OLLAMA_URL,
     DEFAULT_RESPONSE_CACHE_ENABLED,
+    DEFAULT_RESPONSE_CACHE_SEMANTIC,
     DEFAULT_RESPONSE_CACHE_TTL,
     DEFAULT_ROUTER_CUSTOM_PROMPT,
     DEFAULT_ROUTER_FALLBACK,
@@ -71,6 +80,7 @@ from custom_components.neuralbridge.const import (
     DEFAULT_SEARCH_MAX_SNIPPET_LEN,
     DEFAULT_SEARCH_RESULT_COUNT,
     DEFAULT_SEARCH_TIMEOUT,
+    DEFAULT_SEMANTIC_CACHE_TTL,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     DOMAIN,
@@ -378,6 +388,7 @@ async def test_options_flow_init_shows_menu(
         "configure_routing_agent",
         "manage_agents",
         "configure_guard_rails",
+        "configure_high_stakes",
         "advanced_settings",
         "language_settings",
         "done",
@@ -1255,7 +1266,12 @@ async def test_advanced_settings_purges_cache(hass: HomeAssistant) -> None:
         )
 
     mock_cache.invalidate.assert_called_once()
-    mock_cache.configure.assert_called_once_with(enabled=True, ttl_seconds=300)
+    mock_cache.configure.assert_called_once_with(
+        enabled=True,
+        ttl_seconds=300,
+        semantic=DEFAULT_RESPONSE_CACHE_SEMANTIC,
+        semantic_ttl_seconds=DEFAULT_SEMANTIC_CACHE_TTL,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1287,7 +1303,12 @@ async def test_advanced_settings_configures_without_purge(hass: HomeAssistant) -
         )
 
     mock_cache.invalidate.assert_not_called()
-    mock_cache.configure.assert_called_once_with(enabled=True, ttl_seconds=60)
+    mock_cache.configure.assert_called_once_with(
+        enabled=True,
+        ttl_seconds=60,
+        semantic=DEFAULT_RESPONSE_CACHE_SEMANTIC,
+        semantic_ttl_seconds=DEFAULT_SEMANTIC_CACHE_TTL,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1318,7 +1339,12 @@ async def test_advanced_settings_ttl_zero_accepted(hass: HomeAssistant) -> None:
             }
         )
 
-    mock_cache.configure.assert_called_once_with(enabled=True, ttl_seconds=0)
+    mock_cache.configure.assert_called_once_with(
+        enabled=True,
+        ttl_seconds=0,
+        semantic=DEFAULT_RESPONSE_CACHE_SEMANTIC,
+        semantic_ttl_seconds=DEFAULT_SEMANTIC_CACHE_TTL,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3205,3 +3231,93 @@ async def test_advanced_settings_shows_force_response_language_field(
     schema = result["data_schema"].schema
     keys = [k.schema if hasattr(k, "schema") else k for k in schema]
     assert CONF_FORCE_RESPONSE_LANGUAGE in keys
+
+
+# ---------------------------------------------------------------------------
+# Tests — configure_high_stakes form (Feature 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_configure_high_stakes_shows_form(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """async_step_configure_high_stakes without input shows the settings form."""
+    handler = _make_handler(mock_config_entry, hass)
+    result = await handler.async_step_configure_high_stakes()
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "configure_high_stakes"
+
+
+async def test_configure_high_stakes_saves_settings(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Submitting the form saves all four high-stakes settings."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_configure_high_stakes(
+            {
+                CONF_HIGH_STAKES_ENABLED: True,
+                CONF_HIGH_STAKES_DOMAINS: ["lock", "alarm_control_panel"],
+                CONF_HIGH_STAKES_SECRET_ENABLED: True,
+                CONF_HIGH_STAKES_SECRET: "opensesame",
+            }
+        )
+
+    assert mock_config_entry.data[CONF_HIGH_STAKES_ENABLED] is True
+    assert mock_config_entry.data[CONF_HIGH_STAKES_DOMAINS] == ["lock", "alarm_control_panel"]
+    assert mock_config_entry.data[CONF_HIGH_STAKES_SECRET_ENABLED] is True
+    assert mock_config_entry.data[CONF_HIGH_STAKES_SECRET] == "opensesame"
+
+
+async def test_configure_high_stakes_defaults_when_empty_input(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Submitting an empty dict uses all defaults."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_configure_high_stakes({})
+
+    assert mock_config_entry.data[CONF_HIGH_STAKES_ENABLED] is DEFAULT_HIGH_STAKES_ENABLED
+    assert mock_config_entry.data[CONF_HIGH_STAKES_DOMAINS] == DEFAULT_HIGH_STAKES_DOMAINS
+    assert (
+        mock_config_entry.data[CONF_HIGH_STAKES_SECRET_ENABLED]
+        is DEFAULT_HIGH_STAKES_SECRET_ENABLED
+    )
+    assert mock_config_entry.data[CONF_HIGH_STAKES_SECRET] == DEFAULT_HIGH_STAKES_SECRET
+
+
+async def test_configure_high_stakes_saves_disabled(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Submitting with enabled=False saves correctly."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    with patch.object(
+        handler,
+        "async_create_entry",
+        return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
+    ):
+        await handler.async_step_configure_high_stakes(
+            {
+                CONF_HIGH_STAKES_ENABLED: False,
+                CONF_HIGH_STAKES_DOMAINS: ["cover"],
+                CONF_HIGH_STAKES_SECRET_ENABLED: False,
+                CONF_HIGH_STAKES_SECRET: "",
+            }
+        )
+
+    assert mock_config_entry.data[CONF_HIGH_STAKES_ENABLED] is False
+    assert mock_config_entry.data[CONF_HIGH_STAKES_DOMAINS] == ["cover"]

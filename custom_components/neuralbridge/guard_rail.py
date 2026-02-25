@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
+from homeassistant.components.conversation import ConversationResult  # noqa: TC002
+
 from .const import (
     CONF_AGENT_TYPE,
     CONF_OLLAMA_MODEL,
@@ -606,4 +608,87 @@ class GuardRailCache:
             sorted_items = sorted(self._cache.items(), key=lambda x: x[1][1])
             entries_to_remove = len(self._cache) - self._max_size
             for key, _ in sorted_items[:entries_to_remove]:
+                del self._cache[key]
+
+
+class HighStakesCache:
+    """Short-lived cache that holds a ConversationResult pending user confirmation.
+
+    Used by the high-stakes confirmation flow (Feature 4) to remember the
+    original LOCAL_HA result while waiting for the user to confirm or supply
+    the required passphrase on their next turn.
+
+    The default TTL is intentionally short (120 s) so that unanswered
+    confirmation prompts do not linger indefinitely.
+    """
+
+    def __init__(self, max_size: int = 100, ttl_seconds: int = 120) -> None:
+        """Initialise the high-stakes pending-result cache.
+
+        Args:
+            max_size: Maximum number of pending items to retain simultaneously.
+            ttl_seconds: Seconds before an unconfirmed entry expires.
+        """
+        self._cache: dict[str, tuple[Any, float]] = {}
+        self._max_size = max_size
+        self._ttl_seconds = ttl_seconds
+
+    async def store_pending(
+        self,
+        conversation_id: str,
+        result: ConversationResult,
+        entity_ids: list[str],
+    ) -> None:
+        """Store a pending high-stakes result awaiting confirmation.
+
+        Args:
+            conversation_id: Unique conversation identifier.
+            result: The ConversationResult to hold pending confirmation.
+            entity_ids: Entity IDs targeted by the action (for event firing).
+        """
+        key = f"hs:{conversation_id}"
+        expiry = time.time() + self._ttl_seconds
+        self._cache[key] = ({"result": result, "entity_ids": entity_ids}, expiry)
+        await self._cleanup()
+
+    async def get_pending(
+        self, conversation_id: str
+    ) -> tuple[ConversationResult, list[str]] | None:
+        """Return the pending result and entity IDs for a conversation, or None.
+
+        Args:
+            conversation_id: Unique conversation identifier.
+
+        Returns:
+            Tuple of (ConversationResult, entity_ids) if a non-expired entry
+            exists, otherwise None.
+        """
+        key = f"hs:{conversation_id}"
+        if key in self._cache:
+            data, expiry = self._cache[key]
+            if time.time() < expiry:
+                return data["result"], data["entity_ids"]
+            del self._cache[key]
+        return None
+
+    async def clear_pending(self, conversation_id: str) -> None:
+        """Remove any pending entry for the given conversation.
+
+        Args:
+            conversation_id: Unique conversation identifier.
+        """
+        key = f"hs:{conversation_id}"
+        if key in self._cache:
+            del self._cache[key]
+
+    async def _cleanup(self) -> None:
+        """Evict expired entries, then trim to max_size if necessary."""
+        current_time = time.time()
+        expired = [k for k, (_, expiry) in self._cache.items() if current_time >= expiry]
+        for key in expired:
+            del self._cache[key]
+
+        if len(self._cache) > self._max_size:
+            sorted_items = sorted(self._cache.items(), key=lambda x: x[1][1])
+            for key, _ in sorted_items[: len(self._cache) - self._max_size]:
                 del self._cache[key]

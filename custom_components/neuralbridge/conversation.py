@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -27,12 +28,16 @@ from .const import (
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
     AGENT_TYPE_WEB_SEARCH,
+    COMPOUND_COMMAND_SEPARATOR,
     CONF_AGENT_ASSIST_MODE,
     CONF_AGENT_CACHE_ENABLED,
     CONF_AGENT_ENABLED,
+    CONF_AGENT_MAX_COMPLEXITY,
+    CONF_AGENT_MIN_COMPLEXITY,
     CONF_AGENT_NAME,
     CONF_AGENT_TYPE,
     CONF_AGENTS,
+    CONF_ANNOUNCE_MEDIA_PLAYERS,
     CONF_DEFAULT_PROMPT,
     CONF_ENABLE_HOME_CONTROL,
     CONF_ENTITY_ID,
@@ -44,12 +49,17 @@ from .const import (
     CONF_GUARD_RAIL_ENABLED_FOR_AGENT,
     CONF_GUARD_RAIL_RULES,
     CONF_GUARD_RAIL_USE_DETOXIFY,
+    CONF_HIGH_STAKES_DOMAINS,
+    CONF_HIGH_STAKES_ENABLED,
+    CONF_HIGH_STAKES_SECRET,
+    CONF_HIGH_STAKES_SECRET_ENABLED,
     CONF_IS_ROUTER,
     CONF_LANGUAGE,
     CONF_MAX_RETRIES,
     CONF_OLLAMA_MODEL,
     CONF_OLLAMA_URL,
     CONF_PRIORITY,
+    CONF_RESPONSE_VERBOSITY,
     CONF_RETRY_BASE_DELAY,
     CONF_ROUTER_CUSTOM_PROMPT,
     CONF_ROUTER_FALLBACK,
@@ -58,6 +68,7 @@ from .const import (
     CONF_SEARCH_MAX_SNIPPET_LEN,
     CONF_SEARCH_PROVIDER,
     CONF_SEARCH_RESULT_COUNT,
+    CONF_SPLIT_COMPOUND_COMMANDS,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DATA_CIRCUIT_BREAKER,
@@ -68,6 +79,9 @@ from .const import (
     DEFAULT_AGENT_ASSIST_MODE,
     DEFAULT_AGENT_CACHE_ENABLED,
     DEFAULT_AGENT_ENABLED,
+    DEFAULT_AGENT_MAX_COMPLEXITY,
+    DEFAULT_AGENT_MIN_COMPLEXITY,
+    DEFAULT_ANNOUNCE_MEDIA_PLAYERS,
     DEFAULT_CIRCUIT_BREAKER_COOLDOWN,
     DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
     DEFAULT_DEFAULT_PROMPT,
@@ -79,10 +93,16 @@ from .const import (
     DEFAULT_GUARD_RAIL_ENABLED,
     DEFAULT_GUARD_RAIL_ENABLED_FOR_AGENT,
     DEFAULT_GUARD_RAIL_USE_DETOXIFY,
+    DEFAULT_HIGH_STAKES_DOMAINS,
+    DEFAULT_HIGH_STAKES_ENABLED,
+    DEFAULT_HIGH_STAKES_SECRET,
+    DEFAULT_HIGH_STAKES_SECRET_ENABLED,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_RETRIES,
     DEFAULT_RESPONSE_CACHE_ENABLED,
+    DEFAULT_RESPONSE_CACHE_SEMANTIC,
     DEFAULT_RESPONSE_CACHE_TTL,
+    DEFAULT_RESPONSE_VERBOSITY,
     DEFAULT_RETRY_BASE_DELAY,
     DEFAULT_ROUTER_COMPLEXITY,
     DEFAULT_ROUTER_CUSTOM_PROMPT,
@@ -92,34 +112,47 @@ from .const import (
     DEFAULT_SEARCH_MAX_SNIPPET_LEN,
     DEFAULT_SEARCH_RESULT_COUNT,
     DEFAULT_SEARCH_TIMEOUT,
+    DEFAULT_SEMANTIC_CACHE_TTL,
+    DEFAULT_SPLIT_COMPOUND_COMMANDS,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     DOMAIN,
+    EVENT_ANNOUNCE_SENT,
     EVENT_GUARD_RAIL_TRIGGERED,
+    EVENT_HIGH_STAKES_TRIGGERED,
     GUARD_RAIL_ACTION_BLOCK,
     GUARD_RAIL_ACTION_NOTIFY_ASK,
     GUARD_RAIL_ACTION_WARN,
+    MAX_COMPOUND_FRAGMENTS,
     MSG_AGENT_FAILED,
     MSG_AGENT_SUCCESS,
     MSG_ALL_AGENTS_FAILED,
     MSG_NO_AGENTS_CONFIGURED,
     PRIORITY_ROUTER,
     ROUTER_CLASSIFICATION_PROMPT,
+    ROUTER_CONFIDENCE_HIGH,
+    ROUTER_CONFIDENCE_LOW,
     ROUTER_FALLBACK_BLOCK,
     ROUTER_FALLBACK_SKIP_ROUTING,
     ROUTER_LOG_LEVEL_COMPLEXITY,
     ROUTER_LOG_LEVEL_DEBUG,
     ROUTER_LOG_LEVEL_DEBUG_QUERY,
     ROUTER_RESPONSE_KEY_COMPLEXITY,
+    ROUTER_RESPONSE_KEY_CONFIDENCE,
     ROUTER_RESPONSE_KEY_INTENT_HINT,
     ROUTER_RESPONSE_KEY_LOCAL_HA,
     ROUTER_RESPONSE_KEY_WEB_SEARCH,
     ROUTER_SKIP_ROUTING_COMPLEXITY,
     SIGNAL_STATS_UPDATED,
     VALID_INTENT_HINTS,
+    VALID_ROUTER_CONFIDENCE_VALUES,
+    VERBOSITY_BRIEF,
+    VERBOSITY_INSTRUCTION_BRIEF,
+    VERBOSITY_INSTRUCTION_VERBOSE,
+    VERBOSITY_VERBOSE,
 )
 from .entity_context import EntityContextCache
-from .guard_rail import GuardRailCache, GuardRailChecker
+from .guard_rail import GuardRailCache, GuardRailChecker, HighStakesCache
 from .languages_loader import get_string
 from .ollama_client import OllamaClient
 from .response_cache import ResponseCache
@@ -153,12 +186,18 @@ class RouterDecision:
         intent_hint: Optional routing hint (``"timer"``, ``"reminder"``,
                      ``"todo"``, ``"shopping_list"``, ``"announce"``, or
                      ``None``).  Forces LOCAL_HA routing for certain intents.
+        confidence:  How confident the router is in its classification.
+                     ``"high"`` (default) or ``"low"`` (ambiguous input).
+                     When ``"low"``, flag-based promotion (local_ha/web_search)
+                     is skipped and all eligible agents are returned in priority
+                     order (Feature 14b).
     """
 
-    __slots__ = ("complexity", "intent_hint", "local_ha", "web_search")
+    __slots__ = ("complexity", "confidence", "intent_hint", "local_ha", "web_search")
 
     # Class-level annotations required for mypy __slots__ attribute resolution
     complexity: int
+    confidence: str
     intent_hint: str | None
     local_ha: bool
     web_search: bool
@@ -169,6 +208,7 @@ class RouterDecision:
         complexity: int,
         web_search: bool = False,
         intent_hint: str | None = None,
+        confidence: str = ROUTER_CONFIDENCE_HIGH,
     ) -> None:
         """Initialise a RouterDecision.
 
@@ -177,11 +217,14 @@ class RouterDecision:
             complexity:  Estimated complexity score (1-100).
             web_search:  Whether the request needs real-time web data.
             intent_hint: Optional intent classification hint (Feature 8).
+            confidence:  Router's confidence: "high" (default) or "low"
+                         (Feature 14b).
         """
         object.__setattr__(self, "local_ha", local_ha)
         object.__setattr__(self, "complexity", complexity)
         object.__setattr__(self, "web_search", web_search)
         object.__setattr__(self, "intent_hint", intent_hint)
+        object.__setattr__(self, "confidence", confidence)
 
     def __setattr__(self, _name: str, _value: object) -> None:
         raise AttributeError("RouterDecision is immutable")
@@ -194,17 +237,21 @@ class RouterDecision:
             and self.complexity == other.complexity
             and self.web_search == other.web_search
             and self.intent_hint == other.intent_hint
+            and self.confidence == other.confidence
         )
 
     def __hash__(self) -> int:
-        return hash((self.local_ha, self.complexity, self.web_search, self.intent_hint))
+        return hash(
+            (self.local_ha, self.complexity, self.web_search, self.intent_hint, self.confidence)
+        )
 
     def __repr__(self) -> str:
         return (
             f"RouterDecision(local_ha={self.local_ha!r}, "
             f"complexity={self.complexity!r}, "
             f"web_search={self.web_search!r}, "
-            f"intent_hint={self.intent_hint!r})"
+            f"intent_hint={self.intent_hint!r}, "
+            f"confidence={self.confidence!r})"
         )
 
 
@@ -329,8 +376,20 @@ def _parse_router_response(raw: str) -> RouterDecision | None:
     raw_hint = data.get(ROUTER_RESPONSE_KEY_INTENT_HINT)
     intent_hint: str | None = str(raw_hint) if raw_hint in VALID_INTENT_HINTS else None
 
+    # Extract optional confidence (Feature 14b); default to "high" when absent or invalid
+    raw_confidence = data.get(ROUTER_RESPONSE_KEY_CONFIDENCE, ROUTER_CONFIDENCE_HIGH)
+    confidence: str = (
+        str(raw_confidence)
+        if raw_confidence in VALID_ROUTER_CONFIDENCE_VALUES
+        else ROUTER_CONFIDENCE_HIGH
+    )
+
     return RouterDecision(
-        local_ha=local_ha, complexity=complexity, web_search=web_search, intent_hint=intent_hint
+        local_ha=local_ha,
+        complexity=complexity,
+        web_search=web_search,
+        intent_hint=intent_hint,
+        confidence=confidence,
     )
 
 
@@ -340,15 +399,24 @@ def _apply_router_decision(
 ) -> list[dict[str, Any]]:
     """Filter and reorder processing agents based on the router decision.
 
-    When ``decision.web_search`` is ``True``, web-search agents are promoted to
-    the front of the list.  When ``decision.local_ha`` is ``True``, LOCAL_HA
-    agents are promoted.  When neither flag is set, LOCAL_HA agents are excluded
-    entirely (request is a general knowledge query; leave web-search agents in
-    their normal priority position).
+    **Phase 1 — Complexity Thresholds (Feature 14a)**:
+    Agents whose ``agent_min_complexity``/``agent_max_complexity`` range does
+    not contain ``decision.complexity`` are excluded.  If every agent is
+    excluded, all agents fall through unchanged (safety fallback).
+
+    **Phase 2 — Confidence Gate (Feature 14b)**:
+    When ``decision.confidence == "low"`` the router was uncertain, so
+    flag-based promotion (local_ha, web_search, intent_hint) is skipped and
+    the eligible list is returned as-is in priority order.
+
+    **Phase 3 — Flag-based Promotion**:
+    Standard logic: intent_hint forces LOCAL_HA; web_search promotes
+    WEB_SEARCH agents; local_ha promotes LOCAL_HA agents; otherwise LOCAL_HA
+    agents are excluded from general knowledge queries.
 
     A ``decision.complexity`` of ``ROUTER_SKIP_ROUTING_COMPLEXITY`` (-1) is a
     special sentinel meaning "skip routing" — all processing agents are returned
-    unchanged in their original priority order.
+    unchanged in their original priority order (bypasses all phases).
 
     Args:
         decision:          The RouterDecision produced by the router agent.
@@ -360,24 +428,140 @@ def _apply_router_decision(
     if decision.complexity == ROUTER_SKIP_ROUTING_COMPLEXITY:
         # Fallback=skip_routing — bypass agent filtering, try everything
         return list(processing_agents)
+
+    # ---- Phase 1: complexity threshold filtering (Feature 14a) ----
+    score = decision.complexity
+    eligible = [
+        a
+        for a in processing_agents
+        if (
+            a.get(CONF_AGENT_MIN_COMPLEXITY, DEFAULT_AGENT_MIN_COMPLEXITY) <= score
+            and a.get(CONF_AGENT_MAX_COMPLEXITY, DEFAULT_AGENT_MAX_COMPLEXITY) >= score
+        )
+    ]
+    if not eligible:
+        # Safety fallback: never leave the pipeline empty due to threshold config
+        _LOGGER.debug(
+            "All agents filtered by complexity thresholds (score=%d); using full agent list",
+            score,
+        )
+        eligible = list(processing_agents)
+
+    # ---- Phase 2: confidence gate — skip flag-based promotion if uncertain (Feature 14b) ----
+    if decision.confidence == ROUTER_CONFIDENCE_LOW:
+        return eligible
+
+    # ---- Phase 3: flag-based promotion (existing logic) ----
+
     # Feature 8: intent_hint forces LOCAL_HA for timer/reminder/todo/shopping_list commands
     # regardless of what the router returned for local_ha (extra safety net).
     if decision.intent_hint in ("timer", "reminder", "todo", "shopping_list"):
-        local = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) == AGENT_TYPE_LOCAL_HA]
-        others = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) != AGENT_TYPE_LOCAL_HA]
+        local = [a for a in eligible if a.get(CONF_AGENT_TYPE) == AGENT_TYPE_LOCAL_HA]
+        others = [a for a in eligible if a.get(CONF_AGENT_TYPE) != AGENT_TYPE_LOCAL_HA]
         return local + others
     if decision.web_search:
         # Promote WEB_SEARCH agents to front; keep original order within each group
-        web = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) == AGENT_TYPE_WEB_SEARCH]
-        others = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) != AGENT_TYPE_WEB_SEARCH]
+        web = [a for a in eligible if a.get(CONF_AGENT_TYPE) == AGENT_TYPE_WEB_SEARCH]
+        others = [a for a in eligible if a.get(CONF_AGENT_TYPE) != AGENT_TYPE_WEB_SEARCH]
         return web + others
     if decision.local_ha:
         # Promote LOCAL_HA agents to front; keep original order within each group
-        local = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) == AGENT_TYPE_LOCAL_HA]
-        others = [a for a in processing_agents if a.get(CONF_AGENT_TYPE) != AGENT_TYPE_LOCAL_HA]
+        local = [a for a in eligible if a.get(CONF_AGENT_TYPE) == AGENT_TYPE_LOCAL_HA]
+        others = [a for a in eligible if a.get(CONF_AGENT_TYPE) != AGENT_TYPE_LOCAL_HA]
         return local + others
     # Exclude LOCAL_HA agents — request is not a home-automation command
-    return [a for a in processing_agents if a.get(CONF_AGENT_TYPE) != AGENT_TYPE_LOCAL_HA]
+    return [a for a in eligible if a.get(CONF_AGENT_TYPE) != AGENT_TYPE_LOCAL_HA]
+
+
+# Feature 11 — Broadcast announce trigger phrases
+_ANNOUNCE_RE = re.compile(
+    r"^(?:announce:?\s+|broadcast\s+|tell\s+everyone(?:\s+that)?\s+"
+    r"|say\s+on\s+all\s+(?:the\s+)?speakers\s+)",
+    re.IGNORECASE,
+)
+# Maximum number of characters kept in the announce event preview field
+_ANNOUNCE_PREVIEW_MAX_LEN: int = 50
+
+# Sentence-boundary characters used by _truncate_to_first_sentence
+_SENTENCE_END_RE = re.compile(r"([.?!])\s+")
+
+
+def _truncate_to_first_sentence(text: str) -> str:
+    """Return the first sentence of *text*, stripping trailing whitespace.
+
+    Splits on the first ``'. '``, ``'? '``, or ``'! '`` boundary.  If no
+    sentence boundary is found the original *text* is returned unchanged.
+
+    Args:
+        text: Input text that may contain one or more sentences.
+
+    Returns:
+        The first sentence (including its terminal punctuation), stripped.
+    """
+    match = _SENTENCE_END_RE.search(text)
+    if match:
+        return text[: match.start(1) + 1].rstrip()
+    return text
+
+
+def _extract_announce_text(text: str, intent_hint: str | None = None) -> str | None:
+    """Extract the announcement message from *text*.
+
+    Checks whether *text* begins with a known trigger phrase (announce,
+    broadcast, tell everyone, say on all speakers, …).  If so, returns
+    the content that follows the trigger.  Returns the full *text* unchanged
+    when *intent_hint* is ``"announce"`` and no trigger phrase is found
+    (router already identified this as an announce command).  Otherwise
+    returns ``None``.
+
+    Args:
+        text: Raw user input text.
+        intent_hint: Optional hint from the router (e.g. ``"announce"``).
+
+    Returns:
+        Extracted message string, or ``None`` if not an announce command.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    match = _ANNOUNCE_RE.match(stripped)
+    if match:
+        content = stripped[match.end() :].strip()
+        return content if content else None
+
+    if intent_hint == "announce":
+        return stripped
+
+    return None
+
+
+_COMPOUND_RE: re.Pattern[str] = re.compile(
+    r"\s+(?:and\s+then|and|then|also|after\s+that)\s+",
+    re.IGNORECASE,
+)
+
+
+def _split_compound_input(text: str) -> list[str]:
+    """Split a compound voice command into individual fragment strings.
+
+    Splits on natural conjunctions used in multi-command voice requests
+    ("and then", "and", "then", "also", "after that").  Returns a list of
+    up to MAX_COMPOUND_FRAGMENTS fragments.  If the text does not contain
+    any of those conjunctions, returns a single-element list with the
+    original text.
+
+    Args:
+        text: Raw user input text.
+
+    Returns:
+        List of one or more command fragment strings.
+    """
+    parts = _COMPOUND_RE.split(text.strip())
+    fragments = [p.strip() for p in parts if p.strip()]
+    if len(fragments) <= 1:
+        return [text.strip()]
+    return fragments[:MAX_COMPOUND_FRAGMENTS]
 
 
 async def async_setup_entry(
@@ -404,6 +588,11 @@ class NeuralBridgeAgent(ConversationEntity):
         self._guard_rail_checker: GuardRailChecker | None = None
         self._guard_rail_rules_snapshot: dict[str, list[str]] | None = None
         self._guard_rail_cache = GuardRailCache()
+        self._high_stakes_cache = HighStakesCache()
+        # Transient storage: entity IDs targeted by the most recent LOCAL_HA call,
+        # keyed by conversation_id.  Written by _process_with_existing and consumed
+        # (then cleared) by _check_high_stakes.
+        self._local_ha_targets: dict[str, list[str]] = {}
         # Shared objects created by __init__.py and stored in hass.data
         entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
         self._circuit_breaker: CircuitBreaker = entry_data.get(
@@ -419,6 +608,8 @@ class NeuralBridgeAgent(ConversationEntity):
             ResponseCache(
                 enabled=DEFAULT_RESPONSE_CACHE_ENABLED,
                 ttl_seconds=DEFAULT_RESPONSE_CACHE_TTL,
+                semantic=DEFAULT_RESPONSE_CACHE_SEMANTIC,
+                semantic_ttl_seconds=DEFAULT_SEMANTIC_CACHE_TTL,
             ),
         )
         self._session_memory: SessionMemory = entry_data.get(DATA_SESSION_MEMORY, SessionMemory())
@@ -495,7 +686,7 @@ class NeuralBridgeAgent(ConversationEntity):
             return confirmation_result
 
         # Step 2: Check response cache
-        cached = self._response_cache.get(user_input.text)
+        cached = self._response_cache.get(user_input.text, normalise=self._response_cache.semantic)
         if cached is not None:
             _LOGGER.debug("Cache hit — returning cached response")
             return self._create_result(cached, user_input.conversation_id)
@@ -526,21 +717,75 @@ class NeuralBridgeAgent(ConversationEntity):
             if not (a.get(CONF_IS_ROUTER, False) or a.get(CONF_PRIORITY) == PRIORITY_ROUTER)
         ]
 
+        return await self._run_pipeline(config, user_input, router_agents, processing_agents)
+
+    async def _run_pipeline(
+        self,
+        config: dict[str, Any],
+        user_input: ConversationInput,
+        router_agents: list[dict[str, Any]],
+        processing_agents: list[dict[str, Any]],
+    ) -> ConversationResult:
+        """Run the routing and processing pipeline for a single conversation turn.
+
+        Handles: named-agent override → Feature 11 broadcast announce (regex fast
+        path) → router classification → Feature 11 broadcast announce (intent_hint
+        path) → Feature 2 compound splitting → processing agents.
+
+        Args:
+            config:            The merged configuration dict (data + options).
+            user_input:        The user's conversation input.
+            router_agents:     Priority-sorted list of router agent configs.
+            processing_agents: Priority-sorted list of processing agent configs.
+
+        Returns:
+            The ConversationResult produced by the first successful agent.
+        """
         # Check for explicit named-agent override ("Ask Gemini: ...", "Use Ollama: ...", etc.)
         override = self._check_explicit_agent_override(user_input, processing_agents)
         if override is not None:
             override_input, override_agents = override
             return await self._try_processing_agents(override_agents, override_input)
 
+        # Feature 11 — Broadcast Announcements: regex fast path (no router needed)
+        announce_players: list[str] = list(
+            config.get(CONF_ANNOUNCE_MEDIA_PLAYERS, DEFAULT_ANNOUNCE_MEDIA_PLAYERS) or []
+        )
+        if announce_players:
+            announce_text = _extract_announce_text(user_input.text)
+            if announce_text is not None:
+                return await self._send_broadcast_announcement(
+                    announce_text, announce_players, user_input
+                )
+
         if router_agents:
-            decision = await self._check_with_routers(user_input, router_agents)
+            decision = await self._check_with_routers(user_input, router_agents, processing_agents)
             if decision is None:
                 _LOGGER.debug("Router agents blocked the request")
                 return self._create_error_result(
                     self._localized("responses", "router_blocked"),
                     user_input.conversation_id,
                 )
+            # Feature 11 — Broadcast Announcements: intent_hint path (router detected announce)
+            if announce_players and decision.intent_hint == "announce":
+                announce_text = _extract_announce_text(user_input.text, intent_hint="announce")
+                if announce_text is not None:
+                    return await self._send_broadcast_announcement(
+                        announce_text, announce_players, user_input
+                    )
             processing_agents = _apply_router_decision(decision, processing_agents)
+
+        # Feature 2 — Compound Command Splitting
+        if config.get(CONF_SPLIT_COMPOUND_COMMANDS, DEFAULT_SPLIT_COMPOUND_COMMANDS):
+            has_local_ha = any(
+                a.get(CONF_AGENT_TYPE) == AGENT_TYPE_LOCAL_HA for a in processing_agents
+            )
+            if has_local_ha:
+                fragments = _split_compound_input(user_input.text)
+                if len(fragments) > 1:
+                    return await self._process_compound_fragments(
+                        fragments, processing_agents, user_input
+                    )
 
         # Step 6: Try processing agents in priority order
         return await self._try_processing_agents(processing_agents, user_input)
@@ -573,7 +818,10 @@ class NeuralBridgeAgent(ConversationEntity):
     async def _handle_confirmation_check(
         self, user_input: ConversationInput
     ) -> ConversationResult | None:
-        """Handle a yes/no confirmation for a pending guard rail response.
+        """Handle a confirmation for a pending guard rail or high-stakes response.
+
+        Checks both the guard rail pending cache (yes/no only) and the
+        high-stakes pending cache (passphrase or yes/no, depending on config).
 
         Args:
             user_input: The user's conversation input.
@@ -581,22 +829,114 @@ class NeuralBridgeAgent(ConversationEntity):
         Returns:
             A ConversationResult if a pending response was resolved, else None.
         """
+        conv_id = user_input.conversation_id or "default"
+
+        # --- High-stakes confirmation check (Feature 4) ---
+        hs_pending = await self._high_stakes_cache.get_pending(conv_id)
+        if hs_pending is not None:
+            hs_result = await self._resolve_high_stakes_confirmation(user_input, hs_pending)
+            if hs_result is not None:
+                return hs_result
+
+        # --- Guard rail confirmation check (yes/no only) ---
         if user_input.text.lower() not in ("yes", "no"):
             return None
 
-        pending = await self._guard_rail_cache.get_pending_response(
-            user_input.conversation_id or "default"
-        )
+        pending = await self._guard_rail_cache.get_pending_response(conv_id)
         if not pending:
             return None
 
         response_text, _ = pending
-        await self._guard_rail_cache.clear_pending_response(user_input.conversation_id or "default")
+        await self._guard_rail_cache.clear_pending_response(conv_id)
         if user_input.text.lower() == "yes":
             return self._create_result(response_text, user_input.conversation_id)
         return self._create_error_result(
             self._localized("responses", "guard_rail_blocked"), user_input.conversation_id
         )
+
+    async def _resolve_high_stakes_confirmation(
+        self,
+        user_input: ConversationInput,
+        hs_pending: tuple[ConversationResult, list[str]],
+    ) -> ConversationResult | None:
+        """Resolve a pending high-stakes action confirmation.
+
+        Compares the user's input against the configured passphrase (if enabled)
+        or a simple yes/no.  Clears the pending cache entry regardless of
+        outcome.
+
+        Args:
+            user_input: The latest user turn.
+            hs_pending: Tuple of (original ConversationResult, entity_ids).
+
+        Returns:
+            The original ConversationResult on confirmation, an error result on
+            denial/wrong passphrase, or None if the input is not yet a
+            recognisable confirmation (allowing the caller to fall through).
+        """
+        original_result, _entity_ids = hs_pending
+        conv_id = user_input.conversation_id or "default"
+        config = self._get_config()
+        secret_enabled = config.get(
+            CONF_HIGH_STAKES_SECRET_ENABLED, DEFAULT_HIGH_STAKES_SECRET_ENABLED
+        )
+        secret: str = config.get(CONF_HIGH_STAKES_SECRET, DEFAULT_HIGH_STAKES_SECRET)
+        user_text = user_input.text.strip()
+
+        if secret_enabled:
+            # Passphrase mode — accept only exact match (case-insensitive)
+            if user_text.lower() == secret.lower():
+                await self._high_stakes_cache.clear_pending(conv_id)
+                return original_result
+            # Wrong passphrase
+            await self._high_stakes_cache.clear_pending(conv_id)
+            return self._create_error_result(
+                self._localized("responses", "high_stakes_cancelled"), user_input.conversation_id
+            )
+        else:
+            # Simple yes/no mode
+            if user_text.lower() == "yes":
+                await self._high_stakes_cache.clear_pending(conv_id)
+                return original_result
+            if user_text.lower() == "no":
+                await self._high_stakes_cache.clear_pending(conv_id)
+                return self._create_error_result(
+                    self._localized("responses", "high_stakes_cancelled"),
+                    user_input.conversation_id,
+                )
+            # Not a recognised response — leave pending, return None to fall through
+            return None
+
+    async def _process_compound_fragments(
+        self,
+        fragments: list[str],
+        processing_agents: list[dict[str, Any]],
+        user_input: ConversationInput,
+    ) -> ConversationResult:
+        """Process each compound command fragment independently and combine results.
+
+        Each fragment is sent to the processing agents in turn.  If a fragment
+        fails (no result), a localised fallback string is used so no fragment is
+        silently dropped.  All per-fragment responses are joined with the
+        ``COMPOUND_COMMAND_SEPARATOR`` (`` · ``).
+
+        Args:
+            fragments: Individual command strings from _split_compound_input.
+            processing_agents: Priority-sorted processing agent configs.
+            user_input: Original ConversationInput (text will be replaced per fragment).
+
+        Returns:
+            A ConversationResult whose speech text is the joined responses.
+        """
+        speech_parts: list[str] = []
+        fallback_text = self._localized("responses", "fallback")
+        for fragment in fragments:
+            fragment_input = dataclasses.replace(user_input, text=fragment)
+            result = await self._try_processing_agents(processing_agents, fragment_input)
+            fragment_speech = self._extract_response_text(result)
+            speech_parts.append(fragment_speech if fragment_speech else fallback_text)
+        combined = COMPOUND_COMMAND_SEPARATOR.join(speech_parts)
+        return self._create_result(combined, user_input.conversation_id)
 
     async def _try_processing_agents(
         self, processing_agents: list[dict[str, Any]], user_input: ConversationInput
@@ -736,6 +1076,11 @@ class NeuralBridgeAgent(ConversationEntity):
         if isinstance(guard_action, ConversationResult):
             return guard_action
 
+        # Feature 4 — high-stakes confirmation (LOCAL_HA only)
+        high_stakes_action = await self._check_high_stakes(agent_config, result, user_input)
+        if isinstance(high_stakes_action, ConversationResult):
+            return high_stakes_action
+
         _LOGGER.info(MSG_AGENT_SUCCESS, agent_name, agent_config.get(CONF_PRIORITY))
         return result
 
@@ -770,7 +1115,12 @@ class NeuralBridgeAgent(ConversationEntity):
         if response_text and agent_config.get(
             CONF_AGENT_CACHE_ENABLED, DEFAULT_AGENT_CACHE_ENABLED
         ):
-            self._response_cache.store(input_text, response_text, agent_name)
+            self._response_cache.store(
+                input_text,
+                response_text,
+                agent_name,
+                normalise=self._response_cache.semantic,
+            )
 
     def _record_agent_failure(self, agent_id: str, timed_out: bool) -> None:
         """Record a failure or timeout for circuit breaker, stats, and dispatcher.
@@ -791,7 +1141,10 @@ class NeuralBridgeAgent(ConversationEntity):
         )
 
     async def _check_with_routers(
-        self, user_input: ConversationInput, router_agents: list[dict[str, Any]]
+        self,
+        user_input: ConversationInput,
+        router_agents: list[dict[str, Any]],
+        processing_agents: list[dict[str, Any]] | None = None,
     ) -> RouterDecision | None:
         """Query router agents for a routing decision.
 
@@ -801,9 +1154,16 @@ class NeuralBridgeAgent(ConversationEntity):
         Falls back to a default :class:`RouterDecision` if every router errors
         out, so that a broken router never silences the assistant (fail-open).
 
+        Builds a compact agent-type manifest (e.g. ``[Available: home_assistant,
+        ollama]``) from *processing_agents* and passes it to each router call
+        so the model can tailor its classification to the available agents
+        (Feature 14c).
+
         Args:
-            user_input: The user's conversation input.
-            router_agents: List of router agent configurations.
+            user_input:        The user's conversation input.
+            router_agents:     List of router agent configurations.
+            processing_agents: Optional list of processing agent configs used
+                               to construct the agent-type manifest (14c).
 
         Returns:
             A RouterDecision if the request should proceed (with optional hints),
@@ -814,10 +1174,28 @@ class NeuralBridgeAgent(ConversationEntity):
         )
         area_context = self._get_device_area(user_input.device_id)
         all_errors = True
+
+        # Feature 14c: build deduplicated ordered agent-type list from processing agents
+        agent_types: list[str] | None = None
+        if processing_agents:
+            seen: set[str] = set()
+            types_list: list[str] = []
+            for agent in processing_agents:
+                agent_type = agent.get(CONF_AGENT_TYPE, "")
+                if agent_type and agent_type not in seen:
+                    seen.add(agent_type)
+                    types_list.append(agent_type)
+            if types_list:
+                agent_types = types_list
+
         for router_config in router_agents:
             _LOGGER.debug("Checking with router: %s", router_config.get(CONF_AGENT_NAME))
             decision = await self._classify_with_router(
-                router_config, user_input.text, area_context, user_input.language
+                router_config,
+                user_input.text,
+                area_context,
+                user_input.language,
+                agent_types,
             )
             if decision is None:
                 _LOGGER.info(
@@ -840,6 +1218,7 @@ class NeuralBridgeAgent(ConversationEntity):
         user_text: str,
         area_context: str | None = None,
         language: str | None = None,
+        agent_types: list[str] | None = None,
     ) -> RouterDecision | None:
         """Ask a router agent to classify user text via a JSON prompt.
 
@@ -865,6 +1244,9 @@ class NeuralBridgeAgent(ConversationEntity):
             user_text:     The raw user input text to classify.
             area_context:  Friendly area name of the originating device, or None.
             language:      BCP-47 language tag from the HA pipeline, or None.
+            agent_types:   Optional ordered list of agent-type identifiers for
+                           the compact manifest hint (Feature 14c).  E.g.
+                           ``["home_assistant", "ollama", "web_search"]``.
 
         Returns:
             A RouterDecision on success or fallback, None to block the request.
@@ -889,6 +1271,11 @@ class NeuralBridgeAgent(ConversationEntity):
             prompt = f"{prompt}\n\nDevice area: {area_context}"
         if language:
             prompt = f"{prompt}\nLanguage: {language}"
+        # Feature 14c: append compact agent-type manifest so the model knows
+        # which agent types are available (suppresses web_search when absent).
+        if agent_types:
+            manifest = ", ".join(agent_types)
+            prompt = f"{prompt}\n[Available: {manifest}]"
 
         if log_level == ROUTER_LOG_LEVEL_DEBUG_QUERY:
             _LOGGER.debug("Router '%s' classifying query: %s", agent_name, user_text)
@@ -1253,6 +1640,13 @@ class NeuralBridgeAgent(ConversationEntity):
                 lang_name = _get_language_name(user_input.language)
                 system_prompt = f"{system_prompt}\nRespond in {lang_name}.".strip()
 
+        # Feature 6 — Response verbosity: append instruction to the system prompt.
+        verbosity: str = config.get(CONF_RESPONSE_VERBOSITY, DEFAULT_RESPONSE_VERBOSITY)
+        if verbosity == VERBOSITY_BRIEF:
+            system_prompt = f"{system_prompt}\n{VERBOSITY_INSTRUCTION_BRIEF}".strip()
+        elif verbosity == VERBOSITY_VERBOSE:
+            system_prompt = f"{system_prompt}\n{VERBOSITY_INSTRUCTION_VERBOSE}".strip()
+
         # Build message list: optional system prompt + history + current turn (#9)
         history = self._session_memory.get_messages(user_input.conversation_id)
         messages: list[dict[str, str]] = []
@@ -1301,13 +1695,8 @@ class NeuralBridgeAgent(ConversationEntity):
             ConversationResult on success, None on failure.
         """
         entity_id: str | None = agent_config.get(CONF_ENTITY_ID)
-        if entity_id is None:
-            _LOGGER.error("Existing agent has no entity_id configured")
-            return None
-
-        agent_state = self.hass.states.get(entity_id)
-        if not agent_state:
-            _LOGGER.error("Conversation agent %s not found", entity_id)
+        if entity_id is None or not self.hass.states.get(entity_id):
+            _LOGGER.error("Existing agent has no entity_id configured or is not found")
             return None
 
         # Isolate the sub-agent from the outer ChatLog so the sub-agent cannot
@@ -1321,12 +1710,24 @@ class NeuralBridgeAgent(ConversationEntity):
         _chat_log_token = current_chat_log.set(None)
 
         response: Any = None
+        # Feature 6 — Response verbosity: prepend hint for cloud (EXISTING) agents.
+        agent_type: str = agent_config.get(CONF_AGENT_TYPE, "")
+        verbosity_cfg: str = self._get_config().get(
+            CONF_RESPONSE_VERBOSITY, DEFAULT_RESPONSE_VERBOSITY
+        )
+        query_text = user_input.text
+        if agent_type == AGENT_TYPE_EXISTING:
+            if verbosity_cfg == VERBOSITY_BRIEF:
+                query_text = f"[Brief response] {user_input.text}"
+            elif verbosity_cfg == VERBOSITY_VERBOSE:
+                query_text = f"[Verbose response] {user_input.text}"
+
         try:
             response = await self.hass.services.async_call(
                 CONVERSATION_DOMAIN,
                 "process",
                 {
-                    "text": user_input.text,
+                    "text": query_text,
                     "agent_id": entity_id,
                     "conversation_id": user_input.conversation_id,
                     "language": user_input.language,
@@ -1366,7 +1767,22 @@ class NeuralBridgeAgent(ConversationEntity):
                 return None
 
         speech_text = str(response_section.get("speech", {}).get("plain", {}).get("speech", ""))
-        return self._create_result(speech_text, user_input.conversation_id) if speech_text else None
+        if not speech_text:
+            return None
+
+        # Feature 6 — For LOCAL_HA agents in brief mode, trim to the first sentence.
+        if agent_type == AGENT_TYPE_LOCAL_HA and verbosity_cfg == VERBOSITY_BRIEF:
+            speech_text = _truncate_to_first_sentence(speech_text)
+
+        # Capture targeted entity IDs so _check_high_stakes can inspect their domains.
+        # The HA conversation service returns targets under response["data"]["targets"].
+        conv_key = user_input.conversation_id or "default"
+        targets_raw = response_section.get("data", {}).get("targets", [])
+        self._local_ha_targets[conv_key] = [
+            t["id"] for t in targets_raw if isinstance(t, dict) and "id" in t
+        ]
+
+        return self._create_result(speech_text, user_input.conversation_id)
 
     async def _process_with_web_search(
         self, agent_config: dict[str, Any], user_input: ConversationInput
@@ -1532,6 +1948,90 @@ class NeuralBridgeAgent(ConversationEntity):
             action, result, response_text, conversation_id, guard_rail_result
         )
 
+    async def _check_high_stakes(
+        self,
+        agent_config: dict[str, Any],
+        result: ConversationResult,
+        user_input: ConversationInput,
+    ) -> ConversationResult | None:
+        """Intercept LOCAL_HA results that target high-stakes domains (Feature 4).
+
+        Domain matching uses two complementary strategies:
+          1. ``_local_ha_targets``: entity IDs captured from the raw HA service
+             response by ``_process_with_existing`` (most precise).
+          2. Response-text keyword scan: checks whether any configured domain
+             name appears as a standalone word in the agent's response speech.
+             This is the fallback when no entity IDs were captured (e.g., the
+             HA agent returned a result with no ``data.targets``).
+
+        When the successful agent is LOCAL_HA (or EXISTING in assist mode) AND
+        the targeted entities include a domain listed in
+        ``CONF_HIGH_STAKES_DOMAINS``, the original result is stored in
+        ``_high_stakes_cache`` and a confirmation prompt is returned instead.
+        The caller may then confirm on the next turn via
+        ``_resolve_high_stakes_confirmation``.
+
+        Args:
+            agent_config: Configuration of the agent that produced the result.
+            result: The ConversationResult that will be intercepted if necessary.
+            user_input: The user's original conversation input.
+
+        Returns:
+            A confirmation-prompt ConversationResult if interception occurred,
+            otherwise None (meaning the original result should be used).
+        """
+        config = self._get_config()
+        if not config.get(CONF_HIGH_STAKES_ENABLED, DEFAULT_HIGH_STAKES_ENABLED):
+            return None
+
+        agent_type = agent_config.get(CONF_AGENT_TYPE)
+        if agent_type not in (AGENT_TYPE_LOCAL_HA, AGENT_TYPE_EXISTING):
+            return None
+
+        conv_key = user_input.conversation_id or "default"
+        hs_domains: list[str] = config.get(CONF_HIGH_STAKES_DOMAINS, DEFAULT_HIGH_STAKES_DOMAINS)
+
+        # Strategy 1: use captured entity IDs from _local_ha_targets
+        entity_ids = self._local_ha_targets.pop(conv_key, [])
+        matched = [eid for eid in entity_ids if eid.split(".")[0] in hs_domains]
+
+        # Strategy 2: keyword scan in response text when no entity IDs are available
+        if not matched:
+            response_text = self._extract_response_text(result)
+            lower_text = response_text.lower()
+            matched = [d for d in hs_domains if re.search(rf"\b{re.escape(d)}\b", lower_text)]
+
+        if not matched:
+            return None
+
+        # Store the result pending confirmation and fire the HA event
+        await self._high_stakes_cache.store_pending(conv_key, result, list(matched))
+        self.hass.bus.async_fire(
+            EVENT_HIGH_STAKES_TRIGGERED,
+            {
+                "agent_name": agent_config.get(CONF_AGENT_NAME, "Unknown"),
+                "agent_id": agent_config.get("id", ""),
+                "entity_ids": list(matched),
+                "secret_required": config.get(
+                    CONF_HIGH_STAKES_SECRET_ENABLED, DEFAULT_HIGH_STAKES_SECRET_ENABLED
+                ),
+            },
+        )
+
+        _LOGGER.info(
+            "High-stakes confirmation required for: %s",
+            ", ".join(matched),
+        )
+
+        secret_enabled = config.get(
+            CONF_HIGH_STAKES_SECRET_ENABLED, DEFAULT_HIGH_STAKES_SECRET_ENABLED
+        )
+        if secret_enabled:
+            prompt = self._localized("responses", "high_stakes_passphrase_prompt")
+        else:
+            prompt = self._localized("responses", "high_stakes_confirmation")
+        return self._create_result(prompt, user_input.conversation_id)
+
     async def _get_guard_rail_agent_config(self) -> dict[str, Any] | None:
         """Return the configuration for the designated guard rail agent.
 
@@ -1549,6 +2049,76 @@ class NeuralBridgeAgent(ConversationEntity):
                 return agent_config
 
         return None
+
+    # ------------------------------------------------------------------
+    # Feature 11 — Broadcast announce
+    # ------------------------------------------------------------------
+
+    def _find_tts_entity(self) -> str | None:
+        """Return the entity_id of the first TTS entity, or None.
+
+        Iterates over all current HA states and returns the first entity
+        whose ID starts with ``tts.``.
+
+        Returns:
+            A TTS entity_id string, or ``None`` if none is registered.
+        """
+        for entity_id in self.hass.states.async_entity_ids():
+            if entity_id.startswith("tts."):
+                return entity_id
+        return None
+
+    async def _send_broadcast_announcement(
+        self,
+        text: str,
+        media_players: list[str],
+        user_input: ConversationInput,
+    ) -> ConversationResult:
+        """Send *text* to every player in *media_players* via TTS.
+
+        Calls the ``tts.speak`` HA service once per media player, then fires
+        the :data:`EVENT_ANNOUNCE_SENT` event so other automations can react.
+
+        Args:
+            text: The announcement message to speak.
+            media_players: List of ``media_player.*`` entity IDs.
+            user_input: Original conversation input (used for conversation_id).
+
+        Returns:
+            A confirmation result, or an error result when no TTS entity exists.
+        """
+        tts_entity = self._find_tts_entity()
+        if not tts_entity:
+            return self._create_error_result(
+                "No text-to-speech (tts) entity found.", user_input.conversation_id
+            )
+
+        for player in media_players:
+            await self.hass.services.async_call(
+                "tts",
+                "speak",
+                {
+                    "entity_id": tts_entity,
+                    "media_player_entity_id": player,
+                    "message": text,
+                    "cache": False,
+                },
+            )
+
+        count = len(media_players)
+        preview = (
+            text[:_ANNOUNCE_PREVIEW_MAX_LEN] + "\u2026"
+            if len(text) > _ANNOUNCE_PREVIEW_MAX_LEN
+            else text
+        )
+        self.hass.bus.async_fire(
+            EVENT_ANNOUNCE_SENT,
+            {"media_player_count": count, "text_preview": preview},
+        )
+        return self._create_result(
+            f"Message sent to {count} speaker{'s' if count != 1 else '.'}",
+            user_input.conversation_id,
+        )
 
     def _create_result(
         self, response_text: str, conversation_id: str | None = None

@@ -37,11 +37,13 @@ Process a user input through the routing chain.
 - `ConversationResult` with speech response and conversation metadata
 
 **Routing order:**
-1. Router agents (priority 0) — classify with `RouterDecision(local_ha, complexity)`
-2. `_apply_router_decision()` — filter/reorder processing agents
-3. Processing agents (priority 1–100) — tried in order, first success returned
-4. Output guard rail check per agent (if enabled for that agent)
-5. Fallback response if all agents fail
+1. Confirmation check — handle pending guard-rail or high-stakes `yes`/`no` responses
+2. Response cache — return a cached hit immediately (exact or semantic key)
+3. Router agents (`is_router=True`, or `priority == 0` as legacy fallback) — classify with `RouterDecision`
+4. `_apply_router_decision()` — filter/reorder processing agents based on `RouterDecision` flags
+5. Processing agents (priority 1–100) — tried in order, first success returned
+6. Output guard rail check per agent (if enabled for that agent)
+7. Fallback response if all agents fail
 
 **Example:**
 ```python
@@ -60,22 +62,34 @@ result = await entity.async_process(
 
 ## Key Internal Methods
 
-### `_check_with_routers(user_input, router_agents) -> RouterDecision | None`
+### `_check_with_routers(user_input, router_agents, processing_agents) -> RouterDecision | None`
 
-Calls each priority-0 Ollama router agent in sequence. Returns the first
-`RouterDecision` produced. Returns `None` (no routing decision) when no routers are
-configured or all routers are unavailable (fail-open behaviour applied by
-`_apply_router_decision()`).
+Calls each configured router agent in sequence. Router agents are identified by the
+`is_router=True` flag; `priority == 0` is accepted as a legacy fallback.
+Any agent type is supported for routing (Ollama, Existing HA agent, or LOCAL_HA).
+
+Builds a compact agent-type manifest (e.g. `[Available: home_assistant, ollama]`)
+from `processing_agents` and injects it into every router prompt so the model can
+tailor its classification to the available agents (see Feature 14c).
+
+Returns `None` to block the request immediately when any router returns a block
+signal. Falls back to a default `RouterDecision` (fail-open) if every router
+errors — a broken router never silences the assistant.
 
 A `RouterDecision` with `complexity == 0` causes the request to be blocked
 immediately without calling any processing agent.
 
 ### `_classify_with_router(router_config, user_text) -> RouterDecision | None`
 
-Sends `ROUTER_CLASSIFICATION_PROMPT.format(user_text=...)` (or a custom prompt if
-configured) to the router Ollama agent. Parses the JSON response into a
-`RouterDecision(local_ha, complexity)`. Returns `None` on parse error, timeout,
-or network failure — the caller applies the configured fallback behaviour.
+Sends `ROUTER_CLASSIFICATION_PROMPT` (or a custom prompt if configured) to the
+router agent back-end. Supports Ollama agents via `OllamaClient` and any HA
+conversation agent (existing integration or LOCAL_HA) via the `conversation.process`
+service.
+
+Parses the JSON response into a `RouterDecision`. Returns `None` on parse error,
+timeout, or network failure — the caller applies the configured fallback behaviour.
+When `confidence == "low"`, flag-based promotion (`local_ha` / `web_search`) is
+skipped and all eligible agents are returned in priority order.
 
 ### `_apply_router_decision(agents, decision) -> list[AgentConfig]`
 
@@ -108,12 +122,21 @@ fall-through to the next agent.
 
 ```python
 class RouterDecision:
-    local_ha: bool    # True = pin to LOCAL_HA agents
-    complexity: int   # 0 = block; 1–100 = estimated complexity; -1 = skip routing
+    local_ha: bool          # True = pin to LOCAL_HA agents
+    web_search: bool        # True = route to web-search agent
+    complexity: int         # 0 = block; 1–100 = estimated complexity; -1 = skip routing
+    intent_hint: str | None # "timer", "reminder", "todo", "shopping_list", "announce", or None
+    confidence: str         # "high" (default) or "low" — when "low", flag-promotion is skipped
 ```
 
 Immutable dataclass (uses `__slots__`). Returned by `_classify_with_router()` and
 consumed by `_apply_router_decision()`.
+
+| complexity sentinel | Meaning |
+|---|---|
+| `0` | Block this request — return an error result immediately |
+| `1–100` | Estimated complexity; higher values prefer more capable agents |
+| `-1` | `skip_routing` fallback sentinel — all processing agents returned unchanged |
 
 ---
 

@@ -59,6 +59,10 @@ placeholders:
     Introduzca patrones regex personalizados (uno por línea) para bloquear el contenido
     coincidente. Los patrones se combinan con los predeterminados. Déjelo en blanco para
     usar solo los predeterminados.
+  high_stakes_info: >-
+    Cuando está habilitado, las acciones que apuntan a los dominios de HA seleccionados se
+    interceptan y se pide al usuario que confirme antes de ejecutar la acción. Opcionalmente
+    requiere una frase de contraseña para mayor seguridad.
 
 # ── Guard rail rule category labels ───────────────────────────────────────────
 guard_rail_categories:
@@ -96,6 +100,11 @@ responses:
   guard_rail_notify_ask: >-
     Esta respuesta puede contener información dañina o sensible.
     ¿Le gustaría continuar?
+  announce_confirmation: "Anuncio enviado a {count} altavoz(es)."
+  announce_no_tts: "No hay integración de texto a voz (TTS) configurada. Por favor, añade una integración TTS."
+  high_stakes_confirmation: "¿Estás seguro? Esta acción puede ser irreversible. Confirma con 'sí' o 'no'."
+  high_stakes_passphrase_prompt: "Esta acción requiere confirmación. Por favor di tu contraseña para continuar."
+  high_stakes_cancelled: "Acción cancelada."
 
 # ── Language settings step ────────────────────────────────────────────────────
 language_settings:
