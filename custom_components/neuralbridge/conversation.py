@@ -548,23 +548,19 @@ class NeuralBridgeAgent(ConversationEntity):
     def _maybe_add_to_chat_log(self, result: ConversationResult) -> None:
         """Add the assistant response to the active ChatLog if one exists.
 
-        In Home Assistant 2025.2+, the conversation framework maintains a ChatLog
-        to track the conversation history.  Our response must be recorded as an
-        AssistantContent entry so HA does not generate a WARNING that includes
-        the user's message text (PII).
+        The conversation framework maintains a ChatLog to track the conversation
+        history.  Our response must be recorded as an AssistantContent entry so
+        HA does not generate a WARNING that includes the user's message text (PII).
 
-        This is a no-op on HA versions that do not ship the ChatLog module.
+        This is a no-op when no ChatLog is active for the current context.
 
         Args:
             result: The ConversationResult containing the response to record.
         """
-        try:
-            from homeassistant.components.conversation.chat_log import (  # noqa: PLC0415
-                AssistantContent,
-                current_chat_log,
-            )
-        except ImportError:
-            return
+        from homeassistant.components.conversation.chat_log import (  # noqa: PLC0415
+            AssistantContent,
+            current_chat_log,
+        )
 
         if (chat_log := current_chat_log.get()) is None:
             return
@@ -1317,17 +1313,12 @@ class NeuralBridgeAgent(ConversationEntity):
         # Isolate the sub-agent from the outer ChatLog so the sub-agent cannot
         # write a duplicate entry into it.  Restore after the call regardless of
         # outcome.  See docstring for the full explanation.
-        _chat_log_token = None
-        _chat_log_var = None
-        try:
-            from homeassistant.components.conversation.chat_log import (  # noqa: PLC0415
-                current_chat_log,
-            )
+        from homeassistant.components.conversation.chat_log import (  # noqa: PLC0415
+            current_chat_log,
+        )
 
-            _chat_log_var = current_chat_log
-            _chat_log_token = current_chat_log.set(None)
-        except ImportError:
-            pass
+        _chat_log_var = current_chat_log
+        _chat_log_token = current_chat_log.set(None)
 
         response: Any = None
         try:
@@ -1347,8 +1338,7 @@ class NeuralBridgeAgent(ConversationEntity):
         except Exception as err:  # pylint: disable=broad-except
             _LOGGER.error("Error calling conversation agent %s: %s", entity_id, err)
         finally:
-            if _chat_log_token is not None and _chat_log_var is not None:
-                _chat_log_var.reset(_chat_log_token)
+            _chat_log_var.reset(_chat_log_token)
 
         if response is None:
             return None

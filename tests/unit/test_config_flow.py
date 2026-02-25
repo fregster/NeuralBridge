@@ -110,17 +110,17 @@ def _make_handler(
 ) -> NeuralBridgeOptionsFlowHandler:
     """Create a NeuralBridgeOptionsFlowHandler with hass and flow attrs injected."""
     # Ensure the entry is registered with hass — required because OptionsFlow.config_entry
-    # is now a property that calls hass.config_entries.async_get_known_entry(_config_entry_id).
+    # is a property that calls hass.config_entries.async_get_known_entry(_config_entry_id),
+    # where _config_entry_id is itself a property returning self.handler.
     if not hass.config_entries.async_get_entry(mock_config_entry.entry_id):
         mock_config_entry.add_to_hass(hass)
     handler = NeuralBridgeOptionsFlowHandler()
-    # _config_entry_id is what the new HA OptionsFlow.config_entry property reads.
-    handler._config_entry_id = mock_config_entry.entry_id  # type: ignore[attr-defined]
     handler.hass = hass
-    # flow_id and handler are normally set by the HA flow manager; provide
-    # sentinel values so async_show_form / async_show_menu don't raise.
+    # flow_id is normally set by the HA flow manager.
     handler.flow_id = "test-flow-id"  # type: ignore[attr-defined]
-    handler.handler = DOMAIN  # type: ignore[attr-defined]
+    # handler must equal the config entry's entry_id — that is what the
+    # OptionsFlow._config_entry_id property returns (return self.handler).
+    handler.handler = mock_config_entry.entry_id  # type: ignore[attr-defined]
     return handler
 
 
