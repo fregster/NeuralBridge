@@ -56,6 +56,19 @@ RELEVANT_DOMAINS: Final[frozenset[str]] = frozenset(
 # Keeps the appended context manageable on large installations.
 MAX_ENTITIES_PER_DOMAIN: Final = 20
 
+# Domains where the current state VALUE carries semantic meaning for routing.
+# Only these domains appear in the live sensor-values block appended to the
+# router classification prompt.  Other domains (lights, switches, etc.) have
+# states like "on" / "off" that add noise rather than useful routing signal.
+_SENSOR_DOMAINS: Final[frozenset[str]] = frozenset({"sensor", "binary_sensor"})
+
+# Maximum entries in the live sensor-values block.
+# This is a hard ceiling against truly pathological installs (thousands of
+# sensors).  In normal use every sensor is included — the cap should never
+# be hit.  A sensor entry is ~30-50 chars; even 500 sensors is only ~6,000
+# tokens, well within every LLM context window used with HA.
+MAX_SENSOR_VALUES: Final = 500
+
 
 class EntityContextCache:
     """Lazy-rebuilding cache of a compact smart home entity summary.
@@ -96,6 +109,130 @@ class EntityContextCache:
             self._summary = self._build_summary(hass)
             self._entity_hash = current_hash
         return self._summary
+
+    def get_sensor_names(self, hass: HomeAssistant) -> str:
+        """Return a fresh (uncached) list of sensor names and units — no live values.
+
+        Intended for the router classification prompt only.  Providing just the
+        sensor name and unit lets the router identify *which* sensors exist and
+        decide whether a query is answerable locally, without exposing the live
+        readings that could vary between the routing decision and the final answer.
+
+        Only ``sensor`` and ``binary_sensor`` domains are included.  Entities
+        reporting ``unavailable`` or ``unknown`` are excluded.  Output is sorted
+        alphabetically and capped at :data:`MAX_SENSOR_VALUES` entries.
+
+        Args:
+            hass: The Home Assistant core instance.
+
+        Returns:
+            Multi-line block starting with ``"Available sensors:\\n"`` and one
+            ``"- Name [unit]"`` or ``"- Name"`` line per sensor, or ``""`` when
+            no eligible sensor states exist.
+        """
+        entries: list[str] = []
+        for state in hass.states.async_all():
+            if state.domain not in _SENSOR_DOMAINS:
+                continue
+            if state.state in ("unavailable", "unknown"):
+                continue
+            name = str(state.attributes.get("friendly_name") or state.entity_id)
+            unit: str = str(state.attributes.get("unit_of_measurement") or "")
+            # Include entity_id so the router can populate relevant_sensors with
+            # exact entity IDs rather than fuzzy friendly names.
+            label = (
+                f"- {state.entity_id}: {name} [{unit}]" if unit else f"- {state.entity_id}: {name}"
+            )
+            entries.append(label)
+        if not entries:
+            return ""
+        return "Available sensors:\n" + "\n".join(sorted(entries)[:MAX_SENSOR_VALUES])
+
+    def get_sensor_values_for(
+        self, hass: HomeAssistant, entity_ids: list[str] | tuple[str, ...]
+    ) -> str:
+        """Return live values for a specific set of sensor entity IDs.
+
+        Used by the processing pipeline after the router has identified which
+        sensors are relevant to the current query via ``relevant_sensors`` in
+        the router JSON response.  Only the nominated sensors are fetched,
+        keeping the injection block compact and the LLM focus narrow.
+
+        Entities reporting ``unavailable`` or ``unknown`` are excluded.  An
+        empty string is returned when none of the requested entities produce
+        usable state.
+
+        Args:
+            hass:       The Home Assistant core instance.
+            entity_ids: Iterable of entity ID strings to look up.
+
+        Returns:
+            Multi-line block starting with ``"Current sensor values:\\n"`` and
+            one ``"- Name: value unit"`` line per sensor, or ``""`` when no
+            eligible states are found.
+        """
+        entries: list[str] = []
+        for entity_id in entity_ids:
+            state = hass.states.get(entity_id)
+            if state is None:
+                continue
+            if state.state in ("unavailable", "unknown"):
+                continue
+            name = str(state.attributes.get("friendly_name") or state.entity_id)
+            unit_raw: str = str(state.attributes.get("unit_of_measurement") or "")
+            value_str = f"{state.state} {unit_raw}".strip() if unit_raw else state.state
+            entries.append(f"- {name}: {value_str}")
+        if not entries:
+            return ""
+        return "Current sensor values:\n" + "\n".join(entries)
+
+    def get_sensor_values(self, hass: HomeAssistant) -> str:
+        """Return a fresh (uncached) snapshot of sensor and binary_sensor values.
+
+        This method is intentionally NOT cached — it always reads live state so
+        that the router classification prompt reflects current readings.  It is
+        appended to the router prompt alongside the cached entity-name summary,
+        giving small local models enough semantic signal to route questions like
+        "is it raining?" or "what is the river level?" to the correct agent even
+        when the question phrasing differs from the sensor's friendly name.
+
+        Only ``sensor`` and ``binary_sensor`` domains are included; other domains
+        (lights, switches, etc.) have on/off states that add noise rather than
+        useful routing signal.  Entities reporting ``unavailable`` or ``unknown``
+        are excluded.  Output is capped at :data:`MAX_SENSOR_VALUES` entries.
+
+        This method is also reachable from
+        :meth:`~custom_components.neuralbridge.conversation.NeuralBridgeAgent.\
+        _render_ha_context` via the ``{ha_sensor_states}`` prompt token, which
+        allows users who connect Ollama **directly** (``AGENT_TYPE_OLLAMA``) to
+        opt-in to receiving sensor data in the system prompt.  It must **never**
+        be called automatically for ``LOCAL_HA`` or ``EXISTING`` agents because
+        those agents receive sensor data natively through HA's own conversation
+        infrastructure.
+
+        Args:
+            hass: The Home Assistant core instance.
+
+        Returns:
+            Multi-line block starting with ``"Current sensor values:\\n"`` and
+            one ``"- Name: value unit"`` line per sensor, sorted alphabetically,
+            or ``""`` when no eligible sensor states exist.
+        """
+        entries: list[str] = []
+        for state in hass.states.async_all():
+            if state.domain not in _SENSOR_DOMAINS:
+                continue
+            if state.state in ("unavailable", "unknown"):
+                continue
+            name = str(state.attributes.get("friendly_name") or state.entity_id)
+            unit: str = str(state.attributes.get("unit_of_measurement") or "")
+            value_str = f"{state.state} {unit}".strip() if unit else state.state
+            entries.append(f"- {name}: {value_str}")
+        if not entries:
+            return ""
+        # Sort alphabetically BEFORE capping so that the cap is deterministic
+        # regardless of HA's internal entity registration order.
+        return "Current sensor values:\n" + "\n".join(sorted(entries)[:MAX_SENSOR_VALUES])
 
     def invalidate(self) -> None:
         """Force the cache to rebuild on the next :meth:`get_summary` call.

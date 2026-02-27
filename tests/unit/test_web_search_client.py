@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -51,18 +52,31 @@ def _make_brave_response(
 
 
 def _make_session_cm(mock_response: AsyncMock) -> MagicMock:
-    """Wrap a response mock inside the two-level context manager aiohttp uses."""
+    """Return a mock aiohttp session whose ``.get()`` yields *mock_response*.
+
+    After P3, providers hold a persistent ``_session`` rather than wrapping the
+    whole call in ``async with aiohttp.ClientSession()``.  The helper now returns
+    the **session object** directly (not an outer async CM), and ``session.closed``
+    is set to ``False`` so ``_get_session`` re-uses the existing instance.
+
+    Usage in tests::
+
+        session_cm = _make_session_cm(mock_response)
+        with patch(
+            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            return_value=session_cm,
+        ):
+            ...
+    """
     get_cm = AsyncMock()
     get_cm.__aenter__ = AsyncMock(return_value=mock_response)
     get_cm.__aexit__ = AsyncMock(return_value=None)
 
     session = MagicMock()
+    session.closed = False
     session.get = MagicMock(return_value=get_cm)
-
-    session_cm = AsyncMock()
-    session_cm.__aenter__ = AsyncMock(return_value=session)
-    session_cm.__aexit__ = AsyncMock(return_value=None)
-    return session_cm
+    session.close = AsyncMock()
+    return session
 
 
 def _web_response(count: int = 2) -> dict[str, Any]:
@@ -198,15 +212,14 @@ async def test_brave_search_client_error_returns_empty(
     get_cm.__aenter__ = AsyncMock(side_effect=aiohttp.ClientError("connection refused"))
     get_cm.__aexit__ = AsyncMock(return_value=None)
     session = MagicMock()
+    session.closed = False
+    session.close = AsyncMock()
     session.get = MagicMock(return_value=get_cm)
-    session_cm = AsyncMock()
-    session_cm.__aenter__ = AsyncMock(return_value=session)
-    session_cm.__aexit__ = AsyncMock(return_value=None)
 
     with (
         patch(
             "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
-            return_value=session_cm,
+            return_value=session,
         ),
         caplog.at_level(logging.ERROR),
     ):
@@ -225,15 +238,14 @@ async def test_brave_search_unexpected_exception_returns_empty(
     get_cm.__aenter__ = AsyncMock(side_effect=RuntimeError("boom"))
     get_cm.__aexit__ = AsyncMock(return_value=None)
     session = MagicMock()
+    session.closed = False
+    session.close = AsyncMock()
     session.get = MagicMock(return_value=get_cm)
-    session_cm = AsyncMock()
-    session_cm.__aenter__ = AsyncMock(return_value=session)
-    session_cm.__aexit__ = AsyncMock(return_value=None)
 
     with (
         patch(
             "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
-            return_value=session_cm,
+            return_value=session,
         ),
         caplog.at_level(logging.ERROR),
     ):
@@ -266,6 +278,75 @@ async def test_brave_search_api_key_never_logged(caplog: pytest.LogCaptureFixtur
 
     for record in caplog.records:
         assert secret not in record.getMessage()
+
+
+# ---------------------------------------------------------------------------
+# BraveSearchProvider — session lifecycle (P3)
+# ---------------------------------------------------------------------------
+
+
+async def test_brave_search_session_reused_across_calls() -> None:
+    """A single ClientSession is created and reused for two consecutive searches."""
+    data = _web_response(1)
+    mock_response = _make_brave_response(200, data)
+    session_mock = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        return_value=session_mock,
+    ) as session_cls:
+        provider = BraveSearchProvider(api_key="tok")
+        await provider.search("first query")
+        await provider.search("second query")
+
+    # ClientSession constructor called only once
+    assert session_cls.call_count == 1
+
+
+async def test_brave_search_close_closes_session_and_clears_ref() -> None:
+    """close() closes the session and sets _session to None."""
+    data = _web_response(1)
+    mock_response = _make_brave_response(200, data)
+    session_mock = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        return_value=session_mock,
+    ):
+        provider = BraveSearchProvider(api_key="tok")
+        await provider.search("query")  # creates session
+        assert provider._session is not None
+
+        await provider.close()
+
+    assert provider._session is None
+    session_mock.close.assert_awaited_once()
+
+
+async def test_brave_search_session_recreated_after_close() -> None:
+    """After close(), the next search call recreates the session."""
+    data = _web_response(1)
+    mock_response = _make_brave_response(200, data)
+    session_mock1 = _make_session_cm(mock_response)
+    session_mock2 = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        side_effect=[session_mock1, session_mock2],
+    ) as session_cls:
+        provider = BraveSearchProvider(api_key="tok")
+        await provider.search("first")  # uses session_mock1
+        await provider.close()
+        await provider.search("second")  # recreates → session_mock2
+
+    assert session_cls.call_count == 2
+
+
+async def test_brave_search_close_is_noop_when_no_session() -> None:
+    """close() on a fresh provider (no session yet) does not raise."""
+    provider = BraveSearchProvider(api_key="tok")
+    assert provider._session is None
+    await provider.close()  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -597,6 +678,36 @@ async def test_web_search_client_no_results_returns_none(
 
 
 # ---------------------------------------------------------------------------
+# WebSearchClient — close() session lifecycle (P3)
+# ---------------------------------------------------------------------------
+
+
+async def test_web_search_client_close_delegates_to_provider() -> None:
+    """WebSearchClient.close() calls close() on the underlying provider."""
+    config: dict[str, Any] = {
+        CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE,
+        CONF_SEARCH_API_KEY: "key",
+    }
+    client = WebSearchClient(config)
+    client._provider.close = AsyncMock()  # type: ignore[attr-defined]
+    await client.close()
+    client._provider.close.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_web_search_client_close_safe_when_provider_has_no_close() -> None:
+    """WebSearchClient.close() is a no-op when the provider has no close method."""
+    config: dict[str, Any] = {
+        CONF_SEARCH_PROVIDER: SEARCH_PROVIDER_BRAVE,
+        CONF_SEARCH_API_KEY: "key",
+    }
+    client = WebSearchClient(config)
+    # Replace the provider with a protocol-only object that has no close method
+    bare_provider = MagicMock(spec=[])  # spec=[] means no attributes
+    client._provider = bare_provider
+    await client.close()  # should not raise
+
+
+# ---------------------------------------------------------------------------
 # SearchResult dataclass
 # ---------------------------------------------------------------------------
 
@@ -783,15 +894,14 @@ async def test_brave_answers_search_client_error_returns_empty(
     get_cm.__aenter__ = AsyncMock(side_effect=aiohttp.ClientError("no route"))
     get_cm.__aexit__ = AsyncMock(return_value=None)
     session = MagicMock()
+    session.closed = False
+    session.close = AsyncMock()
     session.get = MagicMock(return_value=get_cm)
-    session_cm = AsyncMock()
-    session_cm.__aenter__ = AsyncMock(return_value=session)
-    session_cm.__aexit__ = AsyncMock(return_value=None)
 
     with (
         patch(
             "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
-            return_value=session_cm,
+            return_value=session,
         ),
         caplog.at_level(logging.ERROR),
     ):
@@ -810,15 +920,14 @@ async def test_brave_answers_search_unexpected_exception_returns_empty(
     get_cm.__aenter__ = AsyncMock(side_effect=RuntimeError("boom"))
     get_cm.__aexit__ = AsyncMock(return_value=None)
     session = MagicMock()
+    session.closed = False
+    session.close = AsyncMock()
     session.get = MagicMock(return_value=get_cm)
-    session_cm = AsyncMock()
-    session_cm.__aenter__ = AsyncMock(return_value=session)
-    session_cm.__aexit__ = AsyncMock(return_value=None)
 
     with (
         patch(
             "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
-            return_value=session_cm,
+            return_value=session,
         ),
         caplog.at_level(logging.ERROR),
     ):
@@ -848,6 +957,71 @@ async def test_brave_answers_search_api_key_never_logged(
 
     for record in caplog.records:
         assert secret not in record.getMessage()
+
+
+# ---------------------------------------------------------------------------
+# BraveAnswersProvider — session lifecycle (P3)
+# ---------------------------------------------------------------------------
+
+
+async def test_brave_answers_session_reused_across_calls() -> None:
+    """A single ClientSession is created and reused for two consecutive searches."""
+    mock_response = _make_answers_response(200, {"answer": {"text": "42"}})
+    session_mock = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        return_value=session_mock,
+    ) as session_cls:
+        provider = BraveAnswersProvider(api_key="tok")
+        await provider.search("first question")
+        await provider.search("second question")
+
+    assert session_cls.call_count == 1
+
+
+async def test_brave_answers_close_closes_session_and_clears_ref() -> None:
+    """close() closes the session and sets _session to None."""
+    mock_response = _make_answers_response(200, {"answer": {"text": "yes"}})
+    session_mock = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        return_value=session_mock,
+    ):
+        provider = BraveAnswersProvider(api_key="tok")
+        await provider.search("question")
+        assert provider._session is not None
+
+        await provider.close()
+
+    assert provider._session is None
+    session_mock.close.assert_awaited_once()
+
+
+async def test_brave_answers_session_recreated_after_close() -> None:
+    """After close(), the next search recreates the session."""
+    mock_response = _make_answers_response(200, {"answer": {"text": "yes"}})
+    session_mock1 = _make_session_cm(mock_response)
+    session_mock2 = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        side_effect=[session_mock1, session_mock2],
+    ) as session_cls:
+        provider = BraveAnswersProvider(api_key="tok")
+        await provider.search("first")
+        await provider.close()
+        await provider.search("second")
+
+    assert session_cls.call_count == 2
+
+
+async def test_brave_answers_close_is_noop_when_no_session() -> None:
+    """close() on a fresh provider does not raise."""
+    provider = BraveAnswersProvider(api_key="tok")
+    assert provider._session is None
+    await provider.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1002,6 +1176,18 @@ def test_brave_combined_provider_creates_sub_providers() -> None:
     assert provider._search._timeout == 8
 
 
+async def test_brave_combined_provider_close_delegates_to_sub_providers() -> None:
+    """BraveAnswersCombinedProvider.close() delegates to both sub-providers."""
+    provider = BraveAnswersCombinedProvider(answers_api_key="ans-key", search_api_key="srch-key")
+    provider._answers.close = AsyncMock()  # type: ignore[method-assign]
+    provider._search.close = AsyncMock()  # type: ignore[method-assign]
+
+    await provider.close()
+
+    provider._answers.close.assert_awaited_once()
+    provider._search.close.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # WebSearchClient.__init__ — new providers
 # ---------------------------------------------------------------------------
@@ -1086,3 +1272,74 @@ def test_format_results_single_result_with_url_still_uses_preamble() -> None:
     output = _format_results([result], max_snippet_len=200)
     assert output.startswith("Here is what I found:")
     assert "1. A page" in output
+
+
+# ---------------------------------------------------------------------------
+# P5 — Rate-limiting semaphore
+# ---------------------------------------------------------------------------
+
+
+def test_brave_search_default_max_concurrent_is_two() -> None:
+    """BraveSearchProvider defaults to 2 concurrent requests."""
+    provider = BraveSearchProvider("test-key")
+    assert provider._semaphore._value == 2
+
+
+def test_brave_answers_default_max_concurrent_is_two() -> None:
+    """BraveAnswersProvider defaults to 2 concurrent requests."""
+    provider = BraveAnswersProvider("test-key")
+    assert provider._semaphore._value == 2
+
+
+async def test_brave_search_respects_max_concurrent_semaphore() -> None:
+    """BraveSearchProvider.search() blocks when all semaphore slots are taken."""
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    mock_response.json = AsyncMock(return_value=_web_response(1))
+    session_cm = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        return_value=session_cm,
+    ):
+        provider = BraveSearchProvider("test-key", max_concurrent=1)
+        assert provider._semaphore._value == 1
+
+        await provider._semaphore.acquire()
+        assert provider._semaphore._value == 0
+
+        task = asyncio.create_task(provider.search("blocked"))
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        provider._semaphore.release()
+        results = await task
+
+    assert isinstance(results, list)
+
+
+async def test_brave_answers_respects_max_concurrent_semaphore() -> None:
+    """BraveAnswersProvider.search() blocks when all semaphore slots are taken."""
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    mock_response.json = AsyncMock(return_value={"results": [{"title": "A", "text": "ans"}]})
+    session_cm = _make_session_cm(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        return_value=session_cm,
+    ):
+        provider = BraveAnswersProvider("test-key", max_concurrent=1)
+        assert provider._semaphore._value == 1
+
+        await provider._semaphore.acquire()
+        assert provider._semaphore._value == 0
+
+        task = asyncio.create_task(provider.search("blocked"))
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        provider._semaphore.release()
+        results = await task
+
+    assert isinstance(results, list)

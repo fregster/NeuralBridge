@@ -25,6 +25,13 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 
 # ---------------------------------------------------------------------------
+# Input size guards
+# ---------------------------------------------------------------------------
+
+_MAX_KEY_CHARS = 2_000  # Max chars of input text used as cache key
+_MAX_VALUE_CHARS = 50_000  # Max chars of response text that will be cached
+
+# ---------------------------------------------------------------------------
 # Semantic (normalised) key helpers — Feature 9
 # ---------------------------------------------------------------------------
 
@@ -113,14 +120,15 @@ def _normalise_cache_key(text: str) -> str:
 
     Applies the following transformations in order:
 
-    1. Lowercase the input.
-    2. Remove filler phrases **before** punctuation stripping, so contractions
+    1. Truncate at :data:`_MAX_KEY_CHARS` to prevent RegEx/stemming CPU spikes.
+    2. Lowercase the input.
+    3. Remove filler phrases **before** punctuation stripping, so contractions
        like ``what's`` are matched correctly by the regex.
-    3. Strip punctuation (non-word, non-whitespace characters → space).
-    4. Normalise number words to digits.
-    5. Strip ``-ing``, ``-ed`` and ``-s`` suffixes from words longer than four
+    4. Strip punctuation (non-word, non-whitespace characters → space).
+    5. Normalise number words to digits.
+    6. Strip ``-ing``, ``-ed`` and ``-s`` suffixes from words longer than four
        characters, preserving a minimum stem of :data:`_MIN_STEM` characters.
-    6. Collapse extra whitespace and strip leading/trailing space.
+    7. Collapse extra whitespace and strip leading/trailing space.
 
     Args:
         text: Raw user input text.
@@ -128,6 +136,9 @@ def _normalise_cache_key(text: str) -> str:
     Returns:
         Normalised string suitable for use as a semantic cache-key seed.
     """
+    # 0. Enforce input length cap
+    if len(text) > _MAX_KEY_CHARS:
+        text = text[:_MAX_KEY_CHARS]
     # 1. Lowercase
     normalised = text.lower()
     # 2. Remove filler phrases (before punctuation strip — preserves apostrophes)
@@ -276,6 +287,10 @@ class ResponseCache:
                 and semantic TTL.
         """
         if not self._enabled:
+            return
+
+        # Silently skip over-long inputs or responses to avoid memory and CPU waste.
+        if len(text) > _MAX_KEY_CHARS or len(response) > _MAX_VALUE_CHARS:
             return
 
         self._cleanup()

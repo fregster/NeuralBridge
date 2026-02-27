@@ -10,6 +10,7 @@ Security note: API keys must NEVER be logged at any level.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -84,15 +85,30 @@ class BraveSearchProvider:
 
     _BASE_URL = "https://api.search.brave.com/res/v1/web/search"
 
-    def __init__(self, api_key: str, timeout: int = 10) -> None:
+    def __init__(self, api_key: str, timeout: int = 10, max_concurrent: int = 2) -> None:
         """Initialise the Brave provider.
 
         Args:
             api_key: Brave subscription token (never logged).
             timeout: HTTP request timeout in seconds.
+            max_concurrent: Maximum number of parallel HTTP requests.
         """
         self._api_key = api_key
         self._timeout = timeout
+        self._session: aiohttp.ClientSession | None = None
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+
+    def _get_session(self) -> aiohttp.ClientSession:
+        """Return the shared session, creating it lazily if needed.
+
+        The session carries a ``User-Agent`` header so NeuralBridge traffic
+        is identifiable in Brave's access logs.
+        """
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                headers={"User-Agent": "NeuralBridge/1.0"},
+            )
+        return self._session
 
     async def search(self, query: str, count: int = 5) -> list[SearchResult]:
         """Query the Brave Web Search API.
@@ -117,31 +133,36 @@ class BraveSearchProvider:
             "Accept-Encoding": "gzip",
             "X-Subscription-Token": self._api_key,
         }
-        try:
-            async with (
-                aiohttp.ClientSession() as session,
-                session.get(
+        async with self._semaphore:
+            try:
+                session = self._get_session()
+                async with session.get(
                     self._BASE_URL,
                     params=params,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=self._timeout),
-                ) as response,
-            ):
-                if response.status != _HTTP_OK:
-                    _LOGGER.warning(
-                        "Brave Search returned HTTP %d — check API key and quota",
-                        response.status,
-                    )
-                    return []
-                data = await response.json()
-        except aiohttp.ClientError as err:
-            _LOGGER.error("Brave Search request failed: %s", err)
-            return []
-        except Exception as err:
-            _LOGGER.error("Unexpected error during Brave Search: %s", err)
-            return []
+                ) as response:
+                    if response.status != _HTTP_OK:
+                        _LOGGER.warning(
+                            "Brave Search returned HTTP %d — check API key and quota",
+                            response.status,
+                        )
+                        return []
+                    data = await response.json()
+            except aiohttp.ClientError as err:
+                _LOGGER.error("Brave Search request failed: %s", err)
+                return []
+            except Exception as err:
+                _LOGGER.error("Unexpected error during Brave Search: %s", err)
+                return []
 
         return _parse_brave_response(data)
+
+    async def close(self) -> None:
+        """Close the underlying HTTP session."""
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
 
 
 def _parse_brave_response(data: dict[str, Any]) -> list[SearchResult]:
@@ -204,15 +225,26 @@ class BraveAnswersProvider:
 
     _BASE_URL = "https://api.search.brave.com/res/v1/answer"
 
-    def __init__(self, api_key: str, timeout: int = 10) -> None:
+    def __init__(self, api_key: str, timeout: int = 10, max_concurrent: int = 2) -> None:
         """Initialise the Brave Answers provider.
 
         Args:
             api_key: Brave Answers subscription token (never logged).
             timeout: HTTP request timeout in seconds.
+            max_concurrent: Maximum number of parallel HTTP requests.
         """
         self._api_key = api_key
         self._timeout = timeout
+        self._session: aiohttp.ClientSession | None = None
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+
+    def _get_session(self) -> aiohttp.ClientSession:
+        """Return the shared session, creating it lazily if needed."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                headers={"User-Agent": "NeuralBridge/1.0"},
+            )
+        return self._session
 
     async def search(self, query: str, _count: int = 1) -> list[SearchResult]:
         """Query the Brave Answers API for a direct answer.
@@ -234,31 +266,36 @@ class BraveAnswersProvider:
             "Accept-Encoding": "gzip",
             "X-Subscription-Token": self._api_key,
         }
-        try:
-            async with (
-                aiohttp.ClientSession() as session,
-                session.get(
+        async with self._semaphore:
+            try:
+                session = self._get_session()
+                async with session.get(
                     self._BASE_URL,
                     params=params,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=self._timeout),
-                ) as response,
-            ):
-                if response.status != _HTTP_OK:
-                    _LOGGER.warning(
-                        "Brave Answers returned HTTP %d — check API key and quota",
-                        response.status,
-                    )
-                    return []
-                data = await response.json()
-        except aiohttp.ClientError as err:
-            _LOGGER.error("Brave Answers request failed: %s", err)
-            return []
-        except Exception as err:
-            _LOGGER.error("Unexpected error during Brave Answers: %s", err)
-            return []
+                ) as response:
+                    if response.status != _HTTP_OK:
+                        _LOGGER.warning(
+                            "Brave Answers returned HTTP %d — check API key and quota",
+                            response.status,
+                        )
+                        return []
+                    data = await response.json()
+            except aiohttp.ClientError as err:
+                _LOGGER.error("Brave Answers request failed: %s", err)
+                return []
+            except Exception as err:
+                _LOGGER.error("Unexpected error during Brave Answers: %s", err)
+                return []
 
         return _parse_brave_answers_response(data)
+
+    async def close(self) -> None:
+        """Close the underlying HTTP session."""
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
 
 
 class BraveAnswersCombinedProvider:
@@ -309,6 +346,11 @@ class BraveAnswersCombinedProvider:
         if answer_results:
             return answer_results
         return await self._search.search(query, count)
+
+    async def close(self) -> None:
+        """Close both sub-provider sessions."""
+        await self._answers.close()
+        await self._search.close()
 
 
 def _parse_brave_answers_response(data: dict[str, Any]) -> list[SearchResult]:
@@ -438,6 +480,15 @@ class WebSearchClient:
             return None
 
         return _format_results(results, self._max_snippet_len)
+
+    async def close(self) -> None:
+        """Close the underlying provider session(s).
+
+        Safe to call even when the provider does not expose ``close``
+        (e.g. third-party providers added via the ``WebSearchProvider`` protocol).
+        """
+        if hasattr(self._provider, "close"):
+            await self._provider.close()
 
 
 def _format_results(results: list[SearchResult], max_snippet_len: int) -> str:

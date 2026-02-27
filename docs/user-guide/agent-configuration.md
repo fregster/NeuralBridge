@@ -12,7 +12,7 @@ succeeds — the first success wins.
 
 | Priority | Role |
 |---|---|
-| **0** | Router agent (Ollama only). Runs before all processing agents. |
+| **0** | Router agent (direct Ollama `AGENT_TYPE_OLLAMA` only). Runs before all processing agents. |
 | **1–20** | High priority. Fast, local agents. Tried first. |
 | **21–50** | Medium priority. |
 | **51–100** | Low priority / fallback. Cloud agents or expensive models. |
@@ -23,11 +23,24 @@ Multiple agents can share the same priority — they are tried in the order they
 
 ## Agent Types
 
-### Home Assistant (Built-in)
+### Home Assistant Native Agent (`LOCAL_HA`)
 
-Uses Home Assistant's native conversation agent for local intent matching.
+Routes to **any** HA conversation agent entity with Assist enabled via HA's own conversation
+service.  This covers a wide range of agents that are all native to Home Assistant:
 
-**Best for:** Device control, home automation commands
+- The **built-in HA intent processor** (simple device-control commands)
+- The **HA Ollama integration** (Ollama configured under Settings → Devices & Services)
+- **Google Generative AI (Gemini)** via the HA Gemini integration
+- **OpenAI Conversation** via the HA OpenAI integration
+- Any other third-party HA conversation component
+
+> **If you are using Ollama with Home Assistant, this is almost certainly the agent type you
+> want.**  The HA Ollama integration registers Ollama as a native HA entity — NeuralBridge
+> communicates with it exactly like it does with Gemini or the built-in intent processor.
+> You do not need the separate "Ollama (Direct Connection)" type below.
+
+**Best for:** Device control, home automation commands, and general Q&A via any HA-integrated
+LLM
 
 **Configuration fields:**
 
@@ -46,10 +59,12 @@ next agent. This lets HA handle device commands while Ollama or cloud handles ev
 
 ---
 
-### Existing Integration
+### Existing Integration (`EXISTING`)
 
 Routes requests to a conversation agent already configured in Home Assistant — Gemini,
-ChatGPT, Claude, and others.
+ChatGPT, Claude, the HA Ollama integration, and others — when used purely for Q&A
+(not device control).  Unlike `LOCAL_HA`, verbosity hints are prepended to the query to
+guide the LLM's response style.
 
 **Best for:** Complex reasoning, general knowledge, cloud AI
 
@@ -68,11 +83,24 @@ Settings → Devices & Services before it appears in the entity selector.
 
 ---
 
-### Ollama (Self-Hosted)
+### Ollama — Direct Connection (`AGENT_TYPE_OLLAMA`)
 
-Connects to a locally running Ollama server via HTTP API.
+> **⚠ This is NOT the HA Ollama integration.**
+>
+> If you have Ollama configured under Home Assistant's Settings → Devices & Services, use the
+> **Home Assistant Native Agent** (`LOCAL_HA`) type above instead.  That is the correct,
+> primary path for the vast majority of Ollama users.
+>
+> This agent type establishes a **direct HTTP connection from NeuralBridge to an Ollama
+> server, completely bypassing Home Assistant**.  Use this only if Ollama is deliberately
+> NOT configured as a HA integration and you want NeuralBridge to own the connection,
+> inject its own system prompt, and control model parameters directly.
 
-**Best for:** Privacy-first setups, router agents, cost savings, multi-turn conversations
+Connects directly to an Ollama server via its HTTP REST API, independently of Home
+Assistant.
+
+**Best for:** Advanced setups where Ollama is not installed as a HA integration; router
+agents running on a dedicated Ollama instance separate from HA.
 
 **Prerequisites:** Ollama must be running and the model must be pulled before adding this agent.
 NeuralBridge validates the URL and model name during setup.
@@ -97,7 +125,7 @@ NeuralBridge validates the URL and model name during setup.
 
 ---
 
-## Router Agents (Priority 0, Ollama Only)
+## Router Agents (Priority 0, Direct Ollama Only)
 
 Router agents are optional. When configured, they run before all processing agents and
 classify each request, returning a JSON routing decision:
@@ -152,7 +180,7 @@ NeuralBridge uses a built-in classification prompt automatically. You can overri
 
 ```
 Agent Name:    Qwen Router
-Agent Type:    Ollama
+Agent Type:    Ollama (Direct Connection)
 Priority:      0
 URL:           http://192.168.1.100:11434
 Model:         qwen2.5:0.5b
@@ -194,9 +222,11 @@ the user (output). A `neuralbridge_guard_rail_triggered` HA event is fired on ev
 
 Accessible from **Configure → menu options**:
 
-### Default Prompt (Ollama Global Fallback)
+### Default Prompt (Direct Ollama Global Fallback)
 
-A global system prompt used by any Ollama agent whose per-agent system prompt is empty.
+A global system prompt used by any **direct Ollama** (`AGENT_TYPE_OLLAMA`) agent whose
+per-agent system prompt is empty.  This does not affect HA Ollama integration agents —
+those use the system prompt configured within the HA Ollama integration itself.
 
 **Default value:**
 ```
@@ -230,9 +260,9 @@ Default: `en_gb`.
 ### Privacy-First: All Local
 
 ```
-Priority 10 │ Home Assistant  │ assist_mode=true
-Priority 20 │ Llama3 8B       │ system_prompt="you are a helpful assistant"
-Priority 30 │ Mixtral 8x7B    │ fallback for complex queries
+Priority 10 │ Home Assistant (LOCAL_HA)  │ assist_mode=true  (built-in HA intents)
+Priority 20 │ Ollama via HA integration  │ LOCAL_HA, assist_mode=false, entity: conversation.ollama
+Priority 30 │ Mixtral 8x7B               │ LOCAL_HA or direct Ollama, fallback for complex queries
 ```
 
 ### Hybrid: Local + Cloud
@@ -260,7 +290,7 @@ Priority 30 │ Gemini Flash   │ paid — only reached for hard queries
 
 | Problem | Solution |
 |---|---|
-| Ollama connection fails | Check URL, run `ollama list`, verify port 11434 |
+| Direct Ollama connection fails | Check URL, run `ollama list`, verify port 11434 (only applies to `AGENT_TYPE_OLLAMA` direct connections, not the HA Ollama integration) |
 | Cloud agent not in selector | Configure the HA integration first |
 | HA agent falls through unexpectedly | Disable Assist Mode or check intent matching |
 | Router always blocks | Set log level to `complexity_only`, check model output format |

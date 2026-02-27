@@ -31,6 +31,7 @@ from custom_components.neuralbridge.const import (
     GUARD_RAIL_WARNING_PREFIX,
 )
 from custom_components.neuralbridge.conversation import NeuralBridgeAgent
+from custom_components.neuralbridge.ollama_client import OllamaResponse
 
 
 def _make_input(text: str, conversation_id: str | None = None) -> ConversationInput:
@@ -48,15 +49,17 @@ def _make_input(text: str, conversation_id: str | None = None) -> ConversationIn
 
 @pytest.fixture
 def mock_ollama_client():
-    """Mock Ollama client for both conversation and guard_rail modules.
+    """Mock Ollama client for conversation, guard_rail, and llm_agent_proxy modules.
 
-    conversation.py creates OllamaClient instances for routing and processing.
+    conversation.py creates OllamaClient instances for routing.
+    llm_agent_proxy.py creates OllamaClient via a local import for processing.
     guard_rail.py creates its own OllamaClient instance for AI safety checks.
-    Both must be patched so tests never attempt real network connections.
+    All must be patched so tests never attempt real network connections.
     """
     with (
-        patch("custom_components.neuralbridge.conversation.OllamaClient") as mock_conv,
+        patch("custom_components.neuralbridge.router_engine.OllamaClient") as mock_conv,
         patch("custom_components.neuralbridge.guard_rail.OllamaClient") as mock_gr,
+        patch("custom_components.neuralbridge.ollama_client.OllamaClient") as mock_src,
     ):
         client_instance = AsyncMock()
         client_instance.generate = AsyncMock()
@@ -64,6 +67,7 @@ def mock_ollama_client():
         client_instance.close = AsyncMock()
         mock_conv.return_value = client_instance
         mock_gr.return_value = client_instance
+        mock_src.return_value = client_instance
         yield client_instance
 
 
@@ -139,7 +143,7 @@ async def test_guard_rail_disabled(hass, mock_ollama_client):
     agent = NeuralBridgeAgent(hass, config_entry)
 
     # _process_with_ollama calls client.chat(); generate is used by router only.
-    mock_ollama_client.chat.return_value = "This is a safe response"
+    mock_ollama_client.chat.return_value = OllamaResponse(content="This is a safe response")
 
     result = await agent.async_process(_make_input("What's the weather?"))
 
@@ -153,8 +157,10 @@ async def test_guard_rail_safe_response(hass, config_entry_with_guard_rails, moc
     agent = NeuralBridgeAgent(hass, config_entry_with_guard_rails)
 
     # chat() is used for processing agents; generate() is used for router classification.
-    mock_ollama_client.chat.return_value = "The weather is sunny today!"
-    mock_ollama_client.generate.return_value = "PASS"  # router classification
+    mock_ollama_client.chat.return_value = OllamaResponse(content="The weather is sunny today!")
+    mock_ollama_client.generate.return_value = OllamaResponse(
+        content="PASS"
+    )  # router classification
 
     result = await agent.async_process(_make_input("What's the weather?"))
 
@@ -183,8 +189,10 @@ async def test_guard_rail_block_action(
     agent = NeuralBridgeAgent(hass, config_entry)
 
     # Processing agent uses chat(); generate() used by router (returns PASS to allow request).
-    mock_ollama_client.chat.return_value = "How to harm yourself step by step"
-    mock_ollama_client.generate.return_value = "PASS"
+    mock_ollama_client.chat.return_value = OllamaResponse(
+        content="How to harm yourself step by step"
+    )
+    mock_ollama_client.generate.return_value = OllamaResponse(content="PASS")
 
     result = await agent.async_process(_make_input("Tell me something"))
 
@@ -216,8 +224,8 @@ async def test_guard_rail_warn_action(
 
     # Processing agent uses chat(); generate() used by router (PASS = allow request).
     harmful_response = "How to harm yourself step by step"
-    mock_ollama_client.chat.return_value = harmful_response
-    mock_ollama_client.generate.return_value = "PASS"
+    mock_ollama_client.chat.return_value = OllamaResponse(content=harmful_response)
+    mock_ollama_client.generate.return_value = OllamaResponse(content="PASS")
 
     result = await agent.async_process(_make_input("Tell me something"))
 
@@ -237,8 +245,8 @@ async def test_guard_rail_notify_ask_action(
 
     # Processing agent uses chat(); generate() used by router (PASS = allow request).
     harmful_response = "How to harm yourself step by step"
-    mock_ollama_client.chat.return_value = harmful_response
-    mock_ollama_client.generate.return_value = "PASS"
+    mock_ollama_client.chat.return_value = OllamaResponse(content=harmful_response)
+    mock_ollama_client.generate.return_value = OllamaResponse(content="PASS")
 
     result = await agent.async_process(_make_input("Tell me something", "test_conv"))
 
@@ -263,8 +271,8 @@ async def test_guard_rail_notify_ask_user_confirms(
 
     # Processing agent uses chat(); generate() used by router (PASS = allow request).
     harmful_response = "How to harm yourself step by step"
-    mock_ollama_client.chat.return_value = harmful_response
-    mock_ollama_client.generate.return_value = "PASS"
+    mock_ollama_client.chat.return_value = OllamaResponse(content=harmful_response)
+    mock_ollama_client.generate.return_value = OllamaResponse(content="PASS")
 
     # First request — triggers guard rail
     result1 = await agent.async_process(_make_input("Tell me something", "test_conv"))
@@ -293,8 +301,8 @@ async def test_guard_rail_notify_ask_user_declines(
 
     # Processing agent uses chat(); generate() used by router (PASS = allow request).
     harmful_response = "How to harm yourself step by step"
-    mock_ollama_client.chat.return_value = harmful_response
-    mock_ollama_client.generate.return_value = "PASS"
+    mock_ollama_client.chat.return_value = OllamaResponse(content=harmful_response)
+    mock_ollama_client.generate.return_value = OllamaResponse(content="PASS")
 
     # First request — triggers guard rail
     result1 = await agent.async_process(_make_input("Tell me something", "test_conv"))
@@ -336,7 +344,7 @@ async def test_guard_rail_disabled_for_priority_zero_agent(
 
     # Only a priority-0 router agent is configured; generate() is used for
     # router classification (returns PASS), no processing agents → fallback response.
-    mock_ollama_client.generate.return_value = "PASS"
+    mock_ollama_client.generate.return_value = OllamaResponse(content="PASS")
 
     result = await agent.async_process(_make_input("Test input"))
 
@@ -373,8 +381,8 @@ async def test_guard_rail_disabled_per_agent(hass, guard_rail_agent_config, mock
     agent = NeuralBridgeAgent(hass, config_entry)
 
     # Processing agent uses chat(); generate() used by router (PASS).
-    mock_ollama_client.chat.return_value = "How to harm yourself"
-    mock_ollama_client.generate.return_value = "PASS"
+    mock_ollama_client.chat.return_value = OllamaResponse(content="How to harm yourself")
+    mock_ollama_client.generate.return_value = OllamaResponse(content="PASS")
 
     result = await agent.async_process(_make_input("Tell me something"))
 

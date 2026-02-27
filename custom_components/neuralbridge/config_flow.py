@@ -16,7 +16,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
-    AGENT_TYPE_EXISTING,
+    AGENT_TYPE_INTEGRATED,
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
     AGENT_TYPE_WEB_SEARCH,
@@ -28,6 +28,7 @@ from .const import (
     CONF_AGENT_NAME,
     CONF_AGENT_TYPE,
     CONF_AGENTS,
+    CONF_BENCHMARK_WARM_UP_DELAY,
     CONF_DEFAULT_PROMPT,
     CONF_ENABLE_HOME_CONTROL,
     CONF_ENTITY_ID,
@@ -63,6 +64,11 @@ from .const import (
     CONF_SEARCH_RESULT_COUNT,
     CONF_SEMANTIC_CACHE_TTL,
     CONF_SPLIT_COMPOUND_COMMANDS,
+    CONF_STRATEGY_FACTUAL,
+    CONF_STRATEGY_INSTRUCTION_FOLLOWING,
+    CONF_STRATEGY_MEMORY,
+    CONF_STRATEGY_REASONING,
+    CONF_STRATEGY_SMART_HOME_INTENT,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DATA_RESPONSE_CACHE,
@@ -70,6 +76,7 @@ from .const import (
     DEFAULT_AGENT_ENABLED,
     DEFAULT_AGENT_MAX_COMPLEXITY,
     DEFAULT_AGENT_MIN_COMPLEXITY,
+    DEFAULT_BENCHMARK_WARM_UP_DELAY,
     DEFAULT_DEFAULT_PROMPT,
     DEFAULT_ENABLE_HOME_CONTROL,
     DEFAULT_FORCE_RESPONSE_LANGUAGE,
@@ -121,6 +128,10 @@ from .const import (
     ROUTER_LOG_LEVEL_DEBUG,
     ROUTER_LOG_LEVEL_DEBUG_QUERY,
     ROUTER_LOG_LEVEL_NONE,
+    ROUTING_STRATEGY_DEFAULT,
+    ROUTING_STRATEGY_FASTEST,
+    ROUTING_STRATEGY_LOCAL_ONLY,
+    ROUTING_STRATEGY_MOST_CAPABLE,
     SEARCH_PROVIDER_BRAVE,
     SEARCH_PROVIDER_BRAVE_ANSWERS,
     SEARCH_PROVIDER_BRAVE_COMBINED,
@@ -339,7 +350,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 updated: dict[str, Any] = {
                     **base,
                     "id": agent_id or str(uuid4()),
-                    CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+                    CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED,
                     CONF_IS_ROUTER: True,
                     CONF_PRIORITY: PRIORITY_ROUTER,
                     CONF_AGENT_ENABLED: user_input.get(CONF_AGENT_ENABLED, DEFAULT_AGENT_ENABLED),
@@ -352,6 +363,22 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_ROUTER_CUSTOM_PROMPT: custom_prompt,
                     CONF_ROUTER_FALLBACK: user_input.get(
                         CONF_ROUTER_FALLBACK, DEFAULT_ROUTER_FALLBACK
+                    ),
+                    # Dimension-aware routing strategies
+                    CONF_STRATEGY_REASONING: user_input.get(
+                        CONF_STRATEGY_REASONING, ROUTING_STRATEGY_DEFAULT
+                    ),
+                    CONF_STRATEGY_INSTRUCTION_FOLLOWING: user_input.get(
+                        CONF_STRATEGY_INSTRUCTION_FOLLOWING, ROUTING_STRATEGY_DEFAULT
+                    ),
+                    CONF_STRATEGY_SMART_HOME_INTENT: user_input.get(
+                        CONF_STRATEGY_SMART_HOME_INTENT, ROUTING_STRATEGY_DEFAULT
+                    ),
+                    CONF_STRATEGY_FACTUAL: user_input.get(
+                        CONF_STRATEGY_FACTUAL, ROUTING_STRATEGY_DEFAULT
+                    ),
+                    CONF_STRATEGY_MEMORY: user_input.get(
+                        CONF_STRATEGY_MEMORY, ROUTING_STRATEGY_DEFAULT
                     ),
                     # Routing agents never use the response cache or guard rails
                     CONF_AGENT_CACHE_ENABLED: False,
@@ -378,6 +405,21 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_ROUTER_CUSTOM_PROMPT, DEFAULT_ROUTER_CUSTOM_PROMPT
         )
         default_fallback = (existing or {}).get(CONF_ROUTER_FALLBACK, DEFAULT_ROUTER_FALLBACK)
+        default_strategy_reasoning = (existing or {}).get(
+            CONF_STRATEGY_REASONING, ROUTING_STRATEGY_DEFAULT
+        )
+        default_strategy_instruction = (existing or {}).get(
+            CONF_STRATEGY_INSTRUCTION_FOLLOWING, ROUTING_STRATEGY_DEFAULT
+        )
+        default_strategy_smart_home = (existing or {}).get(
+            CONF_STRATEGY_SMART_HOME_INTENT, ROUTING_STRATEGY_DEFAULT
+        )
+        default_strategy_factual = (existing or {}).get(
+            CONF_STRATEGY_FACTUAL, ROUTING_STRATEGY_DEFAULT
+        )
+        default_strategy_memory = (existing or {}).get(
+            CONF_STRATEGY_MEMORY, ROUTING_STRATEGY_DEFAULT
+        )
 
         log_level_options: list[selector.SelectOptionDict] = [
             {
@@ -434,6 +476,24 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         schema_fields[entity_field] = selector.EntitySelector(
             selector.EntitySelectorConfig(domain=CONVERSATION_DOMAIN)
         )
+        strategy_options: list[selector.SelectOptionDict] = [
+            {
+                "value": ROUTING_STRATEGY_DEFAULT,
+                "label": self._s("routing_strategies", "default") or "Default",
+            },
+            {
+                "value": ROUTING_STRATEGY_FASTEST,
+                "label": self._s("routing_strategies", "fastest") or "Fastest",
+            },
+            {
+                "value": ROUTING_STRATEGY_MOST_CAPABLE,
+                "label": self._s("routing_strategies", "most_capable") or "Most capable",
+            },
+            {
+                "value": ROUTING_STRATEGY_LOCAL_ONLY,
+                "label": self._s("routing_strategies", "local_only") or "Local only",
+            },
+        ]
         schema_fields.update(
             {
                 vol.Optional(CONF_TIMEOUT, default=default_timeout): selector.NumberSelector(
@@ -467,6 +527,46 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
+                vol.Optional(
+                    CONF_STRATEGY_REASONING, default=default_strategy_reasoning
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=strategy_options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_STRATEGY_INSTRUCTION_FOLLOWING, default=default_strategy_instruction
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=strategy_options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_STRATEGY_SMART_HOME_INTENT, default=default_strategy_smart_home
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=strategy_options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_STRATEGY_FACTUAL, default=default_strategy_factual
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=strategy_options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_STRATEGY_MEMORY, default=default_strategy_memory
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=strategy_options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
             }
         )
         if is_editing:
@@ -492,8 +592,8 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
             if user_input[CONF_AGENT_TYPE] == AGENT_TYPE_OLLAMA:
                 return await self.async_step_configure_ollama()
-            if user_input[CONF_AGENT_TYPE] == AGENT_TYPE_EXISTING:
-                return await self.async_step_configure_existing()
+            if user_input[CONF_AGENT_TYPE] == AGENT_TYPE_INTEGRATED:
+                return await self.async_step_configure_integrated()
             if user_input[CONF_AGENT_TYPE] == AGENT_TYPE_WEB_SEARCH:
                 return await self.async_step_configure_web_search()
             return await self.async_step_configure_local()
@@ -510,8 +610,8 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                                     "label": self._s("agent_types", "home_assistant"),
                                 },
                                 {
-                                    "value": AGENT_TYPE_EXISTING,
-                                    "label": self._s("agent_types", "existing_integration"),
+                                    "value": AGENT_TYPE_INTEGRATED,
+                                    "label": self._s("agent_types", "integrated"),
                                 },
                                 {
                                     "value": AGENT_TYPE_OLLAMA,
@@ -678,7 +778,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     # ── Configure existing integration ────────────────────────────────────────
 
-    async def async_step_configure_existing(
+    async def async_step_configure_integrated(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Configure existing integration agent."""
@@ -686,7 +786,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             agent_id = str(uuid4())
             agent_config = {
                 "id": agent_id,
-                CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+                CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED,
                 CONF_AGENT_ENABLED: DEFAULT_AGENT_ENABLED,
                 CONF_AGENT_NAME: user_input[CONF_AGENT_NAME],
                 CONF_PRIORITY: user_input[CONF_PRIORITY],
@@ -720,7 +820,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             return await self.async_step_init()
 
         return self.async_show_form(
-            step_id="configure_existing",
+            step_id="configure_integrated",
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_AGENT_NAME): str,
@@ -1442,8 +1542,8 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
         if agent_type == AGENT_TYPE_OLLAMA:
             return await self.async_step_edit_agent_ollama()
-        if agent_type == AGENT_TYPE_EXISTING:
-            return await self.async_step_edit_agent_existing()
+        if agent_type == AGENT_TYPE_INTEGRATED:
+            return await self.async_step_edit_agent_integrated()
         if agent_type == AGENT_TYPE_WEB_SEARCH:
             return await self.async_step_edit_agent_web_search()
         return await self.async_step_edit_agent_local()
@@ -1588,7 +1688,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
 
     # ── Edit existing-integration agent ───────────────────────────────────────
 
-    async def async_step_edit_agent_existing(
+    async def async_step_edit_agent_integrated(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Edit settings for an existing-integration agent."""
@@ -1636,7 +1736,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             return await self.async_step_init()
 
         return self.async_show_form(
-            step_id="edit_agent_existing",
+            step_id="edit_agent_integrated",
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_AGENT_NAME, default=agent.get(CONF_AGENT_NAME, "")): str,
@@ -1898,6 +1998,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             split_compound_commands: bool = user_input.get(
                 CONF_SPLIT_COMPOUND_COMMANDS, DEFAULT_SPLIT_COMPOUND_COMMANDS
             )
+            benchmark_warm_up_delay: int = int(
+                user_input.get(CONF_BENCHMARK_WARM_UP_DELAY, DEFAULT_BENCHMARK_WARM_UP_DELAY)
+            )
 
             current_data = {
                 **self.config_entry.data,
@@ -1910,6 +2013,7 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_ENABLE_HOME_CONTROL: enable_home_control,
                 CONF_FORCE_RESPONSE_LANGUAGE: force_response_language,
                 CONF_SPLIT_COMPOUND_COMMANDS: split_compound_commands,
+                CONF_BENCHMARK_WARM_UP_DELAY: benchmark_warm_up_delay,
             }
             self.hass.config_entries.async_update_entry(
                 self.config_entry,
@@ -1948,6 +2052,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         )
         current_split_compound = entry_data.get(
             CONF_SPLIT_COMPOUND_COMMANDS, DEFAULT_SPLIT_COMPOUND_COMMANDS
+        )
+        current_warm_up_delay = entry_data.get(
+            CONF_BENCHMARK_WARM_UP_DELAY, DEFAULT_BENCHMARK_WARM_UP_DELAY
         )
 
         return self.async_show_form(
@@ -2010,6 +2117,17 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                             max=5.0,
                             step=0.5,
                             unit_of_measurement="seconds",
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_BENCHMARK_WARM_UP_DELAY, default=current_warm_up_delay
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=10,
+                            max=300,
+                            step=5,
+                            unit_of_measurement="s",
                             mode=selector.NumberSelectorMode.SLIDER,
                         )
                     ),

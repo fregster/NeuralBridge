@@ -23,6 +23,7 @@
           "configure_routing_agent": "Configure Routing Agent",
           "manage_agents": "Manage Existing Agents",
           "configure_guard_rails": "Configure Guard Rails",
+          "configure_high_stakes": "Configure High-Stakes Actions",
           "advanced_settings": "Advanced Settings",
           "language_settings": "Language Settings",
           "done": "Close"
@@ -30,7 +31,7 @@
       },
       "default_prompt": {
         "title": "Configure Default Prompt",
-        "description": "This prompt is sent to all Ollama agents that do not have their own per-agent system prompt configured.",
+        "description": "This prompt is sent to all **direct Ollama** (`AGENT_TYPE_OLLAMA`) agents that do not have their own per-agent system prompt configured. It does **not** apply to HA Conversation Agents (Gemini, HA Ollama integration, ChatGPT, etc.) — those agents use the system prompt configured within their own HA integration settings.",
         "data": {
           "default_prompt": "Default System Prompt"
         },
@@ -40,7 +41,7 @@
       },
       "add_agent": {
         "title": "Add Agent — Select Type",
-        "description": "Choose the type of AI agent to add:",
+        "description": "Choose the type of AI agent to add:\n\n- **HA Intent Processor** — routes to `conversation.home_assistant` for device control (turn lights on/off, set thermostats, etc.)\n- **HA Conversation Agent** — routes to any HA-registered LLM (HA Ollama integration, Gemini, ChatGPT…) for Q&A and general knowledge\n- **Ollama (Direct Connection)** — direct HTTP to an Ollama server, bypassing HA — advanced use only\n- **Web Search** — real-time internet search",
         "data": {
           "agent_type": "Agent Type"
         }
@@ -73,9 +74,9 @@
           "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here."
         }
       },
-      "configure_existing": {
-        "title": "Configure Existing Integration",
-        "description": "Connect to an existing Home Assistant conversation agent (Gemini, ChatGPT, etc.).\n\n{priority_info}",
+      "configure_integrated": {
+        "title": "Configure HA Conversation Agent",
+        "description": "Routes to any Home Assistant-registered conversation agent — the HA Ollama integration, Gemini, OpenAI Conversation, Claude, or any other LLM you have configured under Settings → Devices & Services.\n\nThis type is for **Q&A and general knowledge**. Unlike the HA Intent Processor, there is no device-control filter — any non-empty response is accepted. Cloud agents can be placed here without granting them device-control authority.\n\n{priority_info}",
         "data": {
           "agent_name": "Agent Name",
           "priority": "Priority (0–100)",
@@ -98,8 +99,8 @@
         }
       },
       "configure_local": {
-        "title": "Configure Home Assistant Agent",
-        "description": "Use Home Assistant's built-in conversation agent for local intent matching.\n\n{priority_info}",
+        "title": "Configure HA Intent Processor Agent",
+        "description": "Routes to Home Assistant's built-in intent processor (`conversation.home_assistant`) for native **device control** — turning lights on or off, setting thermostats, locking doors, etc.\n\nThe **Assist Mode** toggle controls what happens when the HA intent processor cannot match a device command: when enabled, unrecognised requests fall through to the next lower-priority agent (such as a cloud LLM), giving you hybrid device-control + Q&A routing.\n\n{priority_info}",
         "data": {
           "agent_name": "Agent Name",
           "priority": "Priority (0–100)",
@@ -115,7 +116,7 @@
           "priority": "Priority for this agent (typically higher priority for local intent matching)",
           "timeout": "Maximum time to wait for a response from this agent",
           "agent_cache_enabled": "Cache responses from this agent.",
-          "assist_mode": "Only accept responses where HA successfully executed a home control intent (action_done). Non-intent responses fall through to lower-priority agents, enabling hybrid home control + LLM routing.",
+          "assist_mode": "Only accept responses where HA successfully executed a **device control** intent (response_type = action_done). When enabled, any response that is not a device action (e.g. an LLM free-text reply) falls through to the next lower-priority agent — enabling hybrid home control + LLM routing. Disable to also accept free-text responses from the intent processor.",
           "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent",
           "agent_min_complexity": "Minimum complexity score (1–100) for this agent. Requests scored below this threshold will not be routed here.",
           "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here."
@@ -128,8 +129,8 @@
           "agent_name": "Agent Name",
           "priority": "Priority (1–100)",
           "search_provider": "Search Provider",
-          "search_api_key": "Search API Key",
-          "search_answers_api_key": "Answers API Key",
+          "search_api_key": "Brave Search API Key",
+          "search_answers_api_key": "Brave Answers API Key",
           "search_result_count": "Number of Results",
           "search_max_snippet_len": "Max Snippet Length",
           "timeout": "Timeout",
@@ -143,8 +144,8 @@
           "agent_name": "A friendly name for this agent (e.g. \"Web Search\")",
           "priority": "Priority for this agent — lower numbers are tried first",
           "search_provider": "The web search service to use",
-          "search_api_key": "Your Brave Search subscription key (required for Brave Search and Brave Combined)",
-          "search_answers_api_key": "Your Brave Answers subscription key (required for Brave Answers and Brave Combined — separate subscription from Brave Search)",
+          "search_api_key": "Your Brave Search subscription key (required for 'Brave Search' and 'Brave Combined' providers)",
+          "search_answers_api_key": "Your Brave Answers subscription key (required for 'Brave Answers' and 'Brave Combined' providers). This is a SEPARATE subscription to Brave Search.",
           "search_result_count": "How many search results to include in the response (1–10)",
           "search_max_snippet_len": "Maximum characters per result snippet before truncation",
           "timeout": "Maximum time to wait for search results",
@@ -163,8 +164,8 @@
           "priority": "Priority (1–100)",
           "enabled": "Agent Enabled",
           "search_provider": "Search Provider",
-          "search_api_key": "Search API Key (leave blank to keep current key)",
-          "search_answers_api_key": "Answers API Key (leave blank to keep current key)",
+          "search_api_key": "Brave Search API Key (leave blank to keep current key)",
+          "search_answers_api_key": "Brave Answers API Key (leave blank to keep current key)",
           "search_result_count": "Number of Results",
           "search_max_snippet_len": "Max Snippet Length",
           "timeout": "Timeout",
@@ -180,8 +181,8 @@
           "priority": "Priority for this agent — lower numbers are tried first",
           "enabled": "Toggle to enable or disable this agent without removing it",
           "search_provider": "The web search service to use",
-          "search_api_key": "Enter a new Brave Search key to replace the current one, or leave blank to keep it unchanged",
-          "search_answers_api_key": "Enter a new Brave Answers key to replace the current one, or leave blank to keep it unchanged",
+          "search_api_key": "Your Brave Search subscription key — enter a new key to replace the current one, or leave blank to keep it unchanged",
+          "search_answers_api_key": "Your Brave Answers subscription key — enter a new key to replace the current one, or leave blank to keep it unchanged. This is a SEPARATE subscription to Brave Search.",
           "search_result_count": "How many search results to include in the response (1–10)",
           "search_max_snippet_len": "Maximum characters per result snippet before truncation",
           "timeout": "Maximum time to wait for search results",
@@ -211,6 +212,11 @@
           "router_log_level": "Logging Level",
           "router_custom_prompt": "Custom Classification Prompt",
           "router_fallback": "Fallback Behaviour",
+          "strategy_reasoning": "Reasoning Strategy",
+          "strategy_instruction_following": "Instruction-Following Strategy",
+          "strategy_smart_home_intent": "Smart-Home Intent Strategy",
+          "strategy_factual": "Factual Q&A Strategy",
+          "strategy_memory": "Memory/Context Strategy",
           "delete_agent": "Delete Routing Agent"
         },
         "data_description": {
@@ -221,6 +227,11 @@
           "router_log_level": "Controls how much routing detail is written to the Home Assistant log",
           "router_custom_prompt": "Override the built-in JSON classification prompt. Leave blank to use the default prompt. Must instruct the agent to return JSON with \"local_ha\" (bool) and \"complexity\" (0–100) fields.",
           "router_fallback": "What to do when the routing agent errors, times out, or returns an unparseable response",
+          "strategy_reasoning": "Agent selection strategy when the request requires multi-step reasoning. 'Default' uses benchmark scores; 'Fastest' picks the lowest-latency agent; 'Most capable' picks the highest-scoring agent; 'Local only' restricts to Ollama or LOCAL_HA agents.",
+          "strategy_instruction_following": "Agent selection strategy when the request requires following precise instructions or formatting rules.",
+          "strategy_smart_home_intent": "Agent selection strategy when the request is a smart-home device control command.",
+          "strategy_factual": "Agent selection strategy when the request asks for a factual answer.",
+          "strategy_memory": "Agent selection strategy when the request requires remembering context from earlier in the conversation.",
           "delete_agent": "Check this box and submit to permanently delete the routing agent (you will be asked to confirm)"
         }
       },
@@ -256,9 +267,9 @@
           "delete_agent": "Check this box and submit to permanently delete this agent (you will be asked to confirm)"
         }
       },
-      "edit_agent_existing": {
-        "title": "Edit Existing Integration Agent",
-        "description": "Edit settings for this conversation agent.\n\n{priority_info}",
+      "edit_agent_integrated": {
+        "title": "Edit HA Conversation Agent",
+        "description": "Edit settings for this HA Conversation Agent (routes to your chosen HA-registered LLM for Q&A).\n\n{priority_info}",
         "data": {
           "agent_name": "Agent Name",
           "priority": "Priority (0–100)",
@@ -285,8 +296,8 @@
         }
       },
       "edit_agent_local": {
-        "title": "Edit Home Assistant Agent",
-        "description": "Edit settings for this local Home Assistant agent.\n\n{priority_info}",
+        "title": "Edit HA Intent Processor Agent",
+        "description": "Edit settings for this HA Intent Processor agent (routes to `conversation.home_assistant` for device control).\n\n{priority_info}",
         "data": {
           "agent_name": "Agent Name",
           "priority": "Priority (0–100)",
@@ -305,7 +316,7 @@
           "enabled": "Toggle to enable or disable this agent without removing it",
           "timeout": "Maximum time to wait for a response from this agent",
           "agent_cache_enabled": "Cache responses from this agent.",
-          "assist_mode": "Only accept responses where HA successfully executed a home control intent (action_done). Non-intent responses fall through to lower-priority agents, enabling hybrid home control + LLM routing.",
+          "assist_mode": "Only accept responses where HA successfully executed a **device control** intent (response_type = action_done). When enabled, any response that is not a device action falls through to the next lower-priority agent — enabling hybrid home control + LLM routing. Disable to also accept free-text responses from the intent processor.",
           "guard_rail_enabled_for_agent": "Run guard rail checks on responses from this agent",
           "agent_min_complexity": "Minimum complexity score (1–100) for this agent. Requests scored below this threshold will not be routed here.",
           "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here.",
@@ -333,7 +344,10 @@
           "response_cache_ttl": "Cache TTL",
           "purge_cache_now": "Purge Cache Now",
           "response_cache_semantic": "Enable Semantic Cache Keying",
-          "semantic_cache_ttl": "Semantic Cache TTL"
+          "semantic_cache_ttl": "Semantic Cache TTL",
+          "max_retries": "Max Retries",
+          "retry_base_delay": "Retry Base Delay",
+          "benchmark_warm_up_delay": "Benchmark Warm-up Delay"
         },
         "data_description": {
           "enable_home_control": "Allow NeuralBridge to control Home Assistant devices. When enabled, the Assist UI shows 'This assistant can control your home'. Add a Home Assistant sub-agent at a low priority number to handle device commands, with LLM agents at higher priorities for general questions.",
@@ -343,7 +357,8 @@
           "response_cache_ttl": "How long (in seconds) a cached response remains valid before expiring.",
           "purge_cache_now": "Immediately discard all currently cached responses. Useful after changing agent configurations.",
           "response_cache_semantic": "When enabled, paraphrase variants of the same question (e.g. 'What is the weather?' and 'How is the weather today?') share the same cache entry.",
-          "semantic_cache_ttl": "How long (in seconds) a semantically-keyed cache entry remains valid. Should be shorter than the exact TTL due to the looser key matching."
+          "semantic_cache_ttl": "How long (in seconds) a semantically-keyed cache entry remains valid. Should be shorter than the exact TTL due to the looser key matching.",
+          "benchmark_warm_up_delay": "How long (in seconds) NeuralBridge waits after startup before running the first benchmark probe. Increase this value on slow hardware to allow Ollama to fully load its models."
         }
       },
       "configure_guard_rails": {
@@ -417,6 +432,16 @@
         "conversation_id": {
           "name": "Conversation ID",
           "description": "The conversation ID to clear (e.g. the Alexa sessionId passed as conversation_id to the HA Conversation API)."
+        }
+      }
+    },
+    "run_benchmark": {
+      "name": "Run benchmark",
+      "description": "Triggers an immediate benchmark profiling run for the specified NeuralBridge agent. The agent must be of type Ollama or an existing HA conversation integration.",
+      "fields": {
+        "agent_id": {
+          "name": "Agent ID",
+          "description": "The internal UUID of the agent to benchmark (visible in the NeuralBridge sensor attributes)."
         }
       }
     }

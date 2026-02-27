@@ -16,8 +16,8 @@ search_providers:
   brave_combined: "Brave Combiné (Answers + recherche de secours)"
 
 agent_types:
-  home_assistant: "Home Assistant (Intégré)"
-  existing_integration: "Intégration existante (Gemini, ChatGPT, etc.)"
+  home_assistant: "Processeur d’intentions HA (contrôle des appareils)"
+  integrated: "Agent de conversation HA (Gemini, Ollama, ChatGPT…)"
   ollama: "Ollama (Externe)"
   web_search: "Recherche web (données en temps réel)"
 # ── Agent management UI ────────────────────────────────────────────────────────
@@ -87,6 +87,14 @@ router_fallbacks:
   default_complexity: "Use default complexity (fail open)"
   skip_routing: "Skip routing (try all agents in priority order)"
   block: "Block the request"
+
+# ── Routing strategy selector labels ──────────────────────────────────────────
+routing_strategies:
+  default: "Par défaut (utiliser le classement par benchmark)"
+  fastest: "Le plus rapide"
+  most_capable: "Le plus capable"
+  local_only: "Local uniquement"
+
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:
   fallback: "J'ai des difficultés à me connecter à mes agents IA en ce moment. Essayez de reformuler votre demande ou vérifiez les paramètres des agents."
@@ -102,6 +110,8 @@ responses:
   high_stakes_confirmation: "Êtes-vous sûr ? Cette action peut être irréversible. Confirmez avec 'oui' ou 'non'."
   high_stakes_passphrase_prompt: "Cette action nécessite une confirmation. Veuillez dire votre phrase de passe pour continuer."
   high_stakes_cancelled: "Action annulée."
+  reroute_web_search: "Je vérifie ça sur le web. "
+  reroute_agent: "Je vais essayer autrement. "
 
 # ── Language settings step ────────────────────────────────────────────────────
 language_settings:

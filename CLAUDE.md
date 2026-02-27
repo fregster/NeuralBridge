@@ -158,6 +158,43 @@ async def test_process_agent_invalid_config(hass, mock_config_entry):
 6. **Keep Simple**: Low complexity, short functions
 7. **Document**: Docstrings on public functions
 
+## Agent Type Definitions (CRITICAL — do not confuse these)
+
+### ⚠ Ollama Naming Disambiguation
+
+The word "Ollama" appears in two completely different contexts in this codebase:
+
+**1. The HA Ollama integration** (used by ~99% of HA+Ollama setups)
+Home Assistant supports an official Ollama integration configured under
+Settings → Devices & Services. This registers Ollama as a **native HA conversation entity**.
+NeuralBridge routes to it via HA's conversation service as an **`AGENT_TYPE_INTEGRATED`** agent
+— the user selects the entity (e.g. `conversation.ollama_...`) in the config UI.
+**Most users mean this when they say "Ollama agent".**
+
+**2. `AGENT_TYPE_OLLAMA`** (niche, low-usage direct path)
+A direct HTTP connection from NeuralBridge to an Ollama server, bypassing Home Assistant
+entirely. NeuralBridge manages the REST API call, system prompt injection, and model
+parameters. **Only use this when Ollama has NOT been configured as a HA integration.**
+
+**Default assumption:** When a user mentions "Ollama", assume `AGENT_TYPE_INTEGRATED` (the HA
+Ollama integration) unless they explicitly indicate a direct connection is intended.
+
+| Constant | Value | Transport | Meaning |
+|---|---|---|---|
+| `AGENT_TYPE_LOCAL_HA` | `"home_assistant"` | HA conversation service | Routes **specifically** to `conversation.home_assistant` (the built-in HA intent processor) for **device control** — turning lights on/off, setting thermostats, etc. Has `assist_mode` toggle: `True` = only accept `action_done` responses (device commands only); `False` = also accept free-text LLM replies. **Use this for the HA intent engine.** |
+| `AGENT_TYPE_INTEGRATED` | `"existing_integration"` | HA conversation service | Routes to any **user-selected** HA conversation entity — the HA Ollama integration, Gemini, OpenAI Conversation, Claude, or any HA-registered LLM. Same transport as LOCAL_HA but entity_id is configurable. No `assist_mode` filter. Used for Q&A and general knowledge. Receives verbosity hints. **Use this for cloud/LLM HA integrations.** |
+| `AGENT_TYPE_OLLAMA` | `"ollama"` | **Direct HTTP** to Ollama | **Bypasses HA entirely.** Direct REST connection to an Ollama server — **NOT** the HA Ollama integration. NeuralBridge owns the HTTP call and injects its own system prompt. **NICHE / LOW-USAGE PATH.** |
+| `AGENT_TYPE_WEB_SEARCH` | `"web_search"` | **Direct HTTP** to search API | Direct call to Brave Search, Brave AI, or similar. Zero HA involvement. |
+
+### `assist_mode` Flag (LOCAL_HA agents only)
+
+The `assist_mode` boolean on a `LOCAL_HA` agent controls whether the built-in HA intent
+processor is used exclusively for device control or also for general Q&A.
+
+- **`assist_mode=True` (default for LOCAL_HA):** Only accepts responses where HA successfully executed a home-control intent (`response_type == "action_done"`). Non-device responses (free-text LLM replies) cause fall-through to the next agent. This is the intended mode — the HA intent processor handles device commands, and an LLM agent at lower priority handles everything else.
+- **`assist_mode=False`:** Accepts any non-empty HA conversation response. Useful if you want the built-in HA agent to also answer general questions without falling through.
+- **Do NOT confuse** `LOCAL_HA` (always `conversation.home_assistant`, device control) with `EXISTING` (user-selected entity, Q&A focus). If you want to route to the HA Ollama integration or Gemini, use `AGENT_TYPE_INTEGRATED`.
+
 ## Repository Context
 
 This is a **standalone git repository** within `/Users/pfrye/git/`. When making changes:

@@ -25,6 +25,7 @@ from custom_components.neuralbridge.guard_rail import (
     GuardRailResult,
     HighStakesCache,
 )
+from custom_components.neuralbridge.ollama_client import OllamaResponse
 
 
 class TestGuardRailResult:
@@ -128,7 +129,7 @@ class TestGuardRailChecker:
         """Test AI-based checking with safe content."""
         # Mock Ollama client
         mock_client = AsyncMock()
-        mock_client.generate.return_value = "SAFE"
+        mock_client.generate.return_value = OllamaResponse(content="SAFE")
         mock_client.close = AsyncMock()
         mock_client_class.return_value = mock_client
 
@@ -157,7 +158,9 @@ class TestGuardRailChecker:
         """Test AI-based checking with unsafe content."""
         # Mock Ollama client
         mock_client = AsyncMock()
-        mock_client.generate.return_value = "UNSAFE: harmful - contains harmful content"
+        mock_client.generate.return_value = OllamaResponse(
+            content="UNSAFE: harmful - contains harmful content"
+        )
         mock_client.close = AsyncMock()
         mock_client_class.return_value = mock_client
 
@@ -251,7 +254,32 @@ class TestGuardRailChecker:
     async def test_check_with_ai_empty_response_returns_safe(self, mock_client_class):
         """Test AI-based checking when generate() returns empty string → safe."""
         mock_client = AsyncMock()
-        mock_client.generate.return_value = ""
+        mock_client.generate.return_value = OllamaResponse(content="")
+        mock_client.close = AsyncMock()
+        mock_client_class.return_value = mock_client
+
+        checker = GuardRailChecker(ai_threshold=0.7)
+        ai_agent_config = {
+            CONF_AGENT_TYPE: "ollama",
+            CONF_OLLAMA_URL: "http://localhost:11434",
+            CONF_OLLAMA_MODEL: "tinyllama",
+            CONF_TIMEOUT: 30,
+        }
+
+        result = await checker.check_input(
+            "What is the weather?",
+            use_ai=True,
+            ai_agent_config=ai_agent_config,
+        )
+
+        assert result.is_safe is True
+        assert result.confidence >= 0.5
+
+    @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
+    async def test_check_with_ai_generate_returns_none_is_safe(self, mock_client_class):
+        """Test AI-based checking when generate() returns None → fails open (safe)."""
+        mock_client = AsyncMock()
+        mock_client.generate.return_value = None
         mock_client.close = AsyncMock()
         mock_client_class.return_value = mock_client
 
@@ -351,7 +379,7 @@ class TestGuardRailCache:
         """Test cache initialization."""
         cache = GuardRailCache(max_size=50, ttl_seconds=60)
         assert cache._max_size == 50
-        assert cache._ttl_seconds == 60
+        assert cache._ttl == 60
         assert len(cache._cache) == 0
 
     async def test_store_and_get_pending_response(self):
@@ -467,9 +495,10 @@ class TestGuardRailCheckerOptionalLibraries:
 
     def test_init_profanity_import_error_returns_false(self):
         """_init_profanity returns False when better-profanity is not installed."""
+        checker = GuardRailChecker()
         with patch.dict(sys.modules, {"better_profanity": None}):
-            checker = GuardRailChecker()
-        assert checker._profanity_available is False
+            result = checker._init_profanity()
+        assert result is False
 
     def test_init_profanity_generic_exception_returns_false(self):
         """_init_profanity returns False when load_censor_words raises an exception."""
@@ -477,9 +506,21 @@ class TestGuardRailCheckerOptionalLibraries:
         mock_prof.load_censor_words.side_effect = RuntimeError("load failed")
         mock_mod = MagicMock()
         mock_mod.profanity = mock_prof
+        checker = GuardRailChecker()
         with patch.dict(sys.modules, {"better_profanity": mock_mod}):
-            checker = GuardRailChecker()
-        assert checker._profanity_available is False
+            result = checker._init_profanity()
+        assert result is False
+
+    def test_init_profanity_success_returns_true(self):
+        """_init_profanity returns True when better-profanity loads and initialises."""
+        mock_prof = MagicMock()
+        mock_mod = MagicMock()
+        mock_mod.profanity = mock_prof
+        checker = GuardRailChecker()
+        with patch.dict(sys.modules, {"better_profanity": mock_mod}):
+            result = checker._init_profanity()
+        assert result is True
+        mock_prof.load_censor_words.assert_called_once()
 
     # ── _check_with_profanity ────────────────────────────────────────────────
 
@@ -526,25 +567,109 @@ class TestGuardRailCheckerOptionalLibraries:
         """_init_detoxify returns False when detoxify is not installed (ImportError)."""
         # detoxify is not installed in the test env — ImportError is raised naturally
         checker = GuardRailChecker(use_detoxify=True)
-        assert checker._detoxify_available is False
+        result = checker._init_detoxify()
+        assert result is False
 
     def test_init_detoxify_success_returns_true(self):
         """_init_detoxify returns True and stores the model when detoxify loads."""
         mock_model_instance = MagicMock()
         mock_mod = MagicMock()
         mock_mod.Detoxify = MagicMock(return_value=mock_model_instance)
+        checker = GuardRailChecker(use_detoxify=True)
         with patch.dict(sys.modules, {"detoxify": mock_mod}):
-            checker = GuardRailChecker(use_detoxify=True)
-        assert checker._detoxify_available is True
+            result = checker._init_detoxify()
+        assert result is True
         assert checker._detoxify_model is mock_model_instance
 
     def test_init_detoxify_generic_exception_returns_false(self):
         """_init_detoxify returns False when Detoxify() raises a non-ImportError."""
         mock_mod = MagicMock()
         mock_mod.Detoxify = MagicMock(side_effect=RuntimeError("model load failed"))
+        checker = GuardRailChecker(use_detoxify=True)
         with patch.dict(sys.modules, {"detoxify": mock_mod}):
-            checker = GuardRailChecker(use_detoxify=True)
+            result = checker._init_detoxify()
+        assert result is False
+
+    # ── async_initialize ─────────────────────────────────────────────────────
+
+    async def test_async_initialize_runs_init_profanity_in_executor(self) -> None:
+        """async_initialize calls _init_profanity via run_in_executor."""
+        checker = GuardRailChecker(use_detoxify=False)
+        assert checker._initialized is False
+
+        with (
+            patch.object(checker, "_init_profanity", return_value=True) as mock_prof,
+            patch(
+                "asyncio.get_running_loop",
+                return_value=MagicMock(
+                    run_in_executor=AsyncMock(side_effect=lambda _pool, fn: fn())
+                ),
+            ),
+        ):
+            await checker.async_initialize()
+
+        mock_prof.assert_called_once()
+        assert checker._initialized is True
+
+    async def test_async_initialize_calls_init_detoxify_when_use_detoxify_true(self) -> None:
+        """async_initialize calls _init_detoxify in executor when use_detoxify=True."""
+        checker = GuardRailChecker(use_detoxify=True)
+
+        with (
+            patch.object(checker, "_init_profanity", return_value=False),
+            patch.object(checker, "_init_detoxify", return_value=True) as mock_detox,
+            patch(
+                "asyncio.get_running_loop",
+                return_value=MagicMock(
+                    run_in_executor=AsyncMock(side_effect=lambda _pool, fn: fn())
+                ),
+            ),
+        ):
+            await checker.async_initialize()
+
+        mock_detox.assert_called_once()
+
+    async def test_async_initialize_skips_init_detoxify_when_use_detoxify_false(self) -> None:
+        """async_initialize does NOT call _init_detoxify when use_detoxify=False."""
+        checker = GuardRailChecker(use_detoxify=False)
+
+        with (
+            patch.object(checker, "_init_profanity", return_value=False),
+            patch.object(checker, "_init_detoxify", return_value=True) as mock_detox,
+            patch(
+                "asyncio.get_running_loop",
+                return_value=MagicMock(
+                    run_in_executor=AsyncMock(side_effect=lambda _pool, fn: fn())
+                ),
+            ),
+        ):
+            await checker.async_initialize()
+
+        mock_detox.assert_not_called()
+
+    async def test_async_initialize_is_idempotent(self) -> None:
+        """Calling async_initialize twice only runs executor once (guard flag)."""
+        checker = GuardRailChecker(use_detoxify=False)
+
+        with patch.object(checker, "_init_profanity", return_value=True) as mock_prof:
+            loop_mock = MagicMock(run_in_executor=AsyncMock(side_effect=lambda _p, fn: fn()))
+            with patch("asyncio.get_running_loop", return_value=loop_mock):
+                await checker.async_initialize()
+            # Call a second time — should be a no-op
+            with patch("asyncio.get_running_loop", return_value=loop_mock):
+                await checker.async_initialize()
+
+        # _init_profanity should only have been called once
+        assert mock_prof.call_count == 1
+
+    async def test_methods_before_async_initialize_degrade_safely(self) -> None:
+        """Methods called before async_initialize treat both libraries as unavailable."""
+        checker = GuardRailChecker(use_detoxify=False)
+        assert checker._profanity_available is False
         assert checker._detoxify_available is False
+        # check_input should succeed (fall-through) and return the rule result
+        result = await checker.check_input("safe text")
+        assert result.is_safe is True
 
     # ── check_input detoxify stage ───────────────────────────────────────────
 
@@ -695,9 +820,10 @@ class TestGuardRailCheckerOptionalLibraries:
         mock_model = MagicMock()
         mock_mod = MagicMock()
         mock_mod.Detoxify.return_value = mock_model
+        checker = GuardRailChecker(use_detoxify=True)
         with patch.dict(sys.modules, {"detoxify": mock_mod}):
-            checker = GuardRailChecker(use_detoxify=True)
-        assert checker._detoxify_available is True
+            result = checker._init_detoxify()
+        assert result is True
         assert checker._detoxify_model is mock_model
 
     # ── check_input pipeline ─────────────────────────────────────────────────
@@ -812,6 +938,7 @@ class TestGuardRailCheckerOptionalLibraries:
         """Stage 2 profanity match short-circuits before the detoxify stage 3."""
         mock_model = MagicMock()
         checker = GuardRailChecker()
+        checker._profanity_available = True
         checker._detoxify_model = mock_model
         checker._detoxify_available = True
         high_conf = GuardRailResult(

@@ -14,7 +14,7 @@ from custom_components.neuralbridge.config_flow import (
     NeuralBridgeOptionsFlowHandler,
 )
 from custom_components.neuralbridge.const import (
-    AGENT_TYPE_EXISTING,
+    AGENT_TYPE_INTEGRATED,
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
     AGENT_TYPE_WEB_SEARCH,
@@ -195,7 +195,7 @@ def _existing_agent(agent_id: str = "agent-2", **overrides: Any) -> dict[str, An
     """Return a minimal existing-integration agent config dict."""
     base: dict[str, Any] = {
         "id": agent_id,
-        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED,
         CONF_AGENT_ENABLED: True,
         CONF_AGENT_NAME: "Test Existing",
         CONF_PRIORITY: 20,
@@ -426,18 +426,18 @@ async def test_options_flow_add_agent_routes_to_ollama(
 
 
 # ---------------------------------------------------------------------------
-# Test 12 — Options flow: selecting AGENT_TYPE_EXISTING routes to configure_existing
+# Test 12 — Options flow: selecting AGENT_TYPE_INTEGRATED routes to configure_integrated
 # ---------------------------------------------------------------------------
 
 
 async def test_options_flow_add_agent_routes_to_existing(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
-    """Selecting AGENT_TYPE_EXISTING routes to configure_existing form."""
+    """Selecting AGENT_TYPE_INTEGRATED routes to configure_integrated form."""
     handler = _make_handler(mock_config_entry, hass)
-    result = await handler.async_step_add_agent({CONF_AGENT_TYPE: AGENT_TYPE_EXISTING})
+    result = await handler.async_step_add_agent({CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED})
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "configure_existing"
+    assert result["step_id"] == "configure_integrated"
 
 
 # ---------------------------------------------------------------------------
@@ -520,11 +520,11 @@ async def test_configure_ollama_success(
 
 
 # ---------------------------------------------------------------------------
-# Test 16 — configure_existing: success appends new agent
+# Test 16 — configure_integrated: success appends new agent
 # ---------------------------------------------------------------------------
 
 
-async def test_configure_existing_success(
+async def test_configure_integrated_success(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
     """Successful existing-agent configuration appends the new agent."""
@@ -535,7 +535,7 @@ async def test_configure_existing_success(
         "async_create_entry",
         return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
     ):
-        await handler.async_step_configure_existing(
+        await handler.async_step_configure_integrated(
             {
                 CONF_AGENT_NAME: "ChatGPT",
                 CONF_PRIORITY: 20,
@@ -546,7 +546,7 @@ async def test_configure_existing_success(
 
     agents = mock_config_entry.data.get(CONF_AGENTS, [])
     assert len(agents) == 1
-    assert agents[0][CONF_AGENT_TYPE] == AGENT_TYPE_EXISTING
+    assert agents[0][CONF_AGENT_TYPE] == AGENT_TYPE_INTEGRATED
 
 
 # ---------------------------------------------------------------------------
@@ -670,21 +670,21 @@ async def test_route_to_edit_step_ollama(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 23 — _route_to_edit_step: Existing type routes to edit_agent_existing
+# Test 23 — _route_to_edit_step: Existing type routes to edit_agent_integrated
 # ---------------------------------------------------------------------------
 
 
 async def test_route_to_edit_step_existing(hass: HomeAssistant) -> None:
-    """Existing-integration agent type routes to async_step_edit_agent_existing."""
+    """Existing-integration agent type routes to async_step_edit_agent_integrated."""
     agent = _existing_agent()
     entry = _entry_with_agents(hass, [agent])
     handler = _make_handler(entry, hass)
     handler._agent_data["_selected_agent_id"] = agent["id"]
 
     with patch.object(
-        handler, "async_step_edit_agent_existing", new_callable=AsyncMock
+        handler, "async_step_edit_agent_integrated", new_callable=AsyncMock
     ) as mock_edit:
-        mock_edit.return_value = {"type": FlowResultType.FORM, "step_id": "edit_agent_existing"}
+        mock_edit.return_value = {"type": FlowResultType.FORM, "step_id": "edit_agent_integrated"}
         await handler._route_to_edit_step()
 
     mock_edit.assert_called_once()
@@ -908,28 +908,28 @@ async def test_edit_agent_ollama_delete_routes_to_confirm(hass: HomeAssistant) -
 
 
 # ---------------------------------------------------------------------------
-# Test 31 — edit_agent_existing: shows pre-populated form
+# Test 31 — edit_agent_integrated: shows pre-populated form
 # ---------------------------------------------------------------------------
 
 
-async def test_edit_agent_existing_shows_form(hass: HomeAssistant) -> None:
-    """async_step_edit_agent_existing without input returns a FORM."""
+async def test_edit_agent_integrated_shows_form(hass: HomeAssistant) -> None:
+    """async_step_edit_agent_integrated without input returns a FORM."""
     agent = _existing_agent()
     entry = _entry_with_agents(hass, [agent])
     handler = _make_handler(entry, hass)
     handler._agent_data["_editing_agent"] = dict(agent)
 
-    result = await handler.async_step_edit_agent_existing()
+    result = await handler.async_step_edit_agent_integrated()
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "edit_agent_existing"
+    assert result["step_id"] == "edit_agent_integrated"
 
 
 # ---------------------------------------------------------------------------
-# Test 32 — edit_agent_existing: success updates agent in place
+# Test 32 — edit_agent_integrated: success updates agent in place
 # ---------------------------------------------------------------------------
 
 
-async def test_edit_agent_existing_success(hass: HomeAssistant) -> None:
+async def test_edit_agent_integrated_success(hass: HomeAssistant) -> None:
     """Successful edit updates the existing agent without changing id or type."""
     agent = _existing_agent()
     entry = _entry_with_agents(hass, [agent])
@@ -941,7 +941,7 @@ async def test_edit_agent_existing_success(hass: HomeAssistant) -> None:
         "async_create_entry",
         return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
     ):
-        await handler.async_step_edit_agent_existing(
+        await handler.async_step_edit_agent_integrated(
             {
                 CONF_AGENT_NAME: "Updated ChatGPT",
                 CONF_PRIORITY: 15,
@@ -956,17 +956,17 @@ async def test_edit_agent_existing_success(hass: HomeAssistant) -> None:
     assert len(agents) == 1
     updated = agents[0]
     assert updated["id"] == agent["id"]
-    assert updated[CONF_AGENT_TYPE] == AGENT_TYPE_EXISTING
+    assert updated[CONF_AGENT_TYPE] == AGENT_TYPE_INTEGRATED
     assert updated[CONF_AGENT_NAME] == "Updated ChatGPT"
     assert updated[CONF_ENTITY_ID] == "conversation.openai_gpt4"
 
 
 # ---------------------------------------------------------------------------
-# Test 33 — edit_agent_existing: enabled field saved when explicitly set
+# Test 33 — edit_agent_integrated: enabled field saved when explicitly set
 # ---------------------------------------------------------------------------
 
 
-async def test_edit_agent_existing_saves_enabled_false(hass: HomeAssistant) -> None:
+async def test_edit_agent_integrated_saves_enabled_false(hass: HomeAssistant) -> None:
     """Editing existing agent with CONF_AGENT_ENABLED=False disables the agent."""
     agent = _existing_agent(**{CONF_AGENT_ENABLED: True})
     entry = _entry_with_agents(hass, [agent])
@@ -978,7 +978,7 @@ async def test_edit_agent_existing_saves_enabled_false(hass: HomeAssistant) -> N
         "async_create_entry",
         return_value={"type": FlowResultType.CREATE_ENTRY, "data": {}},
     ):
-        await handler.async_step_edit_agent_existing(
+        await handler.async_step_edit_agent_integrated(
             {
                 CONF_AGENT_NAME: agent[CONF_AGENT_NAME],
                 CONF_PRIORITY: agent[CONF_PRIORITY],
@@ -991,11 +991,11 @@ async def test_edit_agent_existing_saves_enabled_false(hass: HomeAssistant) -> N
 
 
 # ---------------------------------------------------------------------------
-# Test 34 — edit_agent_existing: delete_agent=True routes to confirmation step
+# Test 34 — edit_agent_integrated: delete_agent=True routes to confirmation step
 # ---------------------------------------------------------------------------
 
 
-async def test_edit_agent_existing_delete_routes_to_confirm(hass: HomeAssistant) -> None:
+async def test_edit_agent_integrated_delete_routes_to_confirm(hass: HomeAssistant) -> None:
     """Submitting with delete_agent=True routes to the confirm_delete_agent step."""
     agent = _existing_agent()
     entry = _entry_with_agents(hass, [agent])
@@ -1006,7 +1006,7 @@ async def test_edit_agent_existing_delete_routes_to_confirm(hass: HomeAssistant)
         handler, "async_step_confirm_delete_agent", new_callable=AsyncMock
     ) as mock_confirm:
         mock_confirm.return_value = {"type": FlowResultType.FORM, "step_id": "confirm_delete_agent"}
-        await handler.async_step_edit_agent_existing(
+        await handler.async_step_edit_agent_integrated(
             {
                 CONF_AGENT_NAME: agent[CONF_AGENT_NAME],
                 CONF_PRIORITY: agent[CONF_PRIORITY],
@@ -1970,7 +1970,7 @@ async def test_configure_routing_agent_shows_edit_form_with_extra_fields(
     """configure_routing_agent shows enabled and delete_agent fields when editing."""
     router = {
         "id": "router-1",
-        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED,
         CONF_IS_ROUTER: True,
         CONF_AGENT_NAME: "Cloud Router",
         CONF_PRIORITY: PRIORITY_ROUTER,
@@ -2082,7 +2082,7 @@ async def test_configure_routing_agent_valid_add_saves_router(
     assert len(agents) == 1
     router = agents[0]
     assert router[CONF_IS_ROUTER] is True
-    assert router[CONF_AGENT_TYPE] == AGENT_TYPE_EXISTING
+    assert router[CONF_AGENT_TYPE] == AGENT_TYPE_INTEGRATED
     assert router[CONF_AGENT_NAME] == "Cloud Router"
     assert router[CONF_ENTITY_ID] == "conversation.gemini"
     assert router[CONF_AGENT_CACHE_ENABLED] is False
@@ -2098,7 +2098,7 @@ async def test_configure_routing_agent_edit_updates_in_place(hass: HomeAssistant
     """Editing an existing router updates it in place without appending new entry."""
     router = {
         "id": "router-edit-1",
-        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED,
         CONF_IS_ROUTER: True,
         CONF_AGENT_NAME: "Old Name",
         CONF_PRIORITY: PRIORITY_ROUTER,
@@ -2156,7 +2156,7 @@ async def test_configure_routing_agent_delete_routes_to_confirm(
     """Setting delete_agent=True in edit mode triggers the confirm_delete_agent step."""
     router = {
         "id": "router-del-1",
-        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED,
         CONF_IS_ROUTER: True,
         CONF_AGENT_NAME: "Doomed Router",
         CONF_PRIORITY: PRIORITY_ROUTER,
@@ -2201,7 +2201,7 @@ async def test_route_to_edit_step_router_calls_configure_routing_agent(
     """_route_to_edit_step dispatches to configure_routing_agent for a routing agent."""
     router = {
         "id": "route-router-1",
-        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED,
         CONF_IS_ROUTER: True,
         CONF_AGENT_NAME: "Route Test Router",
         CONF_PRIORITY: PRIORITY_ROUTER,
@@ -2236,7 +2236,7 @@ async def test_configure_routing_agent_delete_from_menu_sets_editing_agent(
     to confirm_delete_agent and populates _editing_agent automatically."""
     router = {
         "id": "router-menu-del",
-        CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+        CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED,
         CONF_IS_ROUTER: True,
         CONF_AGENT_NAME: "Main Menu Router",
         CONF_PRIORITY: PRIORITY_ROUTER,

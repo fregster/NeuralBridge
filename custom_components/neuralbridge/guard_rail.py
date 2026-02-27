@@ -5,11 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from homeassistant.components.conversation import ConversationResult  # noqa: TC002
+from homeassistant.components.conversation import ConversationResult
 
 from .const import (
     CONF_AGENT_TYPE,
@@ -23,6 +22,7 @@ from .const import (
     GUARD_RAIL_CATEGORY_SECURITY,
 )
 from .ollama_client import OllamaClient
+from .pending_cache import PendingCache
 from .prompts_loader import load_prompt
 
 _LOGGER = logging.getLogger(__name__)
@@ -104,7 +104,10 @@ class GuardRailChecker:
         use_detoxify: bool = False,
         detoxify_threshold: float = 0.7,
     ) -> None:
-        """Initialize the guard rail checker.
+        """Lightweight constructor — does NOT load ML models.
+
+        Call :meth:`async_initialize` after construction to load models
+        off the event loop via a thread-pool executor.
 
         Args:
             rules: Custom rule patterns by category.
@@ -118,11 +121,26 @@ class GuardRailChecker:
         self._ai_threshold = ai_threshold
         self._detoxify_threshold = detoxify_threshold
         self._rules = self._build_rules(rules)
-        self._profanity_available = self._init_profanity()
+        self._profanity_available: bool = False
         self._detoxify_model: Any = None
-        self._detoxify_available = False
-        if use_detoxify:
-            self._detoxify_available = self._init_detoxify()
+        self._detoxify_available: bool = False
+        self._use_detoxify = use_detoxify
+        self._initialized: bool = False
+
+    async def async_initialize(self) -> None:
+        """Load ML models in a thread pool executor — safe to await on event loop.
+
+        Idempotent: subsequent calls return immediately without re-loading.
+        Before this method is awaited, :attr:`_profanity_available` and
+        :attr:`_detoxify_available` are both ``False`` (safe degradation).
+        """
+        if self._initialized:
+            return
+        loop = asyncio.get_running_loop()
+        self._profanity_available = await loop.run_in_executor(None, self._init_profanity)
+        if self._use_detoxify:
+            self._detoxify_available = await loop.run_in_executor(None, self._init_detoxify)
+        self._initialized = True
 
     # ── Library initialisation ──────────────────────────────────────────────
 
@@ -332,7 +350,7 @@ class GuardRailChecker:
         if self._detoxify_model is None:
             return GuardRailResult(is_safe=True, confidence=0.5)
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             model = self._detoxify_model
             scores: dict[str, float] = await loop.run_in_executor(None, lambda: model.predict(text))
             return self._evaluate_detoxify_scores(scores)
@@ -450,7 +468,7 @@ class GuardRailChecker:
                     return GuardRailResult(is_safe=True, confidence=0.5)
 
                 # Parse AI response
-                return self._parse_ai_response(response)
+                return self._parse_ai_response(response.content)
 
             finally:
                 await client.close()
@@ -524,19 +542,17 @@ class GuardRailChecker:
         return GuardRailResult(is_safe=True, confidence=0.5)
 
 
-class GuardRailCache:
-    """Cache for guard rail check results and pending responses."""
+class GuardRailCache(PendingCache[tuple[str, GuardRailResult]]):
+    """Pending-response cache for guard-rail confirmation flow."""
 
     def __init__(self, max_size: int = 100, ttl_seconds: int = 300) -> None:
-        """Initialize the cache.
+        """Initialise the guard-rail pending cache.
 
         Args:
-            max_size: Maximum number of cached items.
-            ttl_seconds: Time-to-live for cached items in seconds.
+            max_size: Maximum number of concurrent pending entries.
+            ttl_seconds: Time-to-live in seconds for each entry.
         """
-        self._cache: dict[str, tuple[Any, float]] = {}
-        self._max_size = max_size
-        self._ttl_seconds = ttl_seconds
+        super().__init__(max_size=max_size, ttl_seconds=ttl_seconds, key_prefix="gr")
 
     async def store_pending_response(
         self,
@@ -551,16 +567,7 @@ class GuardRailCache:
             response: The response text to cache.
             guard_rail_result: The guard rail check result.
         """
-        key = f"pending:{conversation_id}"
-        expiry = time.time() + self._ttl_seconds
-
-        self._cache[key] = (
-            {"response": response, "guard_rail_result": guard_rail_result},
-            expiry,
-        )
-
-        # Clean up old entries
-        await self._cleanup()
+        await self.store(conversation_id, (response, guard_rail_result))
 
     async def get_pending_response(
         self, conversation_id: str
@@ -573,15 +580,7 @@ class GuardRailCache:
         Returns:
             Tuple of (response, guard_rail_result) if found, None otherwise.
         """
-        key = f"pending:{conversation_id}"
-        if key in self._cache:
-            data, expiry = self._cache[key]
-            if time.time() < expiry:
-                return data["response"], data["guard_rail_result"]
-            # Expired
-            del self._cache[key]
-
-        return None
+        return await self.get(conversation_id)
 
     async def clear_pending_response(self, conversation_id: str) -> None:
         """Clear a pending response.
@@ -589,29 +588,10 @@ class GuardRailCache:
         Args:
             conversation_id: Unique conversation identifier.
         """
-        key = f"pending:{conversation_id}"
-        if key in self._cache:
-            del self._cache[key]
-
-    async def _cleanup(self) -> None:
-        """Clean up expired entries."""
-        current_time = time.time()
-
-        # Remove expired entries
-        expired_keys = [key for key, (_, expiry) in self._cache.items() if current_time >= expiry]
-        for key in expired_keys:
-            del self._cache[key]
-
-        # If still over limit, remove oldest entries
-        if len(self._cache) > self._max_size:
-            # Sort by expiry time and keep only the newest max_size entries
-            sorted_items = sorted(self._cache.items(), key=lambda x: x[1][1])
-            entries_to_remove = len(self._cache) - self._max_size
-            for key, _ in sorted_items[:entries_to_remove]:
-                del self._cache[key]
+        await self.clear(conversation_id)
 
 
-class HighStakesCache:
+class HighStakesCache(PendingCache[tuple[ConversationResult, list[str]]]):
     """Short-lived cache that holds a ConversationResult pending user confirmation.
 
     Used by the high-stakes confirmation flow (Feature 4) to remember the
@@ -629,9 +609,7 @@ class HighStakesCache:
             max_size: Maximum number of pending items to retain simultaneously.
             ttl_seconds: Seconds before an unconfirmed entry expires.
         """
-        self._cache: dict[str, tuple[Any, float]] = {}
-        self._max_size = max_size
-        self._ttl_seconds = ttl_seconds
+        super().__init__(max_size=max_size, ttl_seconds=ttl_seconds, key_prefix="hs")
 
     async def store_pending(
         self,
@@ -646,10 +624,7 @@ class HighStakesCache:
             result: The ConversationResult to hold pending confirmation.
             entity_ids: Entity IDs targeted by the action (for event firing).
         """
-        key = f"hs:{conversation_id}"
-        expiry = time.time() + self._ttl_seconds
-        self._cache[key] = ({"result": result, "entity_ids": entity_ids}, expiry)
-        await self._cleanup()
+        await self.store(conversation_id, (result, entity_ids))
 
     async def get_pending(
         self, conversation_id: str
@@ -663,13 +638,7 @@ class HighStakesCache:
             Tuple of (ConversationResult, entity_ids) if a non-expired entry
             exists, otherwise None.
         """
-        key = f"hs:{conversation_id}"
-        if key in self._cache:
-            data, expiry = self._cache[key]
-            if time.time() < expiry:
-                return data["result"], data["entity_ids"]
-            del self._cache[key]
-        return None
+        return await self.get(conversation_id)
 
     async def clear_pending(self, conversation_id: str) -> None:
         """Remove any pending entry for the given conversation.
@@ -677,18 +646,4 @@ class HighStakesCache:
         Args:
             conversation_id: Unique conversation identifier.
         """
-        key = f"hs:{conversation_id}"
-        if key in self._cache:
-            del self._cache[key]
-
-    async def _cleanup(self) -> None:
-        """Evict expired entries, then trim to max_size if necessary."""
-        current_time = time.time()
-        expired = [k for k, (_, expiry) in self._cache.items() if current_time >= expiry]
-        for key in expired:
-            del self._cache[key]
-
-        if len(self._cache) > self._max_size:
-            sorted_items = sorted(self._cache.items(), key=lambda x: x[1][1])
-            for key, _ in sorted_items[: len(self._cache) - self._max_size]:
-                del self._cache[key]
+        await self.clear(conversation_id)

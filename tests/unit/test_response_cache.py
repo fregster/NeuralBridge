@@ -6,6 +6,8 @@ from dataclasses import replace as dc_replace
 from unittest.mock import patch
 
 from custom_components.neuralbridge.response_cache import (
+    _MAX_KEY_CHARS,
+    _MAX_VALUE_CHARS,
     CachedResponse,
     ResponseCache,
     _normalise_cache_key,
@@ -644,3 +646,43 @@ class TestResponseCacheSemanticConfigure:
         cache = ResponseCache(semantic_ttl_seconds=90)
         cache.configure(enabled=True, ttl_seconds=300, semantic_ttl_seconds=None)
         assert cache.semantic_ttl == 90
+
+
+# ---------------------------------------------------------------------------
+# P6 — Input size caps
+# ---------------------------------------------------------------------------
+
+
+class TestResponseCacheSizeCaps:
+    """Tests for _MAX_KEY_CHARS and _MAX_VALUE_CHARS size guards."""
+
+    def test_store_oversized_key_is_silently_ignored(self) -> None:
+        """store() with text longer than _MAX_KEY_CHARS does not add an entry."""
+        cache = ResponseCache()
+        oversized_text = "x" * (_MAX_KEY_CHARS + 1)
+        cache.store(oversized_text, "response", "agent")
+        assert len(cache._cache) == 0
+
+    def test_store_oversized_value_is_silently_ignored(self) -> None:
+        """store() with response longer than _MAX_VALUE_CHARS does not add an entry."""
+        cache = ResponseCache()
+        oversized_response = "y" * (_MAX_VALUE_CHARS + 1)
+        cache.store("short query", oversized_response, "agent")
+        assert len(cache._cache) == 0
+
+    def test_get_oversized_key_returns_none(self) -> None:
+        """get() with text over _MAX_KEY_CHARS returns None without error."""
+        cache = ResponseCache()
+        oversized_text = "z" * (_MAX_KEY_CHARS + 1)
+        result = cache.get(oversized_text)
+        assert result is None
+
+    def test_normalise_cache_key_truncates_oversized_input(self) -> None:
+        """_normalise_cache_key truncates input at _MAX_KEY_CHARS before processing."""
+        long_text = "word " * (_MAX_KEY_CHARS // 5 + 10)
+        assert len(long_text) > _MAX_KEY_CHARS
+        result = _normalise_cache_key(long_text)
+        # Result is derived from a truncated prefix, so it must be shorter
+        # than the original input would produce. The key property is no error.
+        assert isinstance(result, str)
+        assert len(result) <= _MAX_KEY_CHARS

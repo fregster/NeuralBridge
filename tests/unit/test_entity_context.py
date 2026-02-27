@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from custom_components.neuralbridge.entity_context import (
+    _SENSOR_DOMAINS,
     MAX_ENTITIES_PER_DOMAIN,
+    MAX_SENSOR_VALUES,
     RELEVANT_DOMAINS,
     EntityContextCache,
 )
@@ -351,3 +353,360 @@ async def test_get_summary_rebuilds_after_new_state_with_real_hass(hass: HomeAss
 
     assert "weather" not in first
     assert "weather" in second
+
+
+# ---------------------------------------------------------------------------
+# Helpers for get_sensor_values tests
+# ---------------------------------------------------------------------------
+
+
+def _make_sensor_state(
+    entity_id: str,
+    state_value: str,
+    friendly_name: str | None = None,
+    unit: str | None = None,
+) -> MagicMock:
+    """Return a minimal fake state object with a state value and optional unit."""
+    s = MagicMock()
+    s.entity_id = entity_id
+    s.domain = entity_id.split(".", maxsplit=1)[0]
+    s.state = state_value
+    attrs: dict[str, str] = {}
+    if friendly_name is not None:
+        attrs["friendly_name"] = friendly_name
+    if unit is not None:
+        attrs["unit_of_measurement"] = unit
+    s.attributes = attrs
+    return s
+
+
+# ---------------------------------------------------------------------------
+# _SENSOR_DOMAINS and MAX_SENSOR_VALUES constants
+# ---------------------------------------------------------------------------
+
+
+def test_sensor_domains_is_frozenset() -> None:
+    """_SENSOR_DOMAINS is a frozenset (immutable)."""
+    assert isinstance(_SENSOR_DOMAINS, frozenset)
+
+
+def test_sensor_domains_contains_sensor_and_binary_sensor() -> None:
+    """_SENSOR_DOMAINS contains 'sensor' and 'binary_sensor'."""
+    assert "sensor" in _SENSOR_DOMAINS
+    assert "binary_sensor" in _SENSOR_DOMAINS
+
+
+def test_sensor_domains_does_not_contain_light_or_switch() -> None:
+    """_SENSOR_DOMAINS excludes on/off domains that add noise for routing."""
+    assert "light" not in _SENSOR_DOMAINS
+    assert "switch" not in _SENSOR_DOMAINS
+
+
+def test_max_sensor_values_is_positive_int() -> None:
+    """MAX_SENSOR_VALUES is a positive integer."""
+    assert isinstance(MAX_SENSOR_VALUES, int)
+    assert MAX_SENSOR_VALUES > 0
+
+
+# ---------------------------------------------------------------------------
+# get_sensor_values — basic behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_get_sensor_values_returns_empty_when_no_states() -> None:
+    """Returns '' when hass has no states."""
+    mock_hass = _make_hass([])
+    cache = EntityContextCache()
+    assert cache.get_sensor_values(mock_hass) == ""
+
+
+def test_get_sensor_values_returns_empty_when_no_sensor_domains() -> None:
+    """Returns '' when no sensor/binary_sensor entities exist."""
+    mock_hass = _make_hass(
+        [
+            _make_sensor_state("light.kitchen", "on", "Kitchen"),
+            _make_sensor_state("switch.fan", "off", "Fan"),
+        ]
+    )
+    cache = EntityContextCache()
+    assert cache.get_sensor_values(mock_hass) == ""
+
+
+def test_get_sensor_values_contains_header() -> None:
+    """Result starts with 'Current sensor values:'."""
+    mock_hass = _make_hass([_make_sensor_state("sensor.temp", "12.6", "Air temperature", "°C")])
+    cache = EntityContextCache()
+    result = cache.get_sensor_values(mock_hass)
+    assert result.startswith("Current sensor values:")
+
+
+def test_get_sensor_values_includes_value_and_unit() -> None:
+    """Each entry includes the state value and unit_of_measurement."""
+    mock_hass = _make_hass([_make_sensor_state("sensor.temp", "12.6", "Air temperature", "°C")])
+    cache = EntityContextCache()
+    result = cache.get_sensor_values(mock_hass)
+    assert "Air temperature: 12.6 °C" in result
+
+
+def test_get_sensor_values_no_unit_omits_unit() -> None:
+    """When no unit_of_measurement, the value is shown without a trailing space."""
+    mock_hass = _make_hass([_make_sensor_state("sensor.precip_type", "none", "Precipitation Type")])
+    cache = EntityContextCache()
+    result = cache.get_sensor_values(mock_hass)
+    assert "Precipitation Type: none" in result
+    # Should not have a trailing space after value
+    assert "none " not in result
+
+
+def test_get_sensor_values_uses_friendly_name() -> None:
+    """Friendly name is used in the output when available."""
+    mock_hass = _make_hass([_make_sensor_state("sensor.s1", "3.43", "River level downstream", "m")])
+    cache = EntityContextCache()
+    result = cache.get_sensor_values(mock_hass)
+    assert "River level downstream: 3.43 m" in result
+
+
+def test_get_sensor_values_falls_back_to_entity_id() -> None:
+    """Falls back to entity_id when no friendly_name attribute is set."""
+    mock_hass = _make_hass([_make_sensor_state("sensor.river_level", "3.43", None, "m")])
+    cache = EntityContextCache()
+    result = cache.get_sensor_values(mock_hass)
+    assert "sensor.river_level: 3.43 m" in result
+
+
+def test_get_sensor_values_includes_binary_sensor() -> None:
+    """binary_sensor entities are included in the sensor values block."""
+    mock_hass = _make_hass([_make_sensor_state("binary_sensor.rain", "on", "Rain detected")])
+    cache = EntityContextCache()
+    result = cache.get_sensor_values(mock_hass)
+    assert "Rain detected: on" in result
+
+
+def test_get_sensor_values_excludes_unavailable() -> None:
+    """States with value 'unavailable' are excluded."""
+    mock_hass = _make_hass(
+        [
+            _make_sensor_state("sensor.broken", "unavailable", "Broken sensor"),
+            _make_sensor_state("sensor.ok", "5.0", "Good sensor", "m"),
+        ]
+    )
+    cache = EntityContextCache()
+    result = cache.get_sensor_values(mock_hass)
+    assert "Broken sensor" not in result
+    assert "Good sensor: 5.0 m" in result
+
+
+def test_get_sensor_values_excludes_unknown() -> None:
+    """States with value 'unknown' are excluded."""
+    mock_hass = _make_hass([_make_sensor_state("sensor.mystery", "unknown", "Mystery sensor")])
+    cache = EntityContextCache()
+    assert cache.get_sensor_values(mock_hass) == ""
+
+
+def test_get_sensor_values_sorted_alphabetically() -> None:
+    """Output lines are sorted alphabetically by entry text."""
+    mock_hass = _make_hass(
+        [
+            _make_sensor_state("sensor.z", "1", "Zebra sensor"),
+            _make_sensor_state("sensor.a", "2", "Apple sensor"),
+            _make_sensor_state("sensor.m", "3", "Mango sensor"),
+        ]
+    )
+    cache = EntityContextCache()
+    result = cache.get_sensor_values(mock_hass)
+    lines = [ln for ln in result.splitlines() if ln.startswith("- ")]
+    assert lines == sorted(lines)
+
+
+def test_get_sensor_values_capped_at_max_sensor_values() -> None:
+    """Output is capped at MAX_SENSOR_VALUES entries (hard ceiling for extreme installs)."""
+    states = [
+        _make_sensor_state(f"sensor.s{i:04d}", str(i), f"Sensor {i:04d}")
+        for i in range(MAX_SENSOR_VALUES + 10)
+    ]
+    mock_hass = _make_hass(states)
+    cache = EntityContextCache()
+    result = cache.get_sensor_values(mock_hass)
+    lines = [ln for ln in result.splitlines() if ln.startswith("- ")]
+    assert len(lines) == MAX_SENSOR_VALUES
+
+
+def test_get_sensor_values_excludes_non_sensor_domains() -> None:
+    """Only sensor and binary_sensor domains appear in the values block."""
+    mock_hass = _make_hass(
+        [
+            _make_sensor_state("light.bedroom", "on", "Bedroom Light"),
+            _make_sensor_state("climate.hall", "heat", "Hall Thermostat"),
+            _make_sensor_state("sensor.temp", "21.0", "Temperature", "°C"),
+        ]
+    )
+    cache = EntityContextCache()
+    result = cache.get_sensor_values(mock_hass)
+    assert "Bedroom Light" not in result
+    assert "Hall Thermostat" not in result
+    assert "Temperature: 21.0 °C" in result
+
+
+def test_get_sensor_values_always_fresh_not_cached() -> None:
+    """get_sensor_values always reads live state (is not cached like get_summary)."""
+    state = _make_sensor_state("sensor.temp", "10.0", "Temperature", "°C")
+    mock_hass = _make_hass([state])
+    cache = EntityContextCache()
+
+    result1 = cache.get_sensor_values(mock_hass)
+    assert "Temperature: 10.0 °C" in result1
+
+    # Simulate a state change without adding entities (entity set unchanged)
+    state.state = "20.0"
+    mock_hass.states.async_all.return_value = [state]
+
+    result2 = cache.get_sensor_values(mock_hass)
+    assert "Temperature: 20.0 °C" in result2
+    assert result1 != result2
+
+
+# ---------------------------------------------------------------------------
+# get_sensor_names — produces a compact list of available sensor entity IDs
+# ---------------------------------------------------------------------------
+
+
+def test_get_sensor_names_with_unit() -> None:
+    """get_sensor_names includes entity_id, friendly name, and unit in brackets."""
+    mock_hass = _make_hass(
+        [_make_sensor_state("sensor.precipitation_type", "none", "Precipitation Type", "")]
+    )
+    # override friendly_name via the helper
+    states = [_make_sensor_state("sensor.precip", "none", "Precip Type")]
+    states[0].attributes = {"friendly_name": "Precip Type", "unit_of_measurement": "mm/h"}
+    mock_hass = _make_hass(states)
+
+    cache = EntityContextCache()
+    result = cache.get_sensor_names(mock_hass)
+
+    assert result.startswith("Available sensors:")
+    assert "sensor.precip" in result
+    assert "mm/h" in result
+
+
+def test_get_sensor_names_without_unit() -> None:
+    """get_sensor_names omits brackets when no unit_of_measurement is present."""
+    states = [_make_sensor_state("sensor.motion", "on", "Motion Sensor")]
+    mock_hass = _make_hass(states)
+
+    cache = EntityContextCache()
+    result = cache.get_sensor_names(mock_hass)
+
+    assert "sensor.motion" in result
+    assert "[" not in result  # no brackets when no unit
+
+
+def test_get_sensor_names_excludes_unavailable() -> None:
+    """get_sensor_names excludes sensors with state 'unavailable' or 'unknown'."""
+    states = [
+        _make_sensor_state("sensor.online", "23.5", "Online Sensor"),
+        _make_sensor_state("sensor.offline", "unavailable", "Offline Sensor"),
+        _make_sensor_state("sensor.unknown", "unknown", "Unknown Sensor"),
+    ]
+    mock_hass = _make_hass(states)
+
+    cache = EntityContextCache()
+    result = cache.get_sensor_names(mock_hass)
+
+    assert "sensor.online" in result
+    assert "sensor.offline" not in result
+    assert "sensor.unknown" not in result
+
+
+def test_get_sensor_names_excludes_non_sensor_domains() -> None:
+    """get_sensor_names only includes sensor and binary_sensor domains."""
+    states = [
+        _make_sensor_state("sensor.temp", "20.0", "Temperature"),
+        _make_sensor_state("binary_sensor.motion", "on", "Motion"),
+        _make_sensor_state("light.ceiling", "on", "Ceiling Light"),
+    ]
+    mock_hass = _make_hass(states)
+
+    cache = EntityContextCache()
+    result = cache.get_sensor_names(mock_hass)
+
+    assert "sensor.temp" in result
+    assert "binary_sensor.motion" in result
+    assert "light.ceiling" not in result
+
+
+def test_get_sensor_names_empty_returns_empty_string() -> None:
+    """get_sensor_names returns '' when no eligible sensors exist."""
+    mock_hass = _make_hass([_make_sensor_state("sensor.unavail", "unavailable", "U")])
+
+    cache = EntityContextCache()
+    assert cache.get_sensor_names(mock_hass) == ""
+
+
+# ---------------------------------------------------------------------------
+# get_sensor_values_for — fetches live values for specific entity IDs
+# ---------------------------------------------------------------------------
+
+
+def _make_hass_with_get(states: list[MagicMock]) -> MagicMock:
+    """Return a mock hass where states.get(entity_id) works correctly."""
+    mock_hass = MagicMock()
+    state_map = {s.entity_id: s for s in states}
+    mock_hass.states.get.side_effect = state_map.get
+    return mock_hass
+
+
+def test_get_sensor_values_for_returns_values() -> None:
+    """get_sensor_values_for returns a formatted block for the requested entities."""
+    state = _make_sensor_state("sensor.rain", "0.5", "Rainfall", "mm/h")
+    mock_hass = _make_hass_with_get([state])
+
+    cache = EntityContextCache()
+    result = cache.get_sensor_values_for(mock_hass, ["sensor.rain"])
+
+    assert result.startswith("Current sensor values:")
+    assert "Rainfall: 0.5 mm/h" in result
+
+
+def test_get_sensor_values_for_without_unit() -> None:
+    """get_sensor_values_for formats 'Name: value' when no unit is present."""
+    state = _make_sensor_state("sensor.motion", "on", "Motion Sensor")
+    mock_hass = _make_hass_with_get([state])
+
+    cache = EntityContextCache()
+    result = cache.get_sensor_values_for(mock_hass, ["sensor.motion"])
+
+    assert "Motion Sensor: on" in result
+
+
+def test_get_sensor_values_for_excludes_unavailable() -> None:
+    """get_sensor_values_for excludes unavailable and unknown states."""
+    states = [
+        _make_sensor_state("sensor.ok", "21.0", "OK", "°C"),
+        _make_sensor_state("sensor.bad", "unavailable", "Bad"),
+        _make_sensor_state("sensor.unk", "unknown", "Unknown"),
+    ]
+    mock_hass = _make_hass_with_get(states)
+
+    cache = EntityContextCache()
+    result = cache.get_sensor_values_for(mock_hass, ["sensor.ok", "sensor.bad", "sensor.unk"])
+
+    assert "OK" in result
+    assert "Bad" not in result
+    assert "Unknown" not in result
+
+
+def test_get_sensor_values_for_entity_not_found() -> None:
+    """get_sensor_values_for silently skips entity IDs not in hass.states."""
+    mock_hass = _make_hass_with_get([])  # empty — all states.get() return None
+
+    cache = EntityContextCache()
+    result = cache.get_sensor_values_for(mock_hass, ["sensor.nonexistent"])
+
+    assert result == ""
+
+
+def test_get_sensor_values_for_empty_list_returns_empty() -> None:
+    """get_sensor_values_for returns '' when given an empty entity list."""
+    cache = EntityContextCache()
+    result = cache.get_sensor_values_for(MagicMock(), [])
+    assert result == ""

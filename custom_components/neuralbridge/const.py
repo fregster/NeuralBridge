@@ -26,9 +26,65 @@ CONF_OLLAMA_MODEL: Final = "ollama_model"
 CONF_ENTITY_ID: Final = "entity_id"
 CONF_TIMEOUT: Final = "timeout"
 
+# ─────────────────────────────────────────────────────────────────────────────
 # Agent types
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  CRITICAL: "Ollama" appears in two completely different contexts here.  │
+# │                                                                         │
+# │  The HA Ollama integration (Settings → Devices & Services → Ollama)     │
+# │  registers a NATIVE HA conversation entity.  NeuralBridge routes to it  │
+# │  via HA's conversation service exactly like any other HA-registered LLM. │
+# │  This is an INTEGRATED ("existing_integration") agent — the user selects  │
+# │  the entity_id in the config UI.  This is the path taken by the vast     │
+# │  majority (~99%) of Home Assistant users who run Ollama.                 │
+# │                                                                         │
+# │  AGENT_TYPE_OLLAMA ("ollama") is a completely separate, direct HTTP     │
+# │  connection that bypasses HA entirely.  It is a niche, low-usage path  │
+# │  for advanced setups where NeuralBridge manages the Ollama connection   │
+# │  itself.  Do NOT default to this type when a user says "Ollama" —      │
+# │  assume they are using the HA Ollama integration (INTEGRATED type)      │
+# │  unless they explicitly state otherwise.                                │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# LOCAL_HA ("home_assistant"):
+#   Routes to the HA built-in intent processor, hardcoded to the entity
+#   "conversation.home_assistant".  This is the DEVICE CONTROL path — it handles
+#   voice commands such as "turn the lights off" and returns
+#   response_type="action_done" when a device intent is matched.
+#   The `assist_mode` flag controls the response acceptance policy:
+#     True  — only accepts action_done; all other responses fall through to the
+#             next lower-priority agent (device control only).
+#     False — accepts any non-empty response (device control + free-text LLM).
+#   Note: this type does NOT allow selecting a different HA entity.  If you want
+#   to route to a different HA conversation entity (Gemini, HA Ollama integration,
+#   ChatGPT, etc.) use INTEGRATED instead.
+#
+# INTEGRATED ("existing_integration"):
+#   Routes to any HA conversation entity that the user selects — the HA Ollama
+#   integration, Gemini, OpenAI Conversation, Claude, or any other HA-registered
+#   LLM.  Same HA conversation service transport as LOCAL_HA but the entity_id
+#   is user-configurable, not hardcoded.  This is the path for cloud/LLM agents
+#   used for Q&A and general knowledge.  No assist_mode filter (any non-empty
+#   response accepted).  Receives verbosity hints prepended to the query.
+#   NOTE: the stored config value remains "existing_integration" for backwards
+#   compatibility with existing users' config entries.
+#   used for Q&A and general knowledge — there is no assist_mode filter (any
+#   non-empty response is accepted).  Verbosity hints are prepended to the query.
+#
+# OLLAMA ("ollama"):
+#   ⚠ DIRECT HTTP connection to an Ollama server — NOT the HA Ollama integration.
+#   NeuralBridge calls the Ollama REST API at the configured URL independently of
+#   HA.  NeuralBridge injects its own system prompt and controls model parameters.
+#   LOW-USAGE PATH — only use when Ollama is not configured as a HA integration.
+#   Most deployments should use LOCAL_HA or EXISTING instead.
+#
+# WEB_SEARCH ("web_search"):
+#   DIRECT API query to an external search/AI service (e.g. Brave Search, Brave AI).
+#   Zero HA involvement — raw HTTP calls made by NeuralBridge's WebSearchClient.
+# ─────────────────────────────────────────────────────────────────────────────
 AGENT_TYPE_OLLAMA: Final = "ollama"
-AGENT_TYPE_EXISTING: Final = "existing_integration"
+AGENT_TYPE_INTEGRATED: Final = "existing_integration"
 AGENT_TYPE_LOCAL_HA: Final = "home_assistant"
 AGENT_TYPE_WEB_SEARCH: Final = "web_search"
 
@@ -315,6 +371,11 @@ ROUTER_CONFIDENCE_HIGH: Final = "high"
 ROUTER_CONFIDENCE_LOW: Final = "low"
 VALID_ROUTER_CONFIDENCE_VALUES: Final = frozenset({"high", "low"})
 
+# Router response key for relevant sensor entity IDs
+# The router returns a list of entity IDs it used to answer the query so that
+# NeuralBridge can inject only those live values into the answering agent.
+ROUTER_RESPONSE_KEY_RELEVANT_SENSORS: Final = "relevant_sensors"
+
 # Feature 10 — Language passthrough: force Ollama to respond in the user's language
 CONF_FORCE_RESPONSE_LANGUAGE: Final = "force_response_language"
 DEFAULT_FORCE_RESPONSE_LANGUAGE: Final = True
@@ -335,3 +396,125 @@ VERBOSITY_INSTRUCTION_BRIEF: Final = (
     "Respond with the shortest possible acknowledgement — one to five words."
 )
 VERBOSITY_INSTRUCTION_VERBOSE: Final = "Give detailed, explanatory responses."
+
+# Cannot-answer sentinel — injected into Ollama system prompts so the model
+# returns a predictable token when it cannot answer, triggering re-routing.
+# Keep this short so even a 0.6B model follows the instruction reliably.
+CANNOT_ANSWER_SENTINEL: Final = "CANNOT_ANSWER"
+CANNOT_ANSWER_INSTRUCTION: Final = (
+    f"If you cannot answer this question, respond only with: {CANNOT_ANSWER_SENTINEL}"
+)
+
+# ---------------------------------------------------------------------------
+# Feature 14 — Agent Benchmark Profiling
+# ---------------------------------------------------------------------------
+
+# NOTE: CONF_AGENT_RE_BENCHMARK is intentionally absent — re_benchmark_on_save
+# is owned exclusively by BenchmarkProfile in HA storage, never by the agent
+# config dict.  See config flow section for rationale.
+
+# Probe suite versioning — increment this integer whenever any probe in
+# benchmark_probes.py is added, modified, or removed.  All stored profiles
+# whose probe_suite_version does not match will be automatically invalidated
+# and re-queued on next HA start.  Never decrement.
+BENCHMARK_PROBE_SUITE_VERSION: Final = 2
+
+CONF_BENCHMARK_WARM_UP_DELAY: Final = "benchmark_warm_up_delay"
+DEFAULT_BENCHMARK_WARM_UP_DELAY: Final = 60  # seconds
+BENCHMARK_STORAGE_KEY: Final = f"{DOMAIN}.benchmark"
+BENCHMARK_STORAGE_VERSION: Final = 1
+EVENT_BENCHMARK_STARTED: Final = f"{DOMAIN}_benchmark_started"
+EVENT_BENCHMARK_COMPLETE: Final = f"{DOMAIN}_benchmark_complete"
+EVENT_BENCHMARK_FAILED: Final = f"{DOMAIN}_benchmark_failed"
+SERVICE_RUN_BENCHMARK: Final = "run_benchmark"
+DATA_BENCHMARKER: Final = "benchmarker"
+
+# Per-dimension strategy config keys (flat — one per dimension, stored in router agent config)
+CONF_STRATEGY_REASONING: Final = "strategy_reasoning"
+CONF_STRATEGY_INSTRUCTION_FOLLOWING: Final = "strategy_instruction_following"
+CONF_STRATEGY_SMART_HOME_INTENT: Final = "strategy_smart_home_intent"
+CONF_STRATEGY_FACTUAL: Final = "strategy_factual"
+CONF_STRATEGY_MEMORY: Final = "strategy_memory"
+
+# Convenience mapping: dimension name → its CONF_STRATEGY_* constant
+# Used by _classify_with_router to build the dimension_strategies dict at runtime.
+# NOT stored directly in the config entry.
+CONF_STRATEGY_MAP: Final[dict[str, str]] = {
+    "reasoning": CONF_STRATEGY_REASONING,
+    "instruction_following": CONF_STRATEGY_INSTRUCTION_FOLLOWING,
+    "smart_home_intent": CONF_STRATEGY_SMART_HOME_INTENT,
+    "factual": CONF_STRATEGY_FACTUAL,
+    "memory": CONF_STRATEGY_MEMORY,
+}
+
+# Routing strategy values communicated to the router LLM
+ROUTING_STRATEGY_DEFAULT: Final = "default"
+ROUTING_STRATEGY_FASTEST: Final = "fastest"
+ROUTING_STRATEGY_MOST_CAPABLE: Final = "most_capable"
+ROUTING_STRATEGY_LOCAL_ONLY: Final = "local_only"
+VALID_ROUTING_STRATEGIES: Final = frozenset(
+    {
+        "default",
+        "fastest",
+        "most_capable",
+        "local_only",
+    }
+)
+
+# Feature 14d — Router JSON response keys for dimension-aware routing
+ROUTER_RESPONSE_KEY_DIMENSION: Final = "dimension"
+ROUTER_RESPONSE_KEY_SUGGESTED_ORDER: Final = "suggested_agent_order"
+VALID_ROUTER_DIMENSIONS: Final = frozenset(
+    {
+        "reasoning",
+        "instruction_following",
+        "smart_home_intent",
+        "factual",
+        "memory",
+    }
+)
+
+# Cap on each agent-name string accepted from suggested_agent_order
+# (prevents prompt injection bleed-through)
+SUGGESTED_ORDER_NAME_MAX_LEN: Final = 100
+
+# ---------------------------------------------------------------------------
+# Feature 15 — Adaptive Preference Learning (APL)
+# ---------------------------------------------------------------------------
+
+# Toggle — master on/off switch for preference learning
+CONF_ADAPTIVE_LEARNING_ENABLED: Final = "adaptive_learning_enabled"
+DEFAULT_ADAPTIVE_LEARNING_ENABLED: Final = True
+
+# Max stored preference entries (admin-configurable, range 1-500)
+CONF_PREFERENCE_MAX_ENTRIES: Final = "preference_max_entries"
+DEFAULT_PREFERENCE_MAX_ENTRIES: Final = 25
+PREFERENCE_MAX_ENTRIES_MIN: Final = 1
+PREFERENCE_MAX_ENTRIES_HARD_LIMIT: Final = 500
+# Performance warning threshold — shown in UI when max > this value
+PREFERENCE_MAX_ENTRIES_WARNING_THRESHOLD: Final = 50
+
+# Cooldown between repeated suggestions for the same preference key
+CONF_PREFERENCE_SUGGESTION_COOLDOWN_DAYS: Final = "preference_suggestion_cooldown_days"
+DEFAULT_PREFERENCE_SUGGESTION_COOLDOWN_DAYS: Final = 7
+
+# Whether emphatic corrections (all-caps, "I meant") are auto-stored
+CONF_PREFERENCE_AUTO_CONFIRM_CORRECTIONS: Final = "preference_auto_confirm_corrections"
+DEFAULT_PREFERENCE_AUTO_CONFIRM_CORRECTIONS: Final = True
+
+# hass.data sub-key
+DATA_PREFERENCE_MEMORY: Final = "preference_memory"
+
+# HA service names
+SERVICE_CLEAR_PREFERENCES: Final = "clear_preferences"
+SERVICE_MANAGE_PREFERENCE: Final = "manage_preference"
+
+# HA event fired after a preference is confirmed/auto-stored
+EVENT_PREFERENCE_LEARNED: Final = f"{DOMAIN}_preference_learned"
+
+# Dispatcher signal fired after any preference write (used by the sensor)
+SIGNAL_PREFERENCES_UPDATED: Final = f"{DOMAIN}_preferences_updated_{{entry_id}}"
+
+# Confirmation keywords that resolve a pending preference suggestion
+PREFERENCE_CONFIRM_WORDS: Final = frozenset({"yes", "yep", "yeah", "sure", "always"})
+PREFERENCE_REJECT_WORDS: Final = frozenset({"no", "nope", "never", "don't"})

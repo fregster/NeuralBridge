@@ -23,6 +23,7 @@
           "configure_routing_agent": "Configure Routing Agent",
           "manage_agents": "Manage Existing Agents",
           "configure_guard_rails": "Configure Guard Rails",
+          "configure_high_stakes": "Configure High-Stakes Actions",
           "advanced_settings": "Advanced Settings",
           "language_settings": "Language Settings",
           "done": "Close"
@@ -73,8 +74,8 @@
           "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here."
         }
       },
-      "configure_existing": {
-        "title": "Configure Existing Integration",
+      "configure_integrated": {
+        "title": "Configure HA Conversation Agent",
         "description": "Connect to an existing Home Assistant conversation agent (Gemini, ChatGPT, etc.).\n\n{priority_info}",
         "data": {
           "agent_name": "Agent Name",
@@ -98,7 +99,7 @@
         }
       },
       "configure_local": {
-        "title": "Configure Home Assistant Agent",
+        "title": "Configure HA Intent Processor Agent",
         "description": "Use Home Assistant's built-in conversation agent for local intent matching.\n\n{priority_info}",
         "data": {
           "agent_name": "Agent Name",
@@ -184,8 +185,8 @@
           "delete_agent": "Check this box and submit to permanently delete this agent (you will be asked to confirm)"
         }
       },
-      "edit_agent_existing": {
-        "title": "Edit Existing Integration Agent",
+      "edit_agent_integrated": {
+        "title": "Edit HA Conversation Agent",
         "description": "Edit settings for this conversation agent.\n\n{priority_info}",
         "data": {
           "agent_name": "Agent Name",
@@ -213,7 +214,7 @@
         }
       },
       "edit_agent_local": {
-        "title": "Edit Home Assistant Agent",
+        "title": "Edit HA Intent Processor Agent",
         "description": "Edit settings for this local Home Assistant agent.\n\n{priority_info}",
         "data": {
           "agent_name": "Agent Name",
@@ -276,32 +277,36 @@
       },
       "configure_web_search": {
         "title": "Configure Web Search Agent",
-        "description": "Add a web search agent that retrieves real-time information for time-sensitive queries (news, current events, live data).\n\n{priority_info}\n\n{web_search_info}",
+        "description": "Add a web search agent that retrieves real-time information for time-sensitive queries (news, current events, live data).\n\n{priority_info}\n\n{web_search_info}{connection_status}",
         "data": {
           "agent_name": "Agent Name",
           "priority": "Priority (1–100)",
           "search_provider": "Search Provider",
-          "search_api_key": "API Key",
+          "search_api_key": "Brave Search API Key",
+          "search_answers_api_key": "Brave Answers API Key",
           "search_result_count": "Number of Results",
           "search_max_snippet_len": "Max Snippet Length",
           "timeout": "Timeout",
           "agent_cache_enabled": "Enable Response Cache",
           "guard_rail_enabled_for_agent": "Enable Guard Rails for this Agent",
           "agent_min_complexity": "Minimum Complexity",
-          "agent_max_complexity": "Maximum Complexity"
+          "agent_max_complexity": "Maximum Complexity",
+          "test_connection": "Test connection before saving"
         },
         "data_description": {
           "agent_name": "A friendly name for this agent (e.g. \"Web Search\")",
           "priority": "Priority for this agent — lower numbers are tried first",
           "search_provider": "The web search service to use",
-          "search_api_key": "Your API subscription key for the selected provider",
+          "search_api_key": "Your Brave Search subscription key (required for 'Brave Search' and 'Brave Combined' providers)",
+          "search_answers_api_key": "Your Brave Answers subscription key (required for 'Brave Answers' and 'Brave Combined' providers). This is a SEPARATE subscription to Brave Search.",
           "search_result_count": "How many search results to include in the response (1–10)",
           "search_max_snippet_len": "Maximum characters per result snippet before truncation",
           "timeout": "Maximum time to wait for search results",
           "agent_cache_enabled": "Cache search results. Disable for queries that always need fresh data.",
           "guard_rail_enabled_for_agent": "Run guard rail checks on search results returned by this agent",
           "agent_min_complexity": "Minimum complexity score (1–100) for this agent. Requests scored below this threshold will not be routed here.",
-          "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here."
+          "agent_max_complexity": "Maximum complexity score (1–100) for this agent. Requests scored above this threshold will not be routed here.",
+          "test_connection": "Tick to test your API key(s) without saving. Untick and submit again to save."
         }
       },
       "confirm_delete_agent": {
@@ -326,7 +331,8 @@
           "purge_cache_now": "Purge Cache Now",
           "response_cache_semantic": "Enable Semantic Cache Keying",
           "semantic_cache_ttl": "Semantic Cache TTL",
-          "announce_media_players": "Broadcast Announcement Speakers"
+          "announce_media_players": "Broadcast Announcement Speakers",
+          "benchmark_warm_up_delay": "Benchmark Warm-up Delay"
         },
         "data_description": {
           "enable_home_control": "Allow NeuralBridge to control Home Assistant devices. When enabled, the Assist UI shows 'This assistant can control your home'. Add a Home Assistant sub-agent at a low priority number to handle device commands, with LLM agents at higher priorities for general questions.",
@@ -337,7 +343,8 @@
           "purge_cache_now": "Immediately discard all currently cached responses. Useful after changing agent configurations.",
           "response_cache_semantic": "When enabled, paraphrase variants of the same question (e.g. 'What is the weather?' and 'How is the weather today?') share the same cache entry.",
           "semantic_cache_ttl": "How long (in seconds) a semantically-keyed cache entry remains valid. Should be shorter than the exact TTL due to the looser key matching.",
-          "announce_media_players": "Select the media player entities that will receive broadcast announcements. Leave empty to disable the feature. Requires a TTS integration."
+          "announce_media_players": "Select the media player entities that will receive broadcast announcements. Leave empty to disable the feature. Requires a TTS integration.",
+          "benchmark_warm_up_delay": "How long (in seconds) NeuralBridge waits after startup before running the first benchmark probe."
         }
       },
       "configure_guard_rails": {
@@ -362,6 +369,22 @@
           "guard_rail_ai_threshold": "Confidence threshold below which AI checking is triggered (0.5 = check often, 1.0 = rules only)"
         }
       },
+      "configure_high_stakes": {
+        "title": "High-Stakes Action Confirmation",
+        "description": "{info}",
+        "data": {
+          "high_stakes_enabled": "Enable High-Stakes Confirmation",
+          "high_stakes_domains": "Protected Domains",
+          "high_stakes_secret_enabled": "Require Passphrase",
+          "high_stakes_secret": "Passphrase"
+        },
+        "data_description": {
+          "high_stakes_enabled": "When enabled, actions targeting the selected domains require explicit confirmation before execution",
+          "high_stakes_domains": "HA domains whose actions will be intercepted and held pending confirmation",
+          "high_stakes_secret_enabled": "Require the user to say a specific passphrase instead of a simple yes/no to confirm the action",
+          "high_stakes_secret": "The passphrase the user must say to confirm a high-stakes action (leave blank to use yes/no)"
+        }
+      },
       "language_settings": {
         "title": "Language Settings",
         "description": "Select your preferred language for NeuralBridge runtime responses and interface text. Reload the integration after changing this setting.",
@@ -380,7 +403,9 @@
       "entity_not_found": "The selected conversation agent was not found. Ensure the integration is loaded and the entity is available.",
       "no_router_agent": "No routing agent is configured. Use \"Configure Routing Agent\" to select a conversation agent before enabling guard rails.",
       "invalid_api_key": "The API key was rejected by the search provider. Please check your key and subscription status.",
-      "search_api_key_missing": "An API key is required for the selected search provider.",
+      "invalid_answers_api_key": "The Brave Answers API key was rejected. Please check your key and Answers subscription status.",
+      "search_api_key_missing": "A Brave Search API key is required for the selected provider.",
+      "search_answers_api_key_missing": "A Brave Answers API key is required for the selected provider (Brave Answers and Brave Combined both need a separate Answers subscription).",
       "search_api_unreachable": "Could not reach the search provider API. Check your network connection and try again.",
       "unknown": "An unexpected error occurred. Check the logs for details."
     }
@@ -393,6 +418,16 @@
         "conversation_id": {
           "name": "Conversation ID",
           "description": "The conversation ID to clear (e.g. the Alexa sessionId passed as conversation_id to the HA Conversation API)."
+        }
+      }
+    },
+    "run_benchmark": {
+      "name": "Run benchmark",
+      "description": "Triggers an immediate benchmark profiling run for the specified NeuralBridge agent.",
+      "fields": {
+        "agent_id": {
+          "name": "Agent ID",
+          "description": "The internal UUID of the agent to benchmark."
         }
       }
     }

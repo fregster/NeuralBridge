@@ -10,8 +10,8 @@ language:
 
 # ── Agent type selector labels ─────────────────────────────────────────────────
 agent_types:
-  home_assistant: "Home Assistant (Eingebaut)"
-  existing_integration: "Bestehende Integration (Gemini, ChatGPT, usw.)"
+  home_assistant: "HA Intent-Prozessor (Gerätesteuerung)"
+  integrated: "HA Konversationsagent (Gemini, Ollama, ChatGPT usw.)"
   ollama: "Ollama (Extern)"
   web_search: "Websuche (Echtzeit-Daten)"
 
@@ -90,6 +90,13 @@ router_fallbacks:
   skip_routing: "Skip routing (try all agents in priority order)"
   block: "Block the request"
 
+# ── Routing strategy selector labels ──────────────────────────────────────────
+routing_strategies:
+  default: "Standard (Benchmark-Ranking verwenden)"
+  fastest: "Schnellster"
+  most_capable: "Leistungsstärkster"
+  local_only: "Nur lokal"
+
 # ── Runtime response messages returned to the user ────────────────────────────
 responses:
   fallback: "Ich habe gerade Probleme, mich mit meinen KI-Agenten zu verbinden. Versuche, deine Anfrage umzuformulieren, oder überprüfe die Agenteneinstellungen."
@@ -105,6 +112,8 @@ responses:
   high_stakes_confirmation: "Bist du sicher? Diese Aktion kann nicht rückgängig gemacht werden. Bitte mit 'ja' oder 'nein' bestätigen."
   high_stakes_passphrase_prompt: "Diese Aktion erfordert eine Bestätigung. Bitte sage dein Passwort, um fortzufahren."
   high_stakes_cancelled: "Aktion abgebrochen."
+  reroute_web_search: "Einen Moment, ich suche das im Internet. "
+  reroute_agent: "Ich versuche es auf einem anderen Weg. "
 
 # ── Language settings step ────────────────────────────────────────────────────
 language_settings:

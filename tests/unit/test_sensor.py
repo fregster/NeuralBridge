@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
@@ -9,9 +10,10 @@ import pytest
 from homeassistant.components.sensor import SensorStateClass
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.neuralbridge.agent_benchmark import AgentBenchmarker, BenchmarkStatus
 from custom_components.neuralbridge.circuit_breaker import CircuitBreaker
 from custom_components.neuralbridge.const import (
-    AGENT_TYPE_EXISTING,
+    AGENT_TYPE_INTEGRATED,
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
     CONF_AGENT_CACHE_ENABLED,
@@ -23,12 +25,16 @@ from custom_components.neuralbridge.const import (
     CONF_OLLAMA_MODEL,
     CONF_PRIORITY,
     DATA_CIRCUIT_BREAKER,
+    DATA_PREFERENCE_MEMORY,
     DATA_STATISTICS,
     DOMAIN,
+    SIGNAL_PREFERENCES_UPDATED,
     SIGNAL_STATS_UPDATED,
 )
+from custom_components.neuralbridge.preference_memory import PreferenceEntry, PreferenceMemory
 from custom_components.neuralbridge.sensor import (
     NeuralBridgeAgentSensor,
+    NeuralBridgePreferencesSensor,
     NeuralBridgeStatsSensor,
     async_setup_entry,
 )
@@ -405,7 +411,7 @@ class TestNeuralBridgeAgentSensor:
         """Test can_control_local_devices is False for existing_integration agents."""
         agent = {
             "id": "ext-1",
-            CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+            CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED,
             CONF_AGENT_NAME: "Gemini",
             CONF_PRIORITY: 20,
         }
@@ -421,7 +427,7 @@ class TestNeuralBridgeAgentSensor:
         """Test model attribute is absent for non-Ollama agents."""
         agent = {
             "id": "ext-1",
-            CONF_AGENT_TYPE: AGENT_TYPE_EXISTING,
+            CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED,
             CONF_AGENT_NAME: "Gemini",
             CONF_PRIORITY: 20,
         }
@@ -560,3 +566,191 @@ class TestNeuralBridgeAgentSensor:
         sensor._handle_stats_update()
 
         sensor.async_write_ha_state.assert_called_once()
+
+    def test_extra_state_attributes_benchmark_sub_dict(
+        self,
+        mock_config_entry: MockConfigEntry,
+        statistics: AgentStatistics,
+        circuit_breaker: CircuitBreaker,
+    ) -> None:
+        """extra_state_attributes includes 'benchmark' dict when benchmarker has a profile."""
+        agent = _make_ollama_agent(agent_id="bench-agent-1")
+        hass_mock = MagicMock()
+        benchmarker = AgentBenchmarker(hass_mock)
+        config = {
+            "id": "bench-agent-1",
+            CONF_AGENT_TYPE: AGENT_TYPE_OLLAMA,
+            CONF_AGENT_NAME: "Bench Agent",
+            CONF_PRIORITY: 10,
+        }
+        profile = benchmarker.ensure_profile(config)
+        profile.status = BenchmarkStatus.COMPLETE  # type: ignore[attr-defined]
+        profile.benchmark_timestamp = 1700000000.0
+
+        sensor = NeuralBridgeAgentSensor(
+            mock_config_entry, agent, statistics, circuit_breaker, benchmarker
+        )
+        attrs = sensor.extra_state_attributes
+
+        assert "benchmark" in attrs
+        assert attrs["benchmark"]["status"] == BenchmarkStatus.COMPLETE.value
+
+    def test_extra_state_attributes_benchmark_timestamp_overflow(
+        self,
+        mock_config_entry: MockConfigEntry,
+        statistics: AgentStatistics,
+        circuit_breaker: CircuitBreaker,
+    ) -> None:
+        """benchmark_timestamp that raises OSError falls back to str()."""
+        agent = _make_ollama_agent(agent_id="bench-agent-2")
+        hass_mock = MagicMock()
+        benchmarker = AgentBenchmarker(hass_mock)
+        config = {
+            "id": "bench-agent-2",
+            CONF_AGENT_TYPE: AGENT_TYPE_OLLAMA,
+            CONF_AGENT_NAME: "Bench Agent 2",
+            CONF_PRIORITY: 10,
+        }
+        profile = benchmarker.ensure_profile(config)
+        profile.status = BenchmarkStatus.COMPLETE  # type: ignore[attr-defined]
+        # Very large timestamp — will overflow datetime.datetime.fromtimestamp on some platforms
+        profile.benchmark_timestamp = 99999999999999.9
+
+        sensor = NeuralBridgeAgentSensor(
+            mock_config_entry, agent, statistics, circuit_breaker, benchmarker
+        )
+        attrs = sensor.extra_state_attributes
+
+        assert "benchmark" in attrs
+        # The fallback str() path should at least produce a string last_ts
+        assert attrs["benchmark"]["status"] == BenchmarkStatus.COMPLETE.value
+
+
+# ---------------------------------------------------------------------------
+# NeuralBridgePreferencesSensor tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def pref_memory_mock() -> MagicMock:
+    """Return a mock PreferenceMemory with two entries (one confirmed, one pending)."""
+    now = time.time()
+    confirmed = PreferenceEntry(
+        key="news_source",
+        value="BBC",
+        category="source",
+        confirmed=True,
+        confidence=1.0,
+        suggestion_count=1,
+        last_suggested=now - 3600,
+        created_at=now - 7200,
+        updated_at=now - 3600,
+    )
+    pending = PreferenceEntry(
+        key="time_format",
+        value="24h",
+        category="format",
+        confirmed=False,
+        confidence=0.7,
+        suggestion_count=0,
+        last_suggested=0.0,
+        created_at=now - 1800,
+        updated_at=now - 1800,
+    )
+    mock = MagicMock(spec=PreferenceMemory)
+    mock.all_confirmed.return_value = [confirmed]
+    mock.all_entries.return_value = [confirmed, pending]
+    mock.max_entries = 25
+    return mock
+
+
+@pytest.fixture
+def prefs_sensor(
+    mock_config_entry: MockConfigEntry, pref_memory_mock: MagicMock
+) -> NeuralBridgePreferencesSensor:
+    """Return a NeuralBridgePreferencesSensor with a mock PreferenceMemory."""
+    return NeuralBridgePreferencesSensor(mock_config_entry, pref_memory_mock)
+
+
+async def test_async_setup_entry_creates_preferences_sensor_when_memory_present(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    statistics: AgentStatistics,
+    circuit_breaker: CircuitBreaker,
+    pref_memory_mock: MagicMock,
+) -> None:
+    """async_setup_entry creates a NeuralBridgePreferencesSensor when memory is present."""
+    mock_config_entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})[mock_config_entry.entry_id] = {
+        DATA_STATISTICS: statistics,
+        DATA_CIRCUIT_BREAKER: circuit_breaker,
+        DATA_PREFERENCE_MEMORY: pref_memory_mock,
+    }
+
+    added: list = []
+    await async_setup_entry(hass, mock_config_entry, added.append)
+
+    entities = added[0]
+    pref_sensors = [e for e in entities if isinstance(e, NeuralBridgePreferencesSensor)]
+    assert len(pref_sensors) == 1
+
+
+def test_preferences_sensor_native_value(
+    prefs_sensor: NeuralBridgePreferencesSensor,
+    pref_memory_mock: MagicMock,
+) -> None:
+    """native_value returns the count of confirmed preferences."""
+    assert prefs_sensor.native_value == 1
+
+
+def test_preferences_sensor_extra_state_attributes_counts(
+    prefs_sensor: NeuralBridgePreferencesSensor,
+) -> None:
+    """extra_state_attributes exposes total_stored, pending_count, and max_entries."""
+    attrs = prefs_sensor.extra_state_attributes
+    assert attrs["total_stored"] == 2
+    assert attrs["pending_count"] == 1
+    assert attrs["max_entries"] == 25
+
+
+def test_preferences_sensor_extra_state_attributes_preferences_list(
+    prefs_sensor: NeuralBridgePreferencesSensor,
+) -> None:
+    """extra_state_attributes 'preferences' is a list with one entry per stored pref."""
+    attrs = prefs_sensor.extra_state_attributes
+    prefs = attrs["preferences"]
+    assert len(prefs) == 2
+    # All expected keys are present in each entry
+    required_keys = {
+        "key",
+        "value",
+        "category",
+        "confirmed",
+        "confidence",
+        "suggestion_count",
+        "created_at",
+        "updated_at",
+    }
+    for pref in prefs:
+        assert required_keys.issubset(pref.keys())
+
+
+async def test_preferences_sensor_async_added_to_hass_subscribes(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    prefs_sensor: NeuralBridgePreferencesSensor,
+) -> None:
+    """async_added_to_hass subscribes to the SIGNAL_PREFERENCES_UPDATED dispatcher."""
+    from homeassistant.helpers.dispatcher import async_dispatcher_send  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})[mock_config_entry.entry_id] = {}
+
+    prefs_sensor.hass = hass  # type: ignore[assignment]
+
+    with patch.object(prefs_sensor, "async_write_ha_state") as mock_write:
+        await prefs_sensor.async_added_to_hass()
+        signal = SIGNAL_PREFERENCES_UPDATED.format(entry_id=mock_config_entry.entry_id)
+        async_dispatcher_send(hass, signal)
+        await hass.async_block_till_done()
+        mock_write.assert_called()
