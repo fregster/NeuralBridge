@@ -10,6 +10,7 @@ import pytest
 
 from custom_components.neuralbridge.agent_benchmark import (
     AgentBenchmarker,
+    BenchmarkHostClassifier,
     BenchmarkProfile,
     BenchmarkStatus,
     ScoreBreakdown,
@@ -17,6 +18,7 @@ from custom_components.neuralbridge.agent_benchmark import (
     _evaluate_probe,
 )
 from custom_components.neuralbridge.benchmark_probes import BENCHMARK_PROBES, BenchmarkProbe
+from custom_components.neuralbridge.benchmark_scheduler import BenchmarkScheduler
 from custom_components.neuralbridge.const import (
     AGENT_TYPE_INTEGRATED,
     AGENT_TYPE_LOCAL_HA,
@@ -915,6 +917,23 @@ async def test_async_run_metadata_numeric_parameter_size(hass: HomeAssistant) ->
 
 
 # ---------------------------------------------------------------------------
+# _warm_up_delay_seconds property — getter and setter
+# ---------------------------------------------------------------------------
+
+
+def test_warm_up_delay_seconds_getter_and_setter(hass: HomeAssistant) -> None:
+    """_warm_up_delay_seconds getter reads from and setter writes to the scheduler."""
+    benchmarker = AgentBenchmarker(hass)
+    # Default value forwarded from scheduler
+    default = benchmarker._warm_up_delay_seconds
+    assert isinstance(default, int)
+    assert default > 0
+    # Setter updates the underlying scheduler attribute
+    benchmarker._warm_up_delay_seconds = 0
+    assert benchmarker._warm_up_delay_seconds == 0
+
+
+# ---------------------------------------------------------------------------
 # async_schedule_benchmark — warm-up exception paths
 # ---------------------------------------------------------------------------
 
@@ -1324,3 +1343,833 @@ async def test_run_existing_probes_malformed_response_falls_back_to_empty_string
 
     # Profile should still be finalized
     assert profile.capability_score is not None
+
+
+# ---------------------------------------------------------------------------
+# debug_probes logging
+# ---------------------------------------------------------------------------
+
+
+async def test_run_single_ollama_probe_debug_logs_response(hass: HomeAssistant) -> None:
+    """_run_single_ollama_probe emits DEBUG log when debug_probes=True."""
+    benchmarker = AgentBenchmarker(hass, debug_probes=True)
+    probe = _make_probe(name="factual-q", expected_exact="Paris")
+    mock_client = AsyncMock()
+    mock_client.chat = AsyncMock(
+        return_value=OllamaResponse(
+            content="Paris",
+            eval_count=5,
+            eval_duration_ns=500_000_000,
+        )
+    )
+
+    with patch("custom_components.neuralbridge.benchmark_probe_runner._LOGGER") as mock_log:
+        result = await benchmarker._run_single_ollama_probe(mock_client, probe)
+
+    assert result.passed is True
+    mock_log.debug.assert_called_once()
+    call_args = mock_log.debug.call_args[0]
+    assert "BENCHMARK DEBUG" in call_args[0]
+    assert "factual-q" in str(call_args)
+
+
+async def test_run_single_ollama_probe_no_debug_when_flag_false(hass: HomeAssistant) -> None:
+    """_run_single_ollama_probe does NOT emit DEBUG log when debug_probes=False."""
+    benchmarker = AgentBenchmarker(hass)  # debug_probes defaults to False
+    probe = _make_probe(name="factual-q", expected_exact="Paris")
+    mock_client = AsyncMock()
+    mock_client.chat = AsyncMock(
+        return_value=OllamaResponse(
+            content="Paris",
+            eval_count=5,
+            eval_duration_ns=500_000_000,
+        )
+    )
+
+    with patch("custom_components.neuralbridge.benchmark_probe_runner._LOGGER") as mock_log:
+        await benchmarker._run_single_ollama_probe(mock_client, probe)
+
+    mock_log.debug.assert_not_called()
+
+
+async def test_run_single_ollama_probe_debug_logs_none_response(hass: HomeAssistant) -> None:
+    """_run_single_ollama_probe logs at DEBUG when response is None and debug_probes=True."""
+    benchmarker = AgentBenchmarker(hass, debug_probes=True)
+    probe = _make_probe(name="none-resp")
+    mock_client = AsyncMock()
+    mock_client.chat = AsyncMock(return_value=None)
+
+    with patch("custom_components.neuralbridge.benchmark_probe_runner._LOGGER") as mock_log:
+        result = await benchmarker._run_single_ollama_probe(mock_client, probe)
+
+    assert result.passed is False
+    mock_log.debug.assert_called_once()
+    call_args = mock_log.debug.call_args[0]
+    assert "BENCHMARK DEBUG" in call_args[0]
+
+
+async def test_run_existing_probes_debug_logs_response() -> None:
+    """_run_existing_probes emits one DEBUG log per probe plus one warm-up log when debug_probes=True."""
+    mock_hass = MagicMock()
+    benchmarker = AgentBenchmarker(mock_hass, debug_probes=True)
+    config = {
+        "id": "ex-debug",
+        "agent_type": AGENT_TYPE_INTEGRATED,
+        "agent_name": "Debug Agent",
+        "entity_id": "conversation.debug",
+        "timeout": 30,
+    }
+    profile = benchmarker.ensure_profile(config)
+
+    ha_response = {"response": {"speech": {"plain": {"speech": "Paris"}}}}
+    mock_hass.services.async_call = AsyncMock(return_value=ha_response)
+
+    with patch("custom_components.neuralbridge.benchmark_probe_runner._LOGGER") as mock_log:
+        await benchmarker._run_existing_probes("ex-debug", config, profile)
+
+    # 1 warm-up log + 1 BENCHMARK DEBUG log per scored probe
+    assert mock_log.debug.call_count == len(BENCHMARK_PROBES) + 1
+    warm_up_call = mock_log.debug.call_args_list[0][0]
+    assert "warm-up" in warm_up_call[0].lower()
+    first_probe_call = mock_log.debug.call_args_list[1][0]
+    assert "BENCHMARK DEBUG" in first_probe_call[0]
+
+
+async def test_run_existing_probes_debug_logs_timeout() -> None:
+    """_run_existing_probes logs at DEBUG when a probe times out and debug_probes=True."""
+    mock_hass = MagicMock()
+    benchmarker = AgentBenchmarker(mock_hass, debug_probes=True)
+    config = {
+        "id": "ex-timeout-dbg",
+        "agent_type": AGENT_TYPE_INTEGRATED,
+        "agent_name": "Timeout Debug",
+        "entity_id": "conversation.timeout",
+        "timeout": 30,
+    }
+    profile = benchmarker.ensure_profile(config)
+
+    probe = BenchmarkProbe(
+        name="timeout_probe",
+        dimension="factual",
+        messages=[{"role": "user", "content": "Slow question"}],
+        expected_exact="answer",
+        timeout_seconds=1,
+    )
+    mock_hass.services.async_call = AsyncMock(side_effect=asyncio.TimeoutError)
+
+    with (
+        patch("custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe]),
+        patch("custom_components.neuralbridge.benchmark_probe_runner._LOGGER") as mock_log,
+    ):
+        await benchmarker._run_existing_probes("ex-timeout-dbg", config, profile)
+
+    debug_msgs = [str(call) for call in mock_log.debug.call_args_list]
+    assert any("BENCHMARK DEBUG" in msg and "timed out" in msg for msg in debug_msgs)
+
+
+async def test_run_existing_probes_debug_logs_exception() -> None:
+    """_run_existing_probes logs at DEBUG when a probe raises and debug_probes=True."""
+    mock_hass = MagicMock()
+    benchmarker = AgentBenchmarker(mock_hass, debug_probes=True)
+    config = {
+        "id": "ex-exc-dbg",
+        "agent_type": AGENT_TYPE_INTEGRATED,
+        "agent_name": "Exc Debug",
+        "entity_id": "conversation.exc",
+        "timeout": 30,
+    }
+    profile = benchmarker.ensure_profile(config)
+
+    probe = BenchmarkProbe(
+        name="exc_probe",
+        dimension="factual",
+        messages=[{"role": "user", "content": "Failing question"}],
+        expected_exact="answer",
+        timeout_seconds=5,
+    )
+    mock_hass.services.async_call = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with (
+        patch("custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe]),
+        patch("custom_components.neuralbridge.benchmark_probe_runner._LOGGER") as mock_log,
+    ):
+        await benchmarker._run_existing_probes("ex-exc-dbg", config, profile)
+
+    debug_msgs = [str(call) for call in mock_log.debug.call_args_list]
+    assert any("BENCHMARK DEBUG" in msg and "boom" in msg for msg in debug_msgs)
+
+
+def test_debug_probes_flag_passes_through_to_runner(hass: HomeAssistant) -> None:
+    """AgentBenchmarker forwards debug_probes=True to its BenchmarkProbeRunner."""
+    benchmarker = AgentBenchmarker(hass, debug_probes=True)
+    assert benchmarker._probe_runner._debug_probe_responses is True
+
+
+def test_debug_probes_flag_defaults_false(hass: HomeAssistant) -> None:
+    """AgentBenchmarker defaults debug_probes to False."""
+    benchmarker = AgentBenchmarker(hass)
+    assert benchmarker._probe_runner._debug_probe_responses is False
+
+
+# ---------------------------------------------------------------------------
+# BenchmarkProfile.host_group — new field
+# ---------------------------------------------------------------------------
+
+
+def test_profile_host_group_defaults_none() -> None:
+    """BenchmarkProfile.host_group defaults to None on construction."""
+    profile = BenchmarkProfile(agent_id="a", agent_name="A", agent_type=AGENT_TYPE_OLLAMA)
+    assert profile.host_group is None
+
+
+def test_profile_host_group_round_trips_through_dict() -> None:
+    """host_group serialises via to_dict and restores via from_dict."""
+    profile = BenchmarkProfile(
+        agent_id="a",
+        agent_name="A",
+        agent_type=AGENT_TYPE_OLLAMA,
+        host_group="remote:192.168.1.100:11434",
+    )
+    restored = BenchmarkProfile.from_dict(profile.to_dict())
+    assert restored.host_group == "remote:192.168.1.100:11434"
+
+
+def test_profile_host_group_missing_in_stored_dict_defaults_none() -> None:
+    """from_dict tolerates missing host_group key (backwards compat)."""
+    data = {"agent_id": "a", "agent_name": "A", "agent_type": AGENT_TYPE_OLLAMA}
+    profile = BenchmarkProfile.from_dict(data)
+    assert profile.host_group is None
+
+
+def test_profile_host_group_cloud_round_trips() -> None:
+    """host_group with cloud: prefix round-trips correctly."""
+    profile = BenchmarkProfile(
+        agent_id="b",
+        agent_name="B",
+        agent_type=AGENT_TYPE_INTEGRATED,
+        host_group="cloud:openai_conversation",
+    )
+    restored = BenchmarkProfile.from_dict(profile.to_dict())
+    assert restored.host_group == "cloud:openai_conversation"
+
+
+# ---------------------------------------------------------------------------
+# AgentBenchmarker — host classifier wiring
+# ---------------------------------------------------------------------------
+
+
+def test_benchmarker_creates_host_classifier(hass: HomeAssistant) -> None:
+    """AgentBenchmarker.__init__ creates a BenchmarkHostClassifier."""
+    benchmarker = AgentBenchmarker(hass)
+    assert isinstance(benchmarker._host_classifier, BenchmarkHostClassifier)
+
+
+def test_benchmarker_passes_classifier_to_scheduler(hass: HomeAssistant) -> None:
+    """The BenchmarkScheduler receives the BenchmarkHostClassifier from the benchmarker."""
+    benchmarker = AgentBenchmarker(hass)
+    assert benchmarker._scheduler._host_classifier is benchmarker._host_classifier
+
+
+async def test_run_benchmark_sets_host_group_on_profile(hass: HomeAssistant) -> None:
+    """async_run_benchmark classifies and persists host_group on the profile."""
+    benchmarker = AgentBenchmarker(hass)
+    benchmarker._warm_up_delay_seconds = 0
+
+    config = _ollama_agent_config("hg-agent")
+    profile = benchmarker.ensure_profile(config)
+    assert profile.host_group is None
+
+    with (
+        patch.object(benchmarker, "_run_ollama_probes", new_callable=AsyncMock),
+        patch.object(benchmarker, "async_save", new_callable=AsyncMock),
+    ):
+        await benchmarker.async_run_benchmark("hg-agent", config)
+
+    # ollama_url in the config is http://localhost:11434 → "local"
+    assert profile.host_group == "local"
+
+
+async def test_run_benchmark_host_group_not_reclassified_when_already_set(
+    hass: HomeAssistant,
+) -> None:
+    """async_run_benchmark does not overwrite an already-set host_group."""
+    benchmarker = AgentBenchmarker(hass)
+    benchmarker._warm_up_delay_seconds = 0
+
+    config = _ollama_agent_config("hg-agent2")
+    profile = benchmarker.ensure_profile(config)
+    profile.host_group = "remote:192.168.1.5:11434"  # pre-set
+
+    with (
+        patch.object(benchmarker, "_run_ollama_probes", new_callable=AsyncMock),
+        patch.object(benchmarker, "async_save", new_callable=AsyncMock),
+    ):
+        await benchmarker.async_run_benchmark("hg-agent2", config)
+
+    assert profile.host_group == "remote:192.168.1.5:11434"  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# BenchmarkProbeRunner._pre_flight_contention_check
+# ---------------------------------------------------------------------------
+
+
+async def test_pre_flight_warns_when_other_models_are_loaded(hass: HomeAssistant) -> None:
+    """_pre_flight_contention_check logs a warning when other models are loaded."""
+    benchmarker = AgentBenchmarker(hass)
+    config = _ollama_agent_config("pf-warn")
+    profile = benchmarker.ensure_profile(config)
+
+    probe = BenchmarkProbe(
+        name="pf_probe",
+        dimension="factual",
+        messages=[{"role": "user", "content": "Q?"}],
+        expected_exact="A",
+        timeout_seconds=5,
+    )
+
+    # Mock client reports another model loaded alongside the one under test
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(
+        return_value=MagicMock(
+            content="A",
+            eval_count=None,
+            eval_duration_ns=None,
+            prompt_eval_count=None,
+            prompt_eval_duration_ns=None,
+        )
+    )
+    mock_client.async_get_running_models = AsyncMock(
+        return_value=[
+            {"name": "llama3"},  # the agent being benchmarked
+            {"name": "mistral:7b"},  # another model → should trigger warning
+        ]
+    )
+
+    with (
+        patch("custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe]),
+        patch.object(benchmarker._probe_runner, "_get_ollama_client", return_value=mock_client),
+        patch("custom_components.neuralbridge.benchmark_probe_runner._LOGGER") as mock_log,
+    ):
+        await benchmarker._run_ollama_probes("pf-warn", config, profile)
+
+    warning_calls = [str(c) for c in mock_log.warning.call_args_list]
+    assert any("mistral:7b" in msg for msg in warning_calls)
+
+
+async def test_pre_flight_no_warning_when_only_current_model_loaded(
+    hass: HomeAssistant,
+) -> None:
+    """_pre_flight_contention_check does not warn when only the current model is loaded."""
+    benchmarker = AgentBenchmarker(hass)
+    config = _ollama_agent_config("pf-ok")
+    profile = benchmarker.ensure_profile(config)
+
+    probe = BenchmarkProbe(
+        name="pf_probe2",
+        dimension="factual",
+        messages=[{"role": "user", "content": "Q?"}],
+        expected_exact="A",
+        timeout_seconds=5,
+    )
+
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(
+        return_value=MagicMock(
+            content="A",
+            eval_count=None,
+            eval_duration_ns=None,
+            prompt_eval_count=None,
+            prompt_eval_duration_ns=None,
+        )
+    )
+    # Only the current model is running
+    mock_client.async_get_running_models = AsyncMock(return_value=[{"name": "llama3"}])
+
+    with (
+        patch("custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe]),
+        patch.object(benchmarker._probe_runner, "_get_ollama_client", return_value=mock_client),
+        patch("custom_components.neuralbridge.benchmark_probe_runner._LOGGER") as mock_log,
+    ):
+        await benchmarker._run_ollama_probes("pf-ok", config, profile)
+
+    assert mock_log.warning.call_count == 0
+
+
+async def test_pre_flight_no_warning_when_no_models_loaded(hass: HomeAssistant) -> None:
+    """_pre_flight_contention_check does not warn when Ollama reports no loaded models."""
+    benchmarker = AgentBenchmarker(hass)
+    config = _ollama_agent_config("pf-empty")
+    profile = benchmarker.ensure_profile(config)
+
+    probe = BenchmarkProbe(
+        name="pf_probe3",
+        dimension="factual",
+        messages=[{"role": "user", "content": "Q?"}],
+        expected_exact="A",
+        timeout_seconds=5,
+    )
+
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(
+        return_value=MagicMock(
+            content="A",
+            eval_count=None,
+            eval_duration_ns=None,
+            prompt_eval_count=None,
+            prompt_eval_duration_ns=None,
+        )
+    )
+    mock_client.async_get_running_models = AsyncMock(return_value=[])
+
+    with (
+        patch("custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe]),
+        patch.object(benchmarker._probe_runner, "_get_ollama_client", return_value=mock_client),
+        patch("custom_components.neuralbridge.benchmark_probe_runner._LOGGER") as mock_log,
+    ):
+        await benchmarker._run_ollama_probes("pf-empty", config, profile)
+
+    assert mock_log.warning.call_count == 0
+
+
+async def test_pre_flight_exception_does_not_abort_probes(hass: HomeAssistant) -> None:
+    """A failure in async_get_running_models does not stop the benchmark probes."""
+    benchmarker = AgentBenchmarker(hass)
+    config = _ollama_agent_config("pf-exc")
+    profile = benchmarker.ensure_profile(config)
+
+    probe = BenchmarkProbe(
+        name="pf_probe4",
+        dimension="factual",
+        messages=[{"role": "user", "content": "Q?"}],
+        expected_exact="A",
+        timeout_seconds=5,
+    )
+
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(
+        return_value=MagicMock(
+            content="A",
+            eval_count=None,
+            eval_duration_ns=None,
+            prompt_eval_count=None,
+            prompt_eval_duration_ns=None,
+        )
+    )
+    mock_client.async_get_running_models = AsyncMock(
+        side_effect=RuntimeError("ps endpoint unavailable")
+    )
+
+    with (
+        patch("custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe]),
+        patch.object(benchmarker._probe_runner, "_get_ollama_client", return_value=mock_client),
+    ):
+        # Should complete without raising
+        await benchmarker._run_ollama_probes("pf-exc", config, profile)
+
+    # Probe still ran and profile was updated
+    assert profile.probe_results.get("pf_probe4") is True
+
+
+# ---------------------------------------------------------------------------
+# BenchmarkScheduler — host_classifier semaphore gating
+# ---------------------------------------------------------------------------
+
+
+async def test_scheduler_with_classifier_acquires_semaphore(hass: HomeAssistant) -> None:
+    """BenchmarkScheduler acquires the host-group semaphore before running probes."""
+    acquired: list[bool] = []
+
+    async def run_fn(agent_id: str, agent_config: dict) -> None:
+        acquired.append(True)
+
+    classifier = BenchmarkHostClassifier(hass)
+
+    scheduler = BenchmarkScheduler(
+        hass,
+        run_benchmark_fn=run_fn,
+        warm_up_delay_seconds=0,
+        host_classifier=classifier,
+    )
+    with patch.object(classifier, "classify_agent", new=AsyncMock(return_value="local")):
+        await scheduler.async_schedule_benchmark("sched-1", {"agent_type": AGENT_TYPE_OLLAMA})
+        task = scheduler._pending_tasks["sched-1"]
+        await task
+
+    assert acquired == [True]
+
+
+async def test_scheduler_without_classifier_still_runs(hass: HomeAssistant) -> None:
+    """BenchmarkScheduler without a classifier runs the benchmark directly."""
+    ran: list[str] = []
+
+    async def run_fn(agent_id: str, agent_config: dict) -> None:
+        ran.append(agent_id)
+
+    scheduler = BenchmarkScheduler(
+        hass,
+        run_benchmark_fn=run_fn,
+        warm_up_delay_seconds=0,
+        host_classifier=None,
+    )
+    await scheduler.async_schedule_benchmark("no-cls", {"agent_type": AGENT_TYPE_OLLAMA})
+    task = scheduler._pending_tasks["no-cls"]
+    await task
+
+    assert ran == ["no-cls"]
+
+
+# ---------------------------------------------------------------------------
+# Inter-probe delay and warm-up — BenchmarkProbeRunner / AgentBenchmarker
+# ---------------------------------------------------------------------------
+
+
+def test_inter_probe_delay_stored_in_probe_runner(hass: HomeAssistant) -> None:
+    """inter_probe_delay_seconds is stored on BenchmarkProbeRunner."""
+    benchmarker = AgentBenchmarker(hass, inter_probe_delay_seconds=7)
+    assert benchmarker._probe_runner._inter_probe_delay_seconds == 7
+
+
+def test_inter_probe_delay_defaults_to_zero(hass: HomeAssistant) -> None:
+    """AgentBenchmarker defaults inter_probe_delay_seconds to 0."""
+    benchmarker = AgentBenchmarker(hass)
+    assert benchmarker._inter_probe_delay_seconds == 0
+
+
+def test_inter_probe_delay_property_proxies_to_runner(hass: HomeAssistant) -> None:
+    """AgentBenchmarker._inter_probe_delay_seconds reads and writes the runner's value."""
+    benchmarker = AgentBenchmarker(hass)
+    benchmarker._inter_probe_delay_seconds = 3
+    assert benchmarker._probe_runner._inter_probe_delay_seconds == 3
+
+
+async def test_run_ollama_probes_sends_warm_up_before_probes(hass: HomeAssistant) -> None:
+    """_run_ollama_probes calls client.chat once for warm-up before scored probes."""
+    benchmarker = AgentBenchmarker(hass)
+    config = _ollama_agent_config("wu-agent")
+    profile = benchmarker.ensure_profile(config)
+
+    probe = _make_probe(name="factual-wu", expected_exact="A")
+    call_order: list[str] = []
+
+    async def tracking_chat(messages: list) -> MagicMock:
+        call_order.append("chat_called")
+        return MagicMock(
+            content="A",
+            eval_count=None,
+            eval_duration_ns=None,
+            prompt_eval_count=None,
+            prompt_eval_duration_ns=None,
+        )
+
+    mock_client = MagicMock()
+    mock_client.chat = tracking_chat
+    mock_client.async_get_running_models = AsyncMock(return_value=[])
+
+    with (
+        patch("custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe]),
+        patch.object(benchmarker._probe_runner, "_get_ollama_client", return_value=mock_client),
+    ):
+        await benchmarker._run_ollama_probes("wu-agent", config, profile)
+
+    # warm-up + 1 scored probe = 2 chat calls
+    assert len(call_order) == 2
+
+
+async def test_run_ollama_probes_warm_up_failure_ignored(hass: HomeAssistant) -> None:
+    """_run_ollama_probes continues to scored probes even when warm-up chat raises."""
+    benchmarker = AgentBenchmarker(hass)
+    config = _ollama_agent_config("wu-fail-agent")
+    profile = benchmarker.ensure_profile(config)
+
+    probe = _make_probe(name="after-fail", expected_exact="ok")
+
+    call_count = 0
+
+    async def failing_then_ok(messages: list) -> MagicMock:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:  # warm-up request
+            raise RuntimeError("model not yet ready")
+        return MagicMock(
+            content="ok",
+            eval_count=None,
+            eval_duration_ns=None,
+            prompt_eval_count=None,
+            prompt_eval_duration_ns=None,
+        )
+
+    mock_client = MagicMock()
+    mock_client.chat = failing_then_ok
+    mock_client.async_get_running_models = AsyncMock(return_value=[])
+
+    with (
+        patch("custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe]),
+        patch.object(benchmarker._probe_runner, "_get_ollama_client", return_value=mock_client),
+    ):
+        await benchmarker._run_ollama_probes("wu-fail-agent", config, profile)
+
+    # Scored probe ran despite warm-up failure
+    assert profile.probe_results.get("after-fail") is True
+
+
+async def test_run_ollama_probes_sleeps_between_probes_when_delay_nonzero(
+    hass: HomeAssistant,
+) -> None:
+    """_run_ollama_probes calls asyncio.sleep after warm-up and between each scored probe."""
+    benchmarker = AgentBenchmarker(hass, inter_probe_delay_seconds=3)
+    config = _ollama_agent_config("sleep-agent")
+    profile = benchmarker.ensure_profile(config)
+
+    probe_a = _make_probe(name="p-a", expected_exact="a")
+    probe_b = _make_probe(name="p-b", expected_exact="b")
+
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(
+        side_effect=[
+            MagicMock(
+                content="any",
+                eval_count=None,
+                eval_duration_ns=None,  # warm-up
+                prompt_eval_count=None,
+                prompt_eval_duration_ns=None,
+            ),
+            MagicMock(
+                content="a",
+                eval_count=None,
+                eval_duration_ns=None,  # probe_a
+                prompt_eval_count=None,
+                prompt_eval_duration_ns=None,
+            ),
+            MagicMock(
+                content="b",
+                eval_count=None,
+                eval_duration_ns=None,  # probe_b
+                prompt_eval_count=None,
+                prompt_eval_duration_ns=None,
+            ),
+        ]
+    )
+    mock_client.async_get_running_models = AsyncMock(return_value=[])
+
+    with (
+        patch(
+            "custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe_a, probe_b]
+        ),
+        patch.object(benchmarker._probe_runner, "_get_ollama_client", return_value=mock_client),
+        patch(
+            "custom_components.neuralbridge.benchmark_probe_runner.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as mock_sleep,
+    ):
+        await benchmarker._run_ollama_probes("sleep-agent", config, profile)
+
+    # sleep after warm-up (1) + sleep before probe_b (1) = 2 calls, each with 3 s
+    assert mock_sleep.call_count == 2
+    for call in mock_sleep.call_args_list:
+        assert call.args[0] == 3
+
+
+async def test_run_ollama_probes_no_sleep_when_delay_zero(hass: HomeAssistant) -> None:
+    """_run_ollama_probes does not call asyncio.sleep when inter_probe_delay_seconds=0."""
+    benchmarker = AgentBenchmarker(hass, inter_probe_delay_seconds=0)
+    config = _ollama_agent_config("no-sleep-agent")
+    profile = benchmarker.ensure_profile(config)
+
+    probe_a = _make_probe(name="ns-a", expected_exact="a")
+    probe_b = _make_probe(name="ns-b", expected_exact="b")
+
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(
+        side_effect=[
+            MagicMock(
+                content="any",
+                eval_count=None,
+                eval_duration_ns=None,
+                prompt_eval_count=None,
+                prompt_eval_duration_ns=None,
+            ),
+            MagicMock(
+                content="a",
+                eval_count=None,
+                eval_duration_ns=None,
+                prompt_eval_count=None,
+                prompt_eval_duration_ns=None,
+            ),
+            MagicMock(
+                content="b",
+                eval_count=None,
+                eval_duration_ns=None,
+                prompt_eval_count=None,
+                prompt_eval_duration_ns=None,
+            ),
+        ]
+    )
+    mock_client.async_get_running_models = AsyncMock(return_value=[])
+
+    with (
+        patch(
+            "custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe_a, probe_b]
+        ),
+        patch.object(benchmarker._probe_runner, "_get_ollama_client", return_value=mock_client),
+        patch(
+            "custom_components.neuralbridge.benchmark_probe_runner.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as mock_sleep,
+    ):
+        await benchmarker._run_ollama_probes("no-sleep-agent", config, profile)
+
+    assert mock_sleep.call_count == 0
+
+
+async def test_run_existing_probes_sends_warm_up_before_probes() -> None:
+    """_run_existing_probes calls the HA conversation service once for warm-up."""
+    mock_hass = MagicMock()
+    benchmarker = AgentBenchmarker(mock_hass)
+    config = {
+        "id": "ex-wu",
+        "agent_type": AGENT_TYPE_INTEGRATED,
+        "agent_name": "WarmUp Agent",
+        "entity_id": "conversation.warmup",
+        "timeout": 30,
+    }
+    profile = benchmarker.ensure_profile(config)
+
+    probe = BenchmarkProbe(
+        name="ex-wu-probe",
+        dimension="factual",
+        messages=[{"role": "user", "content": "Q?"}],
+        expected_exact="A",
+        timeout_seconds=5,
+    )
+    ha_response = {"response": {"speech": {"plain": {"speech": "A"}}}}
+    mock_hass.services.async_call = AsyncMock(return_value=ha_response)
+
+    with patch("custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe]):
+        await benchmarker._run_existing_probes("ex-wu", config, profile)
+
+    # warm-up + 1 scored probe = 2 calls to services.async_call
+    assert mock_hass.services.async_call.call_count == 2
+
+
+async def test_run_existing_probes_warm_up_failure_ignored() -> None:
+    """_run_existing_probes continues to scored probes even when warm-up service raises."""
+    mock_hass = MagicMock()
+    benchmarker = AgentBenchmarker(mock_hass)
+    config = {
+        "id": "ex-wu-fail",
+        "agent_type": AGENT_TYPE_INTEGRATED,
+        "agent_name": "WarmUp Fail Agent",
+        "entity_id": "conversation.wufail",
+        "timeout": 30,
+    }
+    profile = benchmarker.ensure_profile(config)
+
+    probe = BenchmarkProbe(
+        name="ex-after-fail",
+        dimension="factual",
+        messages=[{"role": "user", "content": "Q?"}],
+        expected_exact="A",
+        timeout_seconds=5,
+    )
+    ha_response = {"response": {"speech": {"plain": {"speech": "A"}}}}
+    call_count = 0
+
+    async def failing_then_ok(*args: object, **kwargs: object) -> dict:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("service unavailable during warm-up")
+        return ha_response
+
+    mock_hass.services.async_call = failing_then_ok
+
+    with patch("custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe]):
+        await benchmarker._run_existing_probes("ex-wu-fail", config, profile)
+
+    assert profile.probe_results.get("ex-after-fail") is True
+
+
+async def test_run_existing_probes_sleeps_between_probes_when_delay_nonzero() -> None:
+    """_run_existing_probes calls asyncio.sleep after warm-up and between each scored probe."""
+    mock_hass = MagicMock()
+    benchmarker = AgentBenchmarker(mock_hass, inter_probe_delay_seconds=2)
+    config = {
+        "id": "ex-sleep",
+        "agent_type": AGENT_TYPE_INTEGRATED,
+        "agent_name": "Sleep Agent",
+        "entity_id": "conversation.sleep",
+        "timeout": 30,
+    }
+    profile = benchmarker.ensure_profile(config)
+
+    probe_a = BenchmarkProbe(
+        name="ex-s-a",
+        dimension="factual",
+        messages=[{"role": "user", "content": "Q1?"}],
+        expected_exact="A1",
+        timeout_seconds=5,
+    )
+    probe_b = BenchmarkProbe(
+        name="ex-s-b",
+        dimension="factual",
+        messages=[{"role": "user", "content": "Q2?"}],
+        expected_exact="A2",
+        timeout_seconds=5,
+    )
+    ha_response_a = {"response": {"speech": {"plain": {"speech": "A1"}}}}
+    ha_response_b = {"response": {"speech": {"plain": {"speech": "A2"}}}}
+    mock_hass.services.async_call = AsyncMock(
+        side_effect=[ha_response_a, ha_response_a, ha_response_b]  # warm-up + 2 probes
+    )
+
+    with (
+        patch(
+            "custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe_a, probe_b]
+        ),
+        patch(
+            "custom_components.neuralbridge.benchmark_probe_runner.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as mock_sleep,
+    ):
+        await benchmarker._run_existing_probes("ex-sleep", config, profile)
+
+    # sleep after warm-up (1) + sleep before probe_b (1) = 2 calls, each with 2 s
+    assert mock_sleep.call_count == 2
+    for call in mock_sleep.call_args_list:
+        assert call.args[0] == 2
+
+
+async def test_run_existing_probes_no_sleep_when_delay_zero() -> None:
+    """_run_existing_probes does not call asyncio.sleep when inter_probe_delay_seconds=0."""
+    mock_hass = MagicMock()
+    benchmarker = AgentBenchmarker(mock_hass, inter_probe_delay_seconds=0)
+    config = {
+        "id": "ex-nosleep",
+        "agent_type": AGENT_TYPE_INTEGRATED,
+        "agent_name": "No-Sleep Agent",
+        "entity_id": "conversation.nosleep",
+        "timeout": 30,
+    }
+    profile = benchmarker.ensure_profile(config)
+
+    probe = BenchmarkProbe(
+        name="ex-ns-a",
+        dimension="factual",
+        messages=[{"role": "user", "content": "Q?"}],
+        expected_exact="A",
+        timeout_seconds=5,
+    )
+    ha_response = {"response": {"speech": {"plain": {"speech": "A"}}}}
+    mock_hass.services.async_call = AsyncMock(return_value=ha_response)
+
+    with (
+        patch("custom_components.neuralbridge.agent_benchmark.BENCHMARK_PROBES", [probe]),
+        patch(
+            "custom_components.neuralbridge.benchmark_probe_runner.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as mock_sleep,
+    ):
+        await benchmarker._run_existing_probes("ex-nosleep", config, profile)
+
+    assert mock_sleep.call_count == 0

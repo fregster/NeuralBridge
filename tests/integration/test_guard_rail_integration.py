@@ -57,8 +57,10 @@ def mock_ollama_client():
     All must be patched so tests never attempt real network connections.
     """
     with (
-        patch("custom_components.neuralbridge.router_engine.OllamaClient") as mock_conv,
-        patch("custom_components.neuralbridge.guard_rail.OllamaClient") as mock_gr,
+        patch(
+            "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient"
+        ) as mock_conv,
+        patch("custom_components.neuralbridge.ai_safety_checker.OllamaClient") as mock_gr,
         patch("custom_components.neuralbridge.ollama_client.OllamaClient") as mock_src,
     ):
         client_instance = AsyncMock()

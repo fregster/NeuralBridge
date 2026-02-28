@@ -60,6 +60,7 @@ from custom_components.neuralbridge.const import (
     CONF_RESPONSE_VERBOSITY,
     CONF_RETRY_BASE_DELAY,
     CONF_ROUTER_CUSTOM_PROMPT,
+    CONF_ROUTER_FAILOVER_MODE,
     CONF_ROUTER_FALLBACK,
     CONF_ROUTER_LOG_LEVEL,
     CONF_SEARCH_API_KEY,
@@ -85,6 +86,8 @@ from custom_components.neuralbridge.const import (
     MAX_COMPOUND_FRAGMENTS,
     NO_AGENTS_RESPONSE,
     ROUTER_CONFIDENCE_LOW,
+    ROUTER_FAILOVER_BACKUP,
+    ROUTER_FAILOVER_PRIORITY_ORDER,
     ROUTER_FALLBACK_BLOCK,
     ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
     ROUTER_FALLBACK_SKIP_ROUTING,
@@ -1170,12 +1173,12 @@ def _make_router_config(
 
 
 # ---------------------------------------------------------------------------
-# Test 35 — _check_with_routers: all routers return RouterDecision → last decision returned
+# Test 35 — _check_with_routers: primary_only (default) returns primary decision
 # ---------------------------------------------------------------------------
 
 
-async def test_check_with_routers_all_pass_returns_decision(hass: HomeAssistant) -> None:
-    """_check_with_routers returns the last RouterDecision when every router classifies."""
+async def test_check_with_routers_primary_only_returns_decision(hass: HomeAssistant) -> None:
+    """_check_with_routers returns the primary router's decision in primary_only mode."""
     entry = _entry_with_agents(_make_ollama_agent())
     conv_agent = NeuralBridgeAgent(hass, entry)
     routers = [_make_router_config("r1"), _make_router_config("r2")]
@@ -1189,6 +1192,327 @@ async def test_check_with_routers_all_pass_returns_decision(hass: HomeAssistant)
     assert result is not None
     assert result.local_ha is True
     assert result.complexity == 30
+
+
+# ---------------------------------------------------------------------------
+# Test 35b — _check_with_routers: primary_only calls only the primary router
+# ---------------------------------------------------------------------------
+
+
+async def test_check_with_routers_primary_only_calls_only_first_router(
+    hass: HomeAssistant,
+) -> None:
+    """primary_only mode never calls the second router — only the primary."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    routers = [
+        _make_router_config("r1"),
+        _make_router_config("r2"),
+    ]
+    called_ids: list[str] = []
+    expected_decision = RouterDecision(local_ha=False, complexity=50)
+
+    async def track_classify(
+        router_config: dict, *_args: object, **_kwargs: object
+    ) -> RouterDecision:
+        called_ids.append(router_config["id"])
+        return expected_decision
+
+    with patch.object(conv_agent, "_classify_with_router", side_effect=track_classify):
+        result = await conv_agent._check_with_routers(_make_input("hello"), routers)
+
+    assert result is not None
+    assert called_ids == ["r1"]  # second router never called
+
+
+# ---------------------------------------------------------------------------
+# Test 35c — _check_with_routers: backup mode uses primary success directly
+# ---------------------------------------------------------------------------
+
+
+async def test_check_with_routers_backup_primary_success_no_backup_called(
+    hass: HomeAssistant,
+) -> None:
+    """backup mode returns the primary decision when primary succeeds (no fallback)."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    # is_fallback=False → authentic classification
+    primary_decision = RouterDecision(local_ha=True, complexity=20, is_fallback=False)
+    routers = [
+        {**_make_router_config("r1"), CONF_ROUTER_FAILOVER_MODE: ROUTER_FAILOVER_BACKUP},
+        _make_router_config("r2"),
+    ]
+    called_ids: list[str] = []
+
+    async def track_classify(
+        router_config: dict, *_args: object, **_kwargs: object
+    ) -> RouterDecision:
+        called_ids.append(router_config["id"])
+        return primary_decision
+
+    with patch.object(conv_agent, "_classify_with_router", side_effect=track_classify):
+        result = await conv_agent._check_with_routers(_make_input("lights on"), routers)
+
+    assert result is not None
+    assert result.local_ha is True
+    assert result.complexity == 20
+    assert called_ids == ["r1"]  # backup never called when primary succeeds
+
+
+# ---------------------------------------------------------------------------
+# Test 35d — _check_with_routers: backup mode falls through to backup on error fallback
+# ---------------------------------------------------------------------------
+
+
+async def test_check_with_routers_backup_falls_to_backup_on_fallback(
+    hass: HomeAssistant,
+) -> None:
+    """backup mode tries the backup router when the primary gives a fallback decision."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    fallback_decision = RouterDecision(local_ha=False, complexity=50, is_fallback=True)
+    backup_decision = RouterDecision(local_ha=True, complexity=10, is_fallback=False)
+    routers = [
+        {**_make_router_config("r1"), CONF_ROUTER_FAILOVER_MODE: ROUTER_FAILOVER_BACKUP},
+        _make_router_config("r2"),
+    ]
+
+    async def classify(router_config: dict, *_args: object, **_kwargs: object) -> RouterDecision:
+        if router_config["id"] == "r1":
+            return fallback_decision
+        return backup_decision
+
+    with patch.object(conv_agent, "_classify_with_router", side_effect=classify):
+        result = await conv_agent._check_with_routers(_make_input("lights on"), routers)
+
+    assert result is not None
+    assert result.local_ha is True
+    assert result.complexity == 10
+    assert result.is_fallback is False
+
+
+# ---------------------------------------------------------------------------
+# Test 35e — _check_with_routers: backup mode respects primary explicit block
+# ---------------------------------------------------------------------------
+
+
+async def test_check_with_routers_backup_primary_block_not_overridden(
+    hass: HomeAssistant,
+) -> None:
+    """backup mode does not try the backup when the primary explicitly blocks (None)."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    called_ids: list[str] = []
+    routers = [
+        {**_make_router_config("r1"), CONF_ROUTER_FAILOVER_MODE: ROUTER_FAILOVER_BACKUP},
+        _make_router_config("r2"),
+    ]
+
+    async def classify(router_config: dict, *_args: object, **_kwargs: object) -> None:
+        called_ids.append(router_config["id"])
+
+    with patch.object(conv_agent, "_classify_with_router", side_effect=classify):
+        result = await conv_agent._check_with_routers(_make_input("harmful query"), routers)
+
+    assert result is None
+    assert called_ids == ["r1"]  # backup never called on explicit block
+
+
+# ---------------------------------------------------------------------------
+# Test 35f — _check_with_routers: backup mode, no backup configured → uses primary fallback
+# ---------------------------------------------------------------------------
+
+
+async def test_check_with_routers_backup_no_backup_agent_returns_fallback(
+    hass: HomeAssistant,
+) -> None:
+    """backup mode with only one router returns the primary fallback decision."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    fallback_decision = RouterDecision(local_ha=False, complexity=50, is_fallback=True)
+    routers = [
+        {**_make_router_config("r1"), CONF_ROUTER_FAILOVER_MODE: ROUTER_FAILOVER_BACKUP},
+        # no second router
+    ]
+
+    with patch.object(
+        conv_agent, "_classify_with_router", new_callable=AsyncMock, return_value=fallback_decision
+    ):
+        result = await conv_agent._check_with_routers(_make_input("hello"), routers)
+
+    assert result is not None
+    assert result.is_fallback is True
+    assert result.complexity == 50
+
+
+# ---------------------------------------------------------------------------
+# Test 35l — _check_with_routers: backup mode, backup blocks → returns None
+# ---------------------------------------------------------------------------
+
+
+async def test_check_with_routers_backup_backup_blocks_returns_none(
+    hass: HomeAssistant,
+) -> None:
+    """backup mode returns None when primary fails AND backup explicitly blocks."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    fallback_decision = RouterDecision(local_ha=False, complexity=50, is_fallback=True)
+    routers = [
+        {**_make_router_config("r1"), CONF_ROUTER_FAILOVER_MODE: ROUTER_FAILOVER_BACKUP},
+        _make_router_config("r2"),
+    ]
+
+    async def classify(
+        router_config: dict, *_args: object, **_kwargs: object
+    ) -> RouterDecision | None:
+        if router_config["id"] == "r1":
+            return fallback_decision  # primary errors → triggers backup
+        return None  # backup explicitly blocks
+
+    with patch.object(conv_agent, "_classify_with_router", side_effect=classify):
+        result = await conv_agent._check_with_routers(_make_input("bad query"), routers)
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Test 35g — _check_with_routers: priority_order stops at first authentic decision
+# ---------------------------------------------------------------------------
+
+
+async def test_check_with_routers_priority_order_stops_at_first_success(
+    hass: HomeAssistant,
+) -> None:
+    """priority_order mode stops after the first authentic (non-fallback) decision."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    success_decision = RouterDecision(local_ha=True, complexity=15, is_fallback=False)
+    routers = [
+        {**_make_router_config("r1"), CONF_ROUTER_FAILOVER_MODE: ROUTER_FAILOVER_PRIORITY_ORDER},
+        _make_router_config("r2"),
+        _make_router_config("r3"),
+    ]
+    called_ids: list[str] = []
+
+    async def classify(router_config: dict, *_args: object, **_kwargs: object) -> RouterDecision:
+        called_ids.append(router_config["id"])
+        return success_decision
+
+    with patch.object(conv_agent, "_classify_with_router", side_effect=classify):
+        result = await conv_agent._check_with_routers(_make_input("lights on"), routers)
+
+    assert result is not None
+    assert result.local_ha is True
+    assert called_ids == ["r1"]  # r2 and r3 never called
+
+
+# ---------------------------------------------------------------------------
+# Test 35h — _check_with_routers: priority_order falls through on fallback
+# ---------------------------------------------------------------------------
+
+
+async def test_check_with_routers_priority_order_falls_through_on_fallback(
+    hass: HomeAssistant,
+) -> None:
+    """priority_order tries the next router when the current one returns a fallback."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    fallback_decision = RouterDecision(local_ha=False, complexity=50, is_fallback=True)
+    success_decision = RouterDecision(local_ha=False, complexity=40, is_fallback=False)
+    routers = [
+        {**_make_router_config("r1"), CONF_ROUTER_FAILOVER_MODE: ROUTER_FAILOVER_PRIORITY_ORDER},
+        _make_router_config("r2"),
+    ]
+
+    async def classify(router_config: dict, *_args: object, **_kwargs: object) -> RouterDecision:
+        if router_config["id"] == "r1":
+            return fallback_decision
+        return success_decision
+
+    with patch.object(conv_agent, "_classify_with_router", side_effect=classify):
+        result = await conv_agent._check_with_routers(_make_input("hello"), routers)
+
+    assert result is not None
+    assert result.complexity == 40
+    assert result.is_fallback is False
+
+
+# ---------------------------------------------------------------------------
+# Test 35i — _check_with_routers: priority_order returns fail-open when all fail
+# ---------------------------------------------------------------------------
+
+
+async def test_check_with_routers_priority_order_all_fallback_returns_last(
+    hass: HomeAssistant,
+) -> None:
+    """priority_order returns the last fallback decision when every router errors."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    fallback_r1 = RouterDecision(local_ha=False, complexity=50, is_fallback=True)
+    fallback_r2 = RouterDecision(local_ha=False, complexity=50, is_fallback=True)
+    routers = [
+        {**_make_router_config("r1"), CONF_ROUTER_FAILOVER_MODE: ROUTER_FAILOVER_PRIORITY_ORDER},
+        _make_router_config("r2"),
+    ]
+    responses = {"r1": fallback_r1, "r2": fallback_r2}
+
+    async def classify(router_config: dict, *_args: object, **_kwargs: object) -> RouterDecision:
+        return responses[router_config["id"]]
+
+    with patch.object(conv_agent, "_classify_with_router", side_effect=classify):
+        result = await conv_agent._check_with_routers(_make_input("hmm"), routers)
+
+    assert result is not None
+    assert result.is_fallback is True
+
+
+# ---------------------------------------------------------------------------
+# Test 35j — _check_with_routers: priority_order blocks on first block signal
+# ---------------------------------------------------------------------------
+
+
+async def test_check_with_routers_priority_order_blocks_on_first_block(
+    hass: HomeAssistant,
+) -> None:
+    """priority_order returns None immediately when any router explicitly blocks."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    called_ids: list[str] = []
+    routers = [
+        {**_make_router_config("r1"), CONF_ROUTER_FAILOVER_MODE: ROUTER_FAILOVER_PRIORITY_ORDER},
+        _make_router_config("r2"),
+    ]
+
+    async def classify(router_config: dict, *_args: object, **_kwargs: object) -> None:
+        called_ids.append(router_config["id"])
+
+    with patch.object(conv_agent, "_classify_with_router", side_effect=classify):
+        result = await conv_agent._check_with_routers(_make_input("bad query"), routers)
+
+    assert result is None
+    assert called_ids == ["r1"]  # r2 never called
+
+
+# ---------------------------------------------------------------------------
+# Test 35k — _router_fallback decisions have is_fallback=True
+# ---------------------------------------------------------------------------
+
+
+async def test_router_fallback_decisions_have_is_fallback_set(hass: HomeAssistant) -> None:
+    """_classify_with_router returns is_fallback=True when router errors and falls back."""
+    entry = _entry_with_agents(_make_ollama_agent())
+    conv_agent = NeuralBridgeAgent(hass, entry)
+    router = _make_router_config()  # default fallback = default_complexity
+
+    with patch(
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
+        new_callable=AsyncMock,
+        return_value=None,  # network error → fallback
+    ):
+        result = await conv_agent._classify_with_router(router, "some text")
+
+    assert result is not None
+    assert result.is_fallback is True
 
 
 # ---------------------------------------------------------------------------
@@ -1307,7 +1631,7 @@ async def test_classify_with_router_json_pass_returns_decision(hass: HomeAssista
     router = _make_router_config()
 
     with patch(
-        "custom_components.neuralbridge.router_engine.OllamaClient.generate",
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
         new_callable=AsyncMock,
         return_value=OllamaResponse(content='{"local_ha": true, "complexity": 12}'),
     ):
@@ -1330,7 +1654,7 @@ async def test_classify_with_router_json_block_returns_none(hass: HomeAssistant)
     router = _make_router_config()
 
     with patch(
-        "custom_components.neuralbridge.router_engine.OllamaClient.generate",
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
         new_callable=AsyncMock,
         return_value=OllamaResponse(content='{"local_ha": false, "complexity": 0}'),
     ):
@@ -1351,7 +1675,7 @@ async def test_classify_with_router_none_response_returns_fail_open(hass: HomeAs
     router = _make_router_config()
 
     with patch(
-        "custom_components.neuralbridge.router_engine.OllamaClient.generate",
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
         new_callable=AsyncMock,
         return_value=None,
     ):
@@ -1376,7 +1700,7 @@ async def test_classify_with_router_unparseable_response_returns_fail_open(
     router = _make_router_config()
 
     with patch(
-        "custom_components.neuralbridge.router_engine.OllamaClient.generate",
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
         new_callable=AsyncMock,
         return_value=OllamaResponse(content="I am not sure what to say here"),
     ):
@@ -1401,7 +1725,7 @@ async def test_classify_with_router_general_question_not_local_ha(
     router = _make_router_config(agent_id="r-general")
 
     with patch(
-        "custom_components.neuralbridge.router_engine.OllamaClient.generate",
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
         new_callable=AsyncMock,
         return_value=OllamaResponse(content='{"local_ha": false, "complexity": 70}'),
     ):
@@ -1426,7 +1750,7 @@ async def test_classify_with_router_creates_client(hass: HomeAssistant) -> None:
     assert "new-router" not in conv_agent._ollama_clients
 
     with patch(
-        "custom_components.neuralbridge.router_engine.OllamaClient.generate",
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
         new_callable=AsyncMock,
         return_value=OllamaResponse(content='{"local_ha": false, "complexity": 30}'),
     ):
@@ -1481,7 +1805,7 @@ async def test_classify_with_router_appends_entity_context(hass: HomeAssistant) 
         return OllamaResponse(content='{"local_ha": true, "complexity": 8}')
 
     with patch(
-        "custom_components.neuralbridge.router_engine.OllamaClient.generate",
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
         side_effect=_capture_generate,
     ):
         result = await conv_agent._classify_with_router(router, "What is the weather?")
@@ -1511,7 +1835,7 @@ async def test_classify_with_router_skips_empty_entity_context(hass: HomeAssista
         return OllamaResponse(content='{"local_ha": false, "complexity": 30}')
 
     with patch(
-        "custom_components.neuralbridge.router_engine.OllamaClient.generate",
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
         side_effect=_capture_generate,
     ):
         await conv_agent._classify_with_router(router, "What is 2+2?")
@@ -1996,7 +2320,7 @@ async def test_guard_rail_checker_uses_custom_rules(hass: HomeAssistant) -> None
         return mock_instance
 
     with patch(
-        "custom_components.neuralbridge.confirmation_flows.GuardRailChecker",
+        "custom_components.neuralbridge.guard_rail_action_handler.GuardRailChecker",
         side_effect=capture_checker,
     ):
         await conv_agent._check_guardrails(
@@ -2113,7 +2437,7 @@ async def test_guard_rail_checker_reinitialised_when_rules_change(
     new_checker.async_initialize = AsyncMock()
 
     with patch(
-        "custom_components.neuralbridge.confirmation_flows.GuardRailChecker",
+        "custom_components.neuralbridge.guard_rail_action_handler.GuardRailChecker",
         return_value=new_checker,
     ):
         await conv_agent._check_guardrails(agent_cfg, conv_agent._create_result("some text"), None)
@@ -4642,7 +4966,7 @@ async def test_classify_with_router_records_intent_hint(hass: HomeAssistant) -> 
     router = _make_router_config()
 
     with patch(
-        "custom_components.neuralbridge.router_engine.OllamaClient.generate",
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
         new_callable=AsyncMock,
         return_value=OllamaResponse(
             content='{"local_ha": true, "complexity": 5, "intent_hint": "timer"}'
@@ -4667,7 +4991,7 @@ async def test_classify_with_router_no_intent_hint_no_stats_recorded(
     router = _make_router_config()
 
     with patch(
-        "custom_components.neuralbridge.router_engine.OllamaClient.generate",
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
         new_callable=AsyncMock,
         return_value=OllamaResponse(
             content='{"local_ha": false, "complexity": 30, "intent_hint": null}'
@@ -4725,7 +5049,7 @@ async def test_classify_with_router_appends_language_to_prompt(hass: HomeAssista
         return OllamaResponse(content='{"local_ha": false, "complexity": 20, "intent_hint": null}')
 
     with patch(
-        "custom_components.neuralbridge.router_engine.OllamaClient.generate",
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
         side_effect=_capture_generate,
     ):
         await conv_agent._classify_with_router(router, "some query", language="de")
@@ -4747,7 +5071,7 @@ async def test_classify_with_router_no_language_no_language_line(hass: HomeAssis
         return OllamaResponse(content='{"local_ha": false, "complexity": 20, "intent_hint": null}')
 
     with patch(
-        "custom_components.neuralbridge.router_engine.OllamaClient.generate",
+        "custom_components.neuralbridge.router_backends.ollama_router_backend.OllamaClient.generate",
         side_effect=_capture_generate,
     ):
         await conv_agent._classify_with_router(router, "some query", language=None)
@@ -4964,7 +5288,7 @@ def test_render_ha_context_substitutes_all_tokens(
     # so temperature_unit.value == "°C" without any extra configuration.
 
     prompt = "Located at {ha_location_name}. TZ={ha_timezone}. Unit={ha_unit_temperature}."
-    result = agent._llm_proxy._render_ha_context(prompt)
+    result = agent._llm_proxy._prompt_builder.render_ha_context(prompt)
 
     assert result == "Located at My Home. TZ=Europe/London. Unit=°C."
 
@@ -4976,7 +5300,7 @@ def test_render_ha_context_no_tokens_returns_unchanged(
     agent = NeuralBridgeAgent(hass, mock_config_entry)
     prompt = "You are a helpful assistant."
 
-    result = agent._llm_proxy._render_ha_context(prompt)
+    result = agent._llm_proxy._prompt_builder.render_ha_context(prompt)
 
     assert result == prompt
 
@@ -4990,7 +5314,7 @@ def test_render_ha_context_missing_units_attribute_falls_back_to_empty(
     hass.config.units = object()  # type: ignore[assignment]
 
     prompt = "Unit: {ha_unit_temperature}"
-    result = agent._llm_proxy._render_ha_context(prompt)
+    result = agent._llm_proxy._prompt_builder.render_ha_context(prompt)
 
     assert result == "Unit: "
 
@@ -5003,7 +5327,7 @@ def test_render_ha_context_empty_location_name(
     hass.config.location_name = ""
 
     prompt = "Located at {ha_location_name}."
-    result = agent._llm_proxy._render_ha_context(prompt)
+    result = agent._llm_proxy._prompt_builder.render_ha_context(prompt)
 
     assert result == "Located at ."
 
@@ -6307,7 +6631,7 @@ async def test_resolve_high_stakes_passphrase_uses_compare_digest(
     hs_pending = (original, [])
 
     with patch(
-        "custom_components.neuralbridge.confirmation_flows.hmac.compare_digest",
+        "custom_components.neuralbridge.high_stakes_handler.hmac.compare_digest",
         wraps=hmac.compare_digest,
     ) as mock_digest:
         result = await agent._resolve_high_stakes_confirmation(
@@ -6435,7 +6759,7 @@ async def test_check_high_stakes_non_local_ha_returns_none(hass: HomeAssistant) 
 async def test_check_high_stakes_domain_match_returns_confirm_prompt(
     hass: HomeAssistant,
 ) -> None:
-    """Matching a high-stakes domain returns the confirmation prompt and fires event."""
+    """Matching a high-stakes domain (via entity ID from proxy) returns confirmation prompt."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
@@ -6451,11 +6775,16 @@ async def test_check_high_stakes_domain_match_returns_confirm_prompt(
     mock_hass.bus.async_fire.side_effect = lambda et, data=None: fired.append(et)
     agent = NeuralBridgeAgent(mock_hass, entry)
 
-    result_obj = agent._create_result("I've unlocked the front lock")
+    # Inject entity IDs via the proxy (Strategy 1 — the only supported path).
+    # Strategy 2 (response-text keyword scan) was removed to prevent false
+    # positives such as "Mapledurham Lock Water Level" triggering a door-lock guard.
+    agent._llm_proxy._local_ha_targets["hs-test"] = ["lock.front_door"]
+
+    result_obj = agent._create_result("The front door has been unlocked.")
     ret = await agent._check_high_stakes(
         _make_local_ha_cfg(),
         result_obj,
-        _make_input("unlock the front lock", conversation_id="hs-test"),
+        _make_input("unlock the front door", conversation_id="hs-test"),
     )
     assert ret is not None
     speech = ret.response.speech["plain"]["speech"]
@@ -6485,11 +6814,14 @@ async def test_check_high_stakes_secret_enabled_returns_passphrase_prompt(
     mock_hass.bus.async_fire.side_effect = lambda et, data=None: fired.append(et)
     agent = NeuralBridgeAgent(mock_hass, entry)
 
-    result_obj = agent._create_result("I've unlocked the front lock")
+    # Inject entity IDs via the proxy (Strategy 1 — the only supported path).
+    agent._llm_proxy._local_ha_targets["hs-secret"] = ["lock.front_door"]
+
+    result_obj = agent._create_result("The front door has been unlocked.")
     ret = await agent._check_high_stakes(
         _make_local_ha_cfg(),
         result_obj,
-        _make_input("unlock the front lock", conversation_id="hs-secret"),
+        _make_input("unlock the front door", conversation_id="hs-secret"),
     )
     assert ret is not None
     speech = ret.response.speech["plain"]["speech"]
@@ -6540,7 +6872,9 @@ async def test_handle_successful_result_with_high_stakes_match(
     agent = NeuralBridgeAgent(mock_hass, entry)
 
     local_cfg = _make_local_ha_cfg()
-    result_obj = agent._create_result("I've locked the front lock")
+    # Inject entity IDs via the proxy (Strategy 1 — the only supported path).
+    agent._llm_proxy._local_ha_targets["hs-flow"] = ["lock.front_door"]
+    result_obj = agent._create_result("The front door has been locked.")
 
     with patch.object(agent, "_check_guardrails", new_callable=AsyncMock, return_value=None):
         ret = await agent._handle_successful_result(
@@ -7190,7 +7524,7 @@ def test_render_ha_context_replaces_ha_sensor_states_token(
     agent._entity_context_cache = mock_cache
     agent._llm_proxy._entity_context_cache = mock_cache
 
-    result = agent._llm_proxy._render_ha_context("Sensor data: {ha_sensor_states}")
+    result = agent._llm_proxy._prompt_builder.render_ha_context("Sensor data: {ha_sensor_states}")
 
     mock_cache.get_sensor_values.assert_called_once()
     assert "- Temperature: 22C" in result
@@ -7524,7 +7858,7 @@ async def test_fire_preferences_updated_dispatches_signal(
     expected_signal = SIGNAL_PREFERENCES_UPDATED.format(entry_id=mock_config_entry.entry_id)
 
     with patch(
-        "custom_components.neuralbridge.confirmation_flows.async_dispatcher_send"
+        "custom_components.neuralbridge.preference_confirmation_handler.async_dispatcher_send"
     ) as mock_send:
         agent._fire_preferences_updated()
 

@@ -17,6 +17,8 @@ from .agent_benchmark import AgentBenchmarker
 from .circuit_breaker import CircuitBreaker
 from .const import (
     CONF_AGENTS,
+    CONF_BENCHMARK_DEBUG_LOGGING,
+    CONF_BENCHMARK_INTER_PROBE_DELAY,
     CONF_BENCHMARK_WARM_UP_DELAY,
     CONF_PREFERENCE_MAX_ENTRIES,
     CONF_RESPONSE_CACHE_ENABLED,
@@ -30,6 +32,8 @@ from .const import (
     DATA_RESPONSE_CACHE,
     DATA_SESSION_MEMORY,
     DATA_STATISTICS,
+    DEFAULT_BENCHMARK_DEBUG_LOGGING,
+    DEFAULT_BENCHMARK_INTER_PROBE_DELAY,
     DEFAULT_BENCHMARK_WARM_UP_DELAY,
     DEFAULT_CIRCUIT_BREAKER_COOLDOWN,
     DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
@@ -99,7 +103,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Feature 14 — Agent Benchmark Profiling
     warm_up_delay = merged_config.get(CONF_BENCHMARK_WARM_UP_DELAY, DEFAULT_BENCHMARK_WARM_UP_DELAY)
-    benchmarker = AgentBenchmarker(hass, warm_up_delay_seconds=int(warm_up_delay))
+    debug_probes = merged_config.get(CONF_BENCHMARK_DEBUG_LOGGING, DEFAULT_BENCHMARK_DEBUG_LOGGING)
+    inter_probe_delay = merged_config.get(
+        CONF_BENCHMARK_INTER_PROBE_DELAY, DEFAULT_BENCHMARK_INTER_PROBE_DELAY
+    )
+    benchmarker = AgentBenchmarker(
+        hass,
+        warm_up_delay_seconds=int(warm_up_delay),
+        debug_probes=bool(debug_probes),
+        inter_probe_delay_seconds=int(inter_probe_delay),
+    )
     await benchmarker.async_load()
 
     # Feature 15 — Adaptive Preference Learning

@@ -1,0 +1,88 @@
+clear_conversation:
+  name: Clear conversation
+  description: >
+    Clears the session history for a specific conversation ID from NeuralBridge's
+    session memory. Useful when an external caller (e.g. an Alexa Skill) ends a
+    session and wants to free memory immediately.
+  fields:
+    conversation_id:
+      name: Conversation ID
+      description: >
+        The conversation ID to clear (e.g. the Alexa sessionId passed as
+        conversation_id to the HA Conversation API).
+      required: true
+      example: "homeassistant-abc123"
+      selector:
+        text:
+
+run_benchmark:
+  name: Run benchmark
+  description: >
+    Triggers an immediate benchmark profiling run for the specified NeuralBridge
+    agent. The agent must be of type Ollama or an existing HA conversation
+    integration.
+  fields:
+    agent_id:
+      name: Agent ID
+      description: >
+        The internal UUID of the agent to benchmark (visible in the NeuralBridge
+        sensor attributes).
+      required: true
+      example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+      selector:
+        text:
+
+clear_preferences:
+  name: Clear preferences
+  description: >
+    Clears all learned user preferences stored by NeuralBridge. This resets
+    the preference memory to an empty state across all active config entries.
+
+manage_preference:
+  name: Manage preference
+  description: >
+    Adds, edits, or removes a single preference entry in NeuralBridge's
+    preference memory. Changes take effect immediately across all active
+    config entries.
+  fields:
+    action:
+      name: Action
+      description: "Whether to add/edit or remove the preference entry."
+      required: true
+      example: "add"
+      selector:
+        select:
+          options:
+            - add
+            - edit
+            - remove
+    key:
+      name: Key
+      description: >
+        The preference key (e.g. "news_source", "home_city"). Used to identify
+        the preference entry.
+      required: true
+      example: "news_source"
+      selector:
+        text:
+    value:
+      name: Value
+      description: >
+        The preference value (e.g. "BBC"). Required for add/edit actions;
+        ignored for remove.
+      required: false
+      example: "BBC"
+      selector:
+        text:
+    category:
+      name: Category
+      description: >
+        The preference category. Defaults to "source" if not provided.
+      required: false
+      example: "source"
+      selector:
+        select:
+          options:
+            - source
+            - location
+            - format

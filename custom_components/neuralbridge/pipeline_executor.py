@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from homeassistant.components.conversation import (
     ConversationInput,
@@ -14,12 +13,12 @@ from homeassistant.components.conversation import (
 )
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
+from .agent_retry_engine import AgentRetryEngine
 from .const import (
     AGENT_TYPE_INTEGRATED,
     AGENT_TYPE_LOCAL_HA,
     AGENT_TYPE_OLLAMA,
     AGENT_TYPE_WEB_SEARCH,
-    COMPOUND_COMMAND_SEPARATOR,
     CONF_AGENT_CACHE_ENABLED,
     CONF_AGENT_ENABLED,
     CONF_AGENT_NAME,
@@ -27,9 +26,7 @@ from .const import (
     CONF_AGENTS,
     CONF_ANNOUNCE_MEDIA_PLAYERS,
     CONF_IS_ROUTER,
-    CONF_MAX_RETRIES,
     CONF_PRIORITY,
-    CONF_RETRY_BASE_DELAY,
     CONF_SEARCH_API_KEY,
     CONF_SEARCH_MAX_SNIPPET_LEN,
     CONF_SEARCH_PROVIDER,
@@ -39,8 +36,6 @@ from .const import (
     DEFAULT_AGENT_CACHE_ENABLED,
     DEFAULT_AGENT_ENABLED,
     DEFAULT_ANNOUNCE_MEDIA_PLAYERS,
-    DEFAULT_MAX_RETRIES,
-    DEFAULT_RETRY_BASE_DELAY,
     DEFAULT_SEARCH_MAX_SNIPPET_LEN,
     DEFAULT_SEARCH_RESULT_COUNT,
     DEFAULT_SEARCH_TIMEOUT,
@@ -53,6 +48,7 @@ from .const import (
     PRIORITY_ROUTER,
     SIGNAL_STATS_UPDATED,
 )
+from .fragment_processor import FragmentProcessor
 from .router_engine import (
     RouterDecision,
     _apply_router_decision,
@@ -69,6 +65,15 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+@runtime_checkable
+class PipelineExecutorProtocol(Protocol):
+    """Protocol for the NeuralBridge pipeline executor."""
+
+    async def _compute_result(self, user_input: ConversationInput) -> ConversationResult:
+        """Compute the conversation result for the given user input."""
+        ...
+
+
 class PipelineExecutor:
     """Encapsulates pipeline execution logic for NeuralBridgeAgent.
 
@@ -83,6 +88,8 @@ class PipelineExecutor:
             agent: The :class:`NeuralBridgeAgent` that owns this executor.
         """
         self._agent = agent
+        self._retry_engine = AgentRetryEngine(agent)
+        self._fragment_processor = FragmentProcessor(agent)
 
     async def _compute_result(self, user_input: ConversationInput) -> ConversationResult:
         """Compute the conversation result for the given user input.
@@ -135,7 +142,7 @@ class PipelineExecutor:
             if not (a.get(CONF_IS_ROUTER, False) or a.get(CONF_PRIORITY) == PRIORITY_ROUTER)
         ]
 
-        return await self._agent._run_pipeline(config, user_input, router_agents, processing_agents)
+        return await self._run_pipeline(config, user_input, router_agents, processing_agents)
 
     async def _run_pipeline(
         self,
@@ -160,7 +167,7 @@ class PipelineExecutor:
             The ConversationResult produced by the first successful agent.
         """
         # Check for explicit named-agent override ("Ask Gemini: ...", "Use Ollama: ...", etc.)
-        override = self._agent._check_explicit_agent_override(user_input, processing_agents)
+        override = self._check_explicit_agent_override(user_input, processing_agents)
         if override is not None:
             override_input, override_agents = override
             return await self._agent._try_processing_agents(override_agents, override_input)
@@ -216,7 +223,7 @@ class PipelineExecutor:
             if has_local_ha:
                 fragments = _split_compound_input(user_input.text)
                 if len(fragments) > 1:
-                    return await self._agent._process_compound_fragments(
+                    return await self._process_compound_fragments(
                         fragments, processing_agents, user_input
                     )
 
@@ -243,7 +250,7 @@ class PipelineExecutor:
         if (chat_log := current_chat_log.get()) is None:
             return
 
-        speech = self._agent._extract_response_text(result)
+        speech = self._extract_response_text(result)
         chat_log.async_add_assistant_content_without_tools(
             AssistantContent(agent_id=self._agent.entity_id, content=speech or None)
         )
@@ -254,30 +261,10 @@ class PipelineExecutor:
         processing_agents: list[dict[str, Any]],
         user_input: ConversationInput,
     ) -> ConversationResult:
-        """Process each compound command fragment independently and combine results.
-
-        Each fragment is sent to the processing agents in turn.  If a fragment
-        fails (no result), a localised fallback string is used so no fragment is
-        silently dropped.  All per-fragment responses are joined with the
-        ``COMPOUND_COMMAND_SEPARATOR`` (`` · ``).
-
-        Args:
-            fragments: Individual command strings from _split_compound_input.
-            processing_agents: Priority-sorted processing agent configs.
-            user_input: Original ConversationInput (text will be replaced per fragment).
-
-        Returns:
-            A ConversationResult whose speech text is the joined responses.
-        """
-        speech_parts: list[str] = []
-        fallback_text = self._agent._localized("responses", "fallback")
-        for fragment in fragments:
-            fragment_input = dataclasses.replace(user_input, text=fragment)
-            result = await self._agent._try_processing_agents(processing_agents, fragment_input)
-            fragment_speech = self._agent._extract_response_text(result)
-            speech_parts.append(fragment_speech if fragment_speech else fallback_text)
-        combined = COMPOUND_COMMAND_SEPARATOR.join(speech_parts)
-        return self._agent._create_result(combined, user_input.conversation_id)
+        """Delegate compound fragment processing to FragmentProcessor."""
+        return await self._fragment_processor._process_compound_fragments(
+            fragments, processing_agents, user_input
+        )
 
     async def _try_processing_agents(
         self,
@@ -308,7 +295,7 @@ class PipelineExecutor:
             )
             if result is None:
                 continue
-            response_text = self._agent._extract_response_text(result)
+            response_text = self._extract_response_text(result)
             if _is_unhelpful_response(response_text):
                 _LOGGER.info(
                     "Agent %s returned CANNOT_ANSWER — continuing to next agent",
@@ -340,28 +327,9 @@ class PipelineExecutor:
         user_input: ConversationInput,
         router_decision: RouterDecision | None = None,
     ) -> ConversationResult | None:
-        """Try a single agent with circuit breaker guard, then retry logic.
-
-        Args:
-            agent_config:    Configuration dict for the agent to try.
-            user_input:      The user's conversation input.
-            router_decision: Optional routing decision carrying ``relevant_sensors``
-                             for targeted sensor injection.
-
-        Returns:
-            ConversationResult on success, None if the agent failed or was skipped.
-        """
-        agent_id: str = agent_config.get("id", "")
-        agent_name: str = agent_config.get(CONF_AGENT_NAME, "Unknown")
-
-        if self._agent._circuit_breaker.is_open(agent_id):
-            _LOGGER.warning(
-                "Agent %s circuit is tripped — skipping until cooldown expires", agent_name
-            )
-            return None
-
-        return await self._agent._try_agent_with_retries(
-            agent_config, user_input, agent_id, agent_name, router_decision
+        """Delegate to AgentRetryEngine — circuit breaker guard + retry logic."""
+        return await self._retry_engine._try_agent_with_tracking(
+            agent_config, user_input, router_decision
         )
 
     async def _try_agent_with_retries(
@@ -372,70 +340,10 @@ class PipelineExecutor:
         agent_name: str,
         router_decision: RouterDecision | None = None,
     ) -> ConversationResult | None:
-        """Attempt an agent call with exponential back-off on failure.
-
-        Args:
-            agent_config:    Configuration dict for the agent to try.
-            user_input:      The user's conversation input.
-            agent_id:        Unique identifier for the agent.
-            agent_name:      Display name of the agent (for logging).
-            router_decision: Optional routing decision carrying ``relevant_sensors``
-                             for targeted sensor injection.
-
-        Returns:
-            ConversationResult on success, None if all attempts are exhausted.
-        """
-        config = self._agent._get_config()
-        max_retries = int(config.get(CONF_MAX_RETRIES, DEFAULT_MAX_RETRIES))
-        retry_base_delay = float(config.get(CONF_RETRY_BASE_DELAY, DEFAULT_RETRY_BASE_DELAY))
-
-        for attempt in range(max_retries + 1):
-            if attempt > 0:
-                delay = retry_base_delay * (2 ** (attempt - 1))
-                _LOGGER.debug(
-                    "Retry %d/%d for agent %s — waiting %.1fs before next attempt",
-                    attempt,
-                    max_retries,
-                    agent_name,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-
-            self._agent._statistics.record_request(agent_id, agent_name)
-            start_time = time.monotonic()
-            result, timed_out = await self._agent._try_agent(
-                agent_config, user_input, router_decision
-            )
-            elapsed_ms = (time.monotonic() - start_time) * 1000
-
-            if result is not None:
-                response_text = self._agent._extract_response_text(result)
-                if _is_unhelpful_response(response_text):
-                    _LOGGER.info(
-                        "Agent %s cannot answer — sentinel detected, will re-route",
-                        agent_name,
-                    )
-                    # Return the canonical sentinel result so _try_processing_agents
-                    # can distinguish re-route from real failure and add a preamble.
-                    from .const import CANNOT_ANSWER_SENTINEL  # noqa: PLC0415
-
-                    return self._agent._create_result(
-                        CANNOT_ANSWER_SENTINEL, user_input.conversation_id
-                    )
-                return await self._agent._handle_successful_result(
-                    agent_config, result, user_input, agent_id, elapsed_ms
-                )
-
-            self._agent._record_agent_failure(agent_id, timed_out)
-            if self._agent._circuit_breaker.is_open(agent_id):
-                _LOGGER.warning(
-                    "Circuit tripped for agent %s after attempt %d — stopping retries",
-                    agent_name,
-                    attempt + 1,
-                )
-                break
-
-        return None
+        """Delegate to AgentRetryEngine — exponential back-off retry logic."""
+        return await self._retry_engine._try_agent_with_retries(
+            agent_config, user_input, agent_id, agent_name, router_decision
+        )
 
     async def _handle_successful_result(
         self,
@@ -466,8 +374,8 @@ class PipelineExecutor:
             SIGNAL_STATS_UPDATED.format(entry_id=self._agent._config_entry.entry_id),
         )
 
-        response_text = self._agent._extract_response_text(result)
-        self._agent._maybe_cache_response(agent_config, user_input.text, response_text, agent_name)
+        response_text = self._extract_response_text(result)
+        self._maybe_cache_response(agent_config, user_input.text, response_text, agent_name)
 
         guard_action = await self._agent._check_guardrails(
             agent_config, result, user_input.conversation_id
@@ -476,7 +384,9 @@ class PipelineExecutor:
             return guard_action
 
         # Feature 4 — high-stakes confirmation (LOCAL_HA only)
-        high_stakes_action = await self._agent._check_high_stakes(agent_config, result, user_input)
+        high_stakes_action = await self._agent._confirmation._check_high_stakes(
+            agent_config, result, user_input
+        )
         if isinstance(high_stakes_action, ConversationResult):
             return high_stakes_action
 
@@ -522,22 +432,8 @@ class PipelineExecutor:
             )
 
     def _record_agent_failure(self, agent_id: str, timed_out: bool) -> None:
-        """Record a failure or timeout for circuit breaker, stats, and dispatcher.
-
-        Args:
-            agent_id: Unique identifier for the agent that failed.
-            timed_out: True if the failure was a timeout; False for other errors.
-        """
-        if timed_out:
-            self._agent._circuit_breaker.record_timeout(agent_id)
-            self._agent._statistics.record_timeout(agent_id)
-        else:
-            self._agent._circuit_breaker.record_failure(agent_id)
-            self._agent._statistics.record_failure(agent_id)
-        async_dispatcher_send(
-            self._agent.hass,
-            SIGNAL_STATS_UPDATED.format(entry_id=self._agent._config_entry.entry_id),
-        )
+        """Delegate to AgentRetryEngine — circuit breaker, stats, dispatcher."""
+        self._retry_engine._record_agent_failure(agent_id, timed_out)
 
     async def _try_agent(
         self,

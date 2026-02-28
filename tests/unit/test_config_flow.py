@@ -9,6 +9,7 @@ import aiohttp
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.neuralbridge.agent_benchmark import BenchmarkProfile, BenchmarkStatus
 from custom_components.neuralbridge.config_flow import (
     NeuralBridgeConfigFlow,
     NeuralBridgeOptionsFlowHandler,
@@ -56,6 +57,7 @@ from custom_components.neuralbridge.const import (
     CONF_SEARCH_RESULT_COUNT,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
+    DATA_BENCHMARKER,
     DATA_RESPONSE_CACHE,
     DEFAULT_AGENT_CACHE_ENABLED,
     DEFAULT_DEFAULT_PROMPT,
@@ -391,6 +393,7 @@ async def test_options_flow_init_shows_menu(
         "configure_high_stakes",
         "advanced_settings",
         "language_settings",
+        "run_benchmarks_now",
         "done",
     }
 
@@ -609,6 +612,62 @@ async def test_manage_agents_with_agents_shows_dropdown(hass: HomeAssistant) -> 
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "manage_agents"
     assert result["data_schema"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Test 19b — manage_agents: routing-agent-only list shows no schema
+# ---------------------------------------------------------------------------
+
+
+async def test_manage_agents_routing_agent_only_shows_no_schema(hass: HomeAssistant) -> None:
+    """When only routing agents exist they are excluded, so no dropdown is shown."""
+    router: dict[str, Any] = {
+        "id": "router-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED,
+        CONF_AGENT_ENABLED: True,
+        CONF_AGENT_NAME: "Routing agent",
+        CONF_PRIORITY: PRIORITY_ROUTER,
+        CONF_IS_ROUTER: True,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: DEFAULT_TIMEOUT,
+    }
+    entry = _entry_with_agents(hass, [router])
+    handler = _make_handler(entry, hass)
+    result = await handler.async_step_manage_agents()
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "manage_agents"
+    assert result.get("data_schema") is None
+
+
+# ---------------------------------------------------------------------------
+# Test 19c — manage_agents: mixed list excludes routing agent from dropdown
+# ---------------------------------------------------------------------------
+
+
+async def test_manage_agents_excludes_routing_agent_from_dropdown(hass: HomeAssistant) -> None:
+    """Routing agents are excluded; only non-routing agents appear in the dropdown."""
+    router: dict[str, Any] = {
+        "id": "router-1",
+        CONF_AGENT_TYPE: AGENT_TYPE_INTEGRATED,
+        CONF_AGENT_ENABLED: True,
+        CONF_AGENT_NAME: "Routing agent",
+        CONF_PRIORITY: PRIORITY_ROUTER,
+        CONF_IS_ROUTER: True,
+        CONF_ENTITY_ID: "conversation.gemini",
+        CONF_TIMEOUT: DEFAULT_TIMEOUT,
+    }
+    normal = _ollama_agent(agent_id="agent-2")
+    entry = _entry_with_agents(hass, [router, normal])
+    handler = _make_handler(entry, hass)
+    result = await handler.async_step_manage_agents()
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "manage_agents"
+    assert result["data_schema"] is not None
+    # Only the non-routing agent should appear as an option
+    options = result["data_schema"].schema["agent_id"].config["options"]
+    option_values = [o["value"] for o in options]
+    assert normal["id"] in option_values
+    assert router["id"] not in option_values
 
 
 # ---------------------------------------------------------------------------
@@ -3321,3 +3380,195 @@ async def test_configure_high_stakes_saves_disabled(
 
     assert mock_config_entry.data[CONF_HIGH_STAKES_ENABLED] is False
     assert mock_config_entry.data[CONF_HIGH_STAKES_DOMAINS] == ["cover"]
+
+
+# ---------------------------------------------------------------------------
+# Tests — run_benchmarks_now live view (Feature 14 — benchmark button)
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_benchmarker(profile: Any = None) -> MagicMock:
+    """Return a MagicMock AgentBenchmarker for benchmark live-view tests."""
+    mock = MagicMock()
+    mock.cancel_pending = MagicMock()
+    mock.ensure_profile = MagicMock()
+    mock.async_run_benchmark = AsyncMock(return_value=None)
+    mock.get_profile = MagicMock(return_value=profile)
+    return mock
+
+
+async def test_run_benchmarks_now_first_visit_shows_form(hass: HomeAssistant) -> None:
+    """First visit (user_input=None) returns a form with step_id='run_benchmarks_now'."""
+    entry = _entry_with_agents(hass, [_ollama_agent()])
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][entry.entry_id] = {DATA_BENCHMARKER: _make_mock_benchmarker()}
+    handler = _make_handler(entry, hass)
+
+    with patch.object(hass, "async_create_task"):
+        result = await handler.async_step_run_benchmarks_now()
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "run_benchmarks_now"
+    assert "status_table" in result.get("description_placeholders", {})
+
+
+async def test_run_benchmarks_now_launches_ollama_and_existing(hass: HomeAssistant) -> None:
+    """First visit fires benchmark tasks for Ollama and EXISTING agents."""
+    agents = [_ollama_agent("a1"), _existing_agent("a2"), _local_agent("a3")]
+    entry = _entry_with_agents(hass, agents)
+    mock_bm = _make_mock_benchmarker()
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][entry.entry_id] = {DATA_BENCHMARKER: mock_bm}
+    handler = _make_handler(entry, hass)
+
+    result = await handler.async_step_run_benchmarks_now()
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "run_benchmarks_now"
+    # async_run_benchmark called ONCE per eligible agent (a1=Ollama, a2=EXISTING)
+    assert mock_bm.async_run_benchmark.call_count == 2
+    called_ids = {c.args[0] for c in mock_bm.async_run_benchmark.call_args_list}
+    assert "a1" in called_ids
+    assert "a2" in called_ids
+    assert "a3" not in called_ids  # LOCAL_HA must be skipped
+
+
+async def test_run_benchmarks_now_skips_web_search(hass: HomeAssistant) -> None:
+    """First visit skips WEB_SEARCH agents — benchmarks are meaningless for them."""
+    ws = _web_search_agent("ws1")
+    entry = _entry_with_agents(hass, [ws])
+    mock_bm = _make_mock_benchmarker()
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][entry.entry_id] = {DATA_BENCHMARKER: mock_bm}
+    handler = _make_handler(entry, hass)
+
+    await handler.async_step_run_benchmarks_now()
+
+    mock_bm.async_run_benchmark.assert_not_called()
+
+
+async def test_run_benchmarks_now_refresh_does_not_relaunch(hass: HomeAssistant) -> None:
+    """Submitting the form (user_input is not None) must NOT fire new benchmark tasks."""
+    entry = _entry_with_agents(hass, [_ollama_agent()])
+    mock_bm = _make_mock_benchmarker()
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][entry.entry_id] = {DATA_BENCHMARKER: mock_bm}
+    handler = _make_handler(entry, hass)
+
+    result = await handler.async_step_run_benchmarks_now({"back_to_menu": False})
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "run_benchmarks_now"
+    mock_bm.async_run_benchmark.assert_not_called()
+
+
+async def test_run_benchmarks_now_back_to_menu(hass: HomeAssistant) -> None:
+    """Submitting with back_to_menu=True returns to the init menu."""
+    entry = _entry_with_agents(hass, [])
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][entry.entry_id] = {DATA_BENCHMARKER: _make_mock_benchmarker()}
+    handler = _make_handler(entry, hass)
+
+    result = await handler.async_step_run_benchmarks_now({"back_to_menu": True})
+
+    assert result["type"] == FlowResultType.MENU
+    assert result["step_id"] == "init"
+
+
+async def test_run_benchmarks_now_no_benchmarker(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """When DATA_BENCHMARKER is absent the step still returns a form gracefully."""
+    mock_config_entry.add_to_hass(hass)
+    handler = _make_handler(mock_config_entry, hass)
+
+    # No benchmarker in hass.data at all
+    result = await handler.async_step_run_benchmarks_now()
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "run_benchmarks_now"
+    placeholders = result.get("description_placeholders", {})
+    assert "status_table" in placeholders
+    assert "unavailable" in placeholders["status_table"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests — _build_benchmark_status_table unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_build_status_table_none_benchmarker() -> None:
+    """None benchmarker returns the 'unavailable' fallback string."""
+    table = NeuralBridgeOptionsFlowHandler._build_benchmark_status_table(None, [])
+    assert "unavailable" in table.lower()
+
+
+def test_build_status_table_empty_agents() -> None:
+    """Empty agent list returns the 'no agents' fallback string."""
+    mock_bm = _make_mock_benchmarker()
+    table = NeuralBridgeOptionsFlowHandler._build_benchmark_status_table(mock_bm, [])
+    assert "no agents" in table.lower()
+
+
+def test_build_status_table_complete_profile() -> None:
+    """A COMPLETE profile shows ✅, score, and latency."""
+    agent = _ollama_agent("a1")
+
+    profile = MagicMock(spec=BenchmarkProfile)
+    profile.status = BenchmarkStatus.COMPLETE
+    profile.capability_score = 18
+    profile.median_latency_ms = 450.5
+
+    mock_bm = _make_mock_benchmarker(profile=profile)
+    table = NeuralBridgeOptionsFlowHandler._build_benchmark_status_table(mock_bm, [agent])
+
+    assert "✅" in table
+    assert "Complete" in table
+    assert "18/27" in table
+    assert "450 ms" in table
+
+
+def test_build_status_table_running_profile() -> None:
+    """A RUNNING profile shows ⚙️ and dashes (no score/latency yet)."""
+    agent = _ollama_agent("a1")
+
+    profile = MagicMock(spec=BenchmarkProfile)
+    profile.status = BenchmarkStatus.RUNNING
+    profile.capability_score = None
+    profile.median_latency_ms = None
+
+    mock_bm = _make_mock_benchmarker(profile=profile)
+    table = NeuralBridgeOptionsFlowHandler._build_benchmark_status_table(mock_bm, [agent])
+
+    assert "⚙" in table
+    assert "Running" in table
+    # No numeric score should appear
+    assert "/27" not in table
+
+
+def test_build_status_table_skippable_agents() -> None:
+    """LOCAL_HA and WEB_SEARCH agents always show the ⏭️ skipped row."""
+    local = _local_agent("l1")
+    ws = _web_search_agent("ws1")
+    mock_bm = _make_mock_benchmarker()
+
+    table = NeuralBridgeOptionsFlowHandler._build_benchmark_status_table(mock_bm, [local, ws])
+
+    assert table.count("⏭") == 2
+    mock_bm.get_profile.assert_not_called()
+
+
+def test_build_status_table_failed_profile() -> None:
+    """A FAILED profile shows ❌ and no score."""
+    agent = _ollama_agent("a1")
+
+    profile = MagicMock(spec=BenchmarkProfile)
+    profile.status = BenchmarkStatus.FAILED
+    profile.capability_score = None
+    profile.median_latency_ms = None
+
+    mock_bm = _make_mock_benchmarker(profile=profile)
+    table = NeuralBridgeOptionsFlowHandler._build_benchmark_status_table(mock_bm, [agent])
+
+    assert "❌" in table
+    assert "Failed" in table

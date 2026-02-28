@@ -90,6 +90,12 @@ router_fallbacks:
   skip_routing: "Skip routing (try all agents in priority order)"
   block: "Block the request"
 
+# ── Router failover plan selector labels ───────────────────────────────────────
+router_failover_modes:
+  primary_only: "Solo primario"
+  backup: "Primario + respaldo automático"
+  priority_order: "Orden de prioridad (todos los enrutadores)"
+
 # ── Routing strategy selector labels ──────────────────────────────────────────
 routing_strategies:
   default: "Predeterminado (usar clasificación de benchmark)"

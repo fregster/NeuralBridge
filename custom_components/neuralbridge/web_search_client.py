@@ -1,21 +1,23 @@
 """Web search client for NeuralBridge.
 
 Provides a generic provider interface for web search, with Brave Search as the
-first concrete implementation.  Additional providers (SearXNG, Bing, Google
-Custom Search, etc.) can be added by implementing the ``WebSearchProvider``
-protocol and registering the provider key in ``SEARCH_PROVIDER_MAP``.
+first concrete implementation.  Additional providers can be added by implementing
+the :class:`WebSearchProvider` protocol and registering the provider key in
+:data:`SEARCH_PROVIDER_MAP`.
+
+Provider implementations live in the :mod:`providers` sub-package:
+
+* :mod:`providers.brave_search` — Brave Web Search API
+* :mod:`providers.brave_answers` — Brave Answers API (direct Q&A)
+* :mod:`providers.brave_combined` — Combined Brave provider (Answers + Search fallback)
 
 Security note: API keys must NEVER be logged at any level.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
-
-import aiohttp
+from typing import Any
 
 from .const import (
     CONF_SEARCH_ANSWERS_API_KEY,
@@ -30,379 +32,26 @@ from .const import (
     SEARCH_PROVIDER_BRAVE_ANSWERS,
     SEARCH_PROVIDER_BRAVE_COMBINED,
 )
+from .providers import SearchResult as SearchResult  # noqa: PLC0414, TC001
+from .providers import WebSearchProvider as WebSearchProvider  # noqa: PLC0414, TC001
+from .providers.brave_answers import BraveAnswersProvider as BraveAnswersProvider  # noqa: PLC0414
+from .providers.brave_answers import (
+    _parse_brave_answers_response as _parse_brave_answers_response,  # noqa: PLC0414
+)
+from .providers.brave_combined import (
+    BraveAnswersCombinedProvider as BraveAnswersCombinedProvider,  # noqa: PLC0414
+)
+from .providers.brave_search import BraveSearchProvider as BraveSearchProvider  # noqa: PLC0414
+from .providers.brave_search import _parse_brave_response as _parse_brave_response  # noqa: PLC0414
 
 _LOGGER = logging.getLogger(__name__)
-_HTTP_OK = 200
 
 # Maximum characters in the formatted summary returned to the user.
 _MAX_SUMMARY_LEN = 2000
 
-
-@dataclass(frozen=True)
-class SearchResult:
-    """A single web search result.
-
-    Attributes:
-        title:   Page title.
-        url:     Landing page URL.
-        snippet: Short description snippet.
-    """
-
-    title: str
-    url: str
-    snippet: str
-
-
-@runtime_checkable
-class WebSearchProvider(Protocol):
-    """Protocol all search providers must satisfy."""
-
-    async def search(self, query: str, count: int = 5) -> list[SearchResult]:
-        """Execute a web search and return structured results.
-
-        Args:
-            query: The search query string.
-            count: Maximum number of results to return.
-
-        Returns:
-            List of SearchResult objects (may be empty on failure).
-        """
-        ...  # pragma: no cover
-
-
-class BraveSearchProvider:
-    """Brave Search API provider.
-
-    Uses the Brave Web Search API endpoint::
-
-        GET https://api.search.brave.com/res/v1/web/search
-
-    The API key is passed via the ``X-Subscription-Token`` header and is
-    never written to any log.
-
-    Docs: https://api.search.brave.com/app/documentation/web-search/get-started
-    """
-
-    _BASE_URL = "https://api.search.brave.com/res/v1/web/search"
-
-    def __init__(self, api_key: str, timeout: int = 10, max_concurrent: int = 2) -> None:
-        """Initialise the Brave provider.
-
-        Args:
-            api_key: Brave subscription token (never logged).
-            timeout: HTTP request timeout in seconds.
-            max_concurrent: Maximum number of parallel HTTP requests.
-        """
-        self._api_key = api_key
-        self._timeout = timeout
-        self._session: aiohttp.ClientSession | None = None
-        self._semaphore = asyncio.Semaphore(max_concurrent)
-
-    def _get_session(self) -> aiohttp.ClientSession:
-        """Return the shared session, creating it lazily if needed.
-
-        The session carries a ``User-Agent`` header so NeuralBridge traffic
-        is identifiable in Brave's access logs.
-        """
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                headers={"User-Agent": "NeuralBridge/1.0"},
-            )
-        return self._session
-
-    async def search(self, query: str, count: int = 5) -> list[SearchResult]:
-        """Query the Brave Web Search API.
-
-        Args:
-            query: The search query string.
-            count: Number of results to request (clamped to 1-20).
-
-        Returns:
-            List of SearchResult objects.  Returns an empty list on any error
-            so callers can handle gracefully without exception propagation.
-        """
-        count = max(1, min(20, count))
-        params: dict[str, Any] = {
-            "q": query,
-            "count": count,
-            "text_decorations": "false",
-            "search_lang": "en",
-        }
-        headers = {
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip",
-            "X-Subscription-Token": self._api_key,
-        }
-        async with self._semaphore:
-            try:
-                session = self._get_session()
-                async with session.get(
-                    self._BASE_URL,
-                    params=params,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=self._timeout),
-                ) as response:
-                    if response.status != _HTTP_OK:
-                        _LOGGER.warning(
-                            "Brave Search returned HTTP %d — check API key and quota",
-                            response.status,
-                        )
-                        return []
-                    data = await response.json()
-            except aiohttp.ClientError as err:
-                _LOGGER.error("Brave Search request failed: %s", err)
-                return []
-            except Exception as err:
-                _LOGGER.error("Unexpected error during Brave Search: %s", err)
-                return []
-
-        return _parse_brave_response(data)
-
-    async def close(self) -> None:
-        """Close the underlying HTTP session."""
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
-        self._session = None
-
-
-def _parse_brave_response(data: dict[str, Any]) -> list[SearchResult]:
-    """Extract SearchResult objects from a Brave API JSON response.
-
-    Parses both ``web.results`` and ``news.results`` blocks because the Brave
-    Web Search API populates different blocks depending on the query type.
-    News-heavy queries (e.g. "top headlines today", "latest news") typically
-    return results in the ``news`` block while leaving ``web`` sparse or empty.
-    Omitting the ``news`` block causes those queries to silently return no
-    results, producing the fallback error message instead of an answer.
-
-    Args:
-        data: The parsed JSON dict from the Brave API.
-
-    Returns:
-        List of SearchResult dataclasses (web results first, then news results).
-    """
-    results: list[SearchResult] = []
-
-    for block_key in ("web", "news"):
-        block = data.get(block_key, {})
-        if not isinstance(block, dict):
-            continue
-        raw: Any = block.get("results", [])
-        items: list[Any] = raw if isinstance(raw, list) else []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            title = str(item.get("title", "")).strip()
-            url = str(item.get("url", "")).strip()
-            # Brave may supply the snippet under "description" or "extra_snippets"
-            snippet = str(item.get("description", "")).strip()
-            if not snippet:
-                extras = item.get("extra_snippets", [])
-                snippet = str(extras[0]).strip() if isinstance(extras, list) and extras else ""
-            if title or url:
-                results.append(SearchResult(title=title, url=url, snippet=snippet))
-
-    return results
-
-
-class BraveAnswersProvider:
-    """Brave Answers API provider.
-
-    Uses the Brave Answers API endpoint::
-
-        POST https://api.search.brave.com/res/v1/answer
-
-    Requires a **separate** Brave Answers subscription key (distinct from the
-    Brave Search subscription).  The key is passed via ``X-Subscription-Token``
-    and is never written to any log.
-
-    The API returns a direct natural-language answer suitable for speech output.
-    An empty list is returned when the API cannot produce a direct answer, so
-    callers can fall back to a conventional search without raising exceptions.
-
-    Docs: https://api-dashboard.search.brave.com/app/documentation/answer/get-started
-    """
-
-    _BASE_URL = "https://api.search.brave.com/res/v1/answer"
-
-    def __init__(self, api_key: str, timeout: int = 10, max_concurrent: int = 2) -> None:
-        """Initialise the Brave Answers provider.
-
-        Args:
-            api_key: Brave Answers subscription token (never logged).
-            timeout: HTTP request timeout in seconds.
-            max_concurrent: Maximum number of parallel HTTP requests.
-        """
-        self._api_key = api_key
-        self._timeout = timeout
-        self._session: aiohttp.ClientSession | None = None
-        self._semaphore = asyncio.Semaphore(max_concurrent)
-
-    def _get_session(self) -> aiohttp.ClientSession:
-        """Return the shared session, creating it lazily if needed."""
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                headers={"User-Agent": "NeuralBridge/1.0"},
-            )
-        return self._session
-
-    async def search(self, query: str, _count: int = 1) -> list[SearchResult]:
-        """Query the Brave Answers API for a direct answer.
-
-        ``_count`` is accepted for protocol compatibility but is ignored — the
-        Answers API always returns a single answer text.
-
-        Args:
-            query: The question to answer.
-            _count: Ignored; present for ``WebSearchProvider`` protocol compliance.
-
-        Returns:
-            A list containing one ``SearchResult`` whose ``snippet`` is the
-            direct answer, or an empty list if no answer was returned.
-        """
-        params: dict[str, Any] = {"q": query}
-        headers = {
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip",
-            "X-Subscription-Token": self._api_key,
-        }
-        async with self._semaphore:
-            try:
-                session = self._get_session()
-                async with session.get(
-                    self._BASE_URL,
-                    params=params,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=self._timeout),
-                ) as response:
-                    if response.status != _HTTP_OK:
-                        _LOGGER.warning(
-                            "Brave Answers returned HTTP %d — check API key and quota",
-                            response.status,
-                        )
-                        return []
-                    data = await response.json()
-            except aiohttp.ClientError as err:
-                _LOGGER.error("Brave Answers request failed: %s", err)
-                return []
-            except Exception as err:
-                _LOGGER.error("Unexpected error during Brave Answers: %s", err)
-                return []
-
-        return _parse_brave_answers_response(data)
-
-    async def close(self) -> None:
-        """Close the underlying HTTP session."""
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
-        self._session = None
-
-
-class BraveAnswersCombinedProvider:
-    """Combined Brave provider: tries Answers first, falls back to Search.
-
-    Requires two separate Brave subscription keys:
-    - ``answers_api_key``: Brave Answers subscription token.
-    - ``search_api_key``: Brave Search subscription token.
-
-    Workflow::
-
-        1. Query BraveAnswersProvider with the Answers key.
-        2. If a direct answer is returned → return it (fast path).
-        3. Otherwise query BraveSearchProvider with the Search key → return snippets.
-
-    This delivers concise, speakable answers for factual Q&A while gracefully
-    handling queries where no direct answer is available.
-    """
-
-    def __init__(
-        self,
-        answers_api_key: str,
-        search_api_key: str,
-        timeout: int = 10,
-    ) -> None:
-        """Initialise the combined Brave provider.
-
-        Args:
-            answers_api_key: Brave Answers subscription token (never logged).
-            search_api_key: Brave Search subscription token (never logged).
-            timeout: HTTP request timeout in seconds (shared by both sub-providers).
-        """
-        self._answers = BraveAnswersProvider(api_key=answers_api_key, timeout=timeout)
-        self._search = BraveSearchProvider(api_key=search_api_key, timeout=timeout)
-
-    async def search(self, query: str, count: int = 5) -> list[SearchResult]:
-        """Return a direct answer if available, otherwise fall back to search results.
-
-        Args:
-            query: The user's question or search string.
-            count: Number of search results to request if the Answers fast-path misses.
-
-        Returns:
-            A single-item list with the direct answer, or a full search-result
-            list from the Search API, or an empty list if both fail.
-        """
-        answer_results = await self._answers.search(query)
-        if answer_results:
-            return answer_results
-        return await self._search.search(query, count)
-
-    async def close(self) -> None:
-        """Close both sub-provider sessions."""
-        await self._answers.close()
-        await self._search.close()
-
-
-def _parse_brave_answers_response(data: dict[str, Any]) -> list[SearchResult]:
-    """Extract a direct-answer SearchResult from a Brave Answers API JSON response.
-
-    Handles two possible response shapes:
-
-    * OpenAI-style chat completion: ``choices[0].message.content``
-    * Brave-native: ``answer.text``
-
-    Returns an empty list when neither shape yields usable text, so callers can
-    fall back to conventional search without raising exceptions.
-
-    Args:
-        data: The parsed JSON dict from the Brave Answers API.
-
-    Returns:
-        A list containing one ``SearchResult`` (title and url are empty strings;
-        the answer text is in ``snippet``), or an empty list.
-    """
-    # OpenAI-compatible shape
-    choices = data.get("choices")
-    if isinstance(choices, list) and choices:
-        first = choices[0]
-        if isinstance(first, dict):
-            message = first.get("message", {})
-            if isinstance(message, dict):
-                content = str(message.get("content", "")).strip()
-                if content:
-                    return [SearchResult(title="", url="", snippet=content)]
-
-    # Brave-native shape
-    answer_block = data.get("answer")
-    if isinstance(answer_block, dict):
-        text = str(answer_block.get("text", "")).strip()
-        if text:
-            return [SearchResult(title="", url="", snippet=text)]
-
-    # Top-level "answer" string (some API versions)
-    top_answer = data.get("answer")
-    if isinstance(top_answer, str):
-        text = top_answer.strip()
-        if text:
-            return [SearchResult(title="", url="", snippet=text)]
-
-    return []
-
-
 # ---------------------------------------------------------------------------
 # Provider registry — extend this dict to add new providers.
 # ---------------------------------------------------------------------------
-
 # Note: BraveAnswersCombinedProvider is NOT in this map because it requires two
 # keys and a different constructor.  WebSearchClient.__init__ handles it explicitly.
 SEARCH_PROVIDER_MAP: dict[str, type[BraveSearchProvider] | type[BraveAnswersProvider]] = {
@@ -484,8 +133,7 @@ class WebSearchClient:
     async def close(self) -> None:
         """Close the underlying provider session(s).
 
-        Safe to call even when the provider does not expose ``close``
-        (e.g. third-party providers added via the ``WebSearchProvider`` protocol).
+        Safe to call even when the provider does not expose ``close``.
         """
         if hasattr(self._provider, "close"):
             await self._provider.close()
@@ -494,13 +142,9 @@ class WebSearchClient:
 def _format_results(results: list[SearchResult], max_snippet_len: int) -> str:
     """Render a list of SearchResults as a concise plain-text summary.
 
-    The output is designed to be read aloud by a voice assistant, so URLs are
-    omitted from the speech text (they are visual-only noise in voice contexts).
-
     **Direct-answer shortcut:** when the list contains exactly one result whose
     URL is empty (the signature of a ``BraveAnswersProvider`` result), the
-    snippet is returned as-is without the "Here is what I found:" preamble,
-    for more natural TTS output.
+    snippet is returned as-is without the preamble, for more natural TTS output.
 
     Args:
         results: Non-empty list of SearchResult objects.
@@ -509,8 +153,6 @@ def _format_results(results: list[SearchResult], max_snippet_len: int) -> str:
     Returns:
         Multi-line plain-text string, truncated to ``_MAX_SUMMARY_LEN``.
     """
-    # Direct-answer path — single result with no URL means it came from the
-    # Answers API.  Return the text directly without a numbered-list preamble.
     if len(results) == 1 and not results[0].url:
         snippet = results[0].snippet[:max_snippet_len]
         if len(results[0].snippet) > max_snippet_len:

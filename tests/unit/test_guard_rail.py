@@ -124,7 +124,7 @@ class TestGuardRailChecker:
         assert input_result.confidence == output_result.confidence
         assert input_result.category == output_result.category
 
-    @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
+    @patch("custom_components.neuralbridge.ai_safety_checker.OllamaClient")
     async def test_check_with_ai_safe(self, mock_client_class):
         """Test AI-based checking with safe content."""
         # Mock Ollama client
@@ -153,7 +153,7 @@ class TestGuardRailChecker:
         assert result.confidence >= 0.5
         mock_client.generate.assert_called_once()
 
-    @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
+    @patch("custom_components.neuralbridge.ai_safety_checker.OllamaClient")
     async def test_check_with_ai_unsafe(self, mock_client_class):
         """Test AI-based checking with unsafe content."""
         # Mock Ollama client
@@ -184,7 +184,7 @@ class TestGuardRailChecker:
         # _parse_ai_response uppercases the response; compare case-insensitively.
         assert "harmful content" in result.reason.lower()
 
-    @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
+    @patch("custom_components.neuralbridge.ai_safety_checker.OllamaClient")
     async def test_check_with_ai_timeout(self, mock_client_class):
         """Test AI-based checking with timeout."""
         # Mock Ollama client to timeout
@@ -250,7 +250,7 @@ class TestGuardRailChecker:
         assert result.is_safe is True
         assert result.confidence >= 0.5
 
-    @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
+    @patch("custom_components.neuralbridge.ai_safety_checker.OllamaClient")
     async def test_check_with_ai_empty_response_returns_safe(self, mock_client_class):
         """Test AI-based checking when generate() returns empty string → safe."""
         mock_client = AsyncMock()
@@ -275,7 +275,7 @@ class TestGuardRailChecker:
         assert result.is_safe is True
         assert result.confidence >= 0.5
 
-    @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
+    @patch("custom_components.neuralbridge.ai_safety_checker.OllamaClient")
     async def test_check_with_ai_generate_returns_none_is_safe(self, mock_client_class):
         """Test AI-based checking when generate() returns None → fails open (safe)."""
         mock_client = AsyncMock()
@@ -300,7 +300,7 @@ class TestGuardRailChecker:
         assert result.is_safe is True
         assert result.confidence >= 0.5
 
-    @patch("custom_components.neuralbridge.guard_rail.OllamaClient")
+    @patch("custom_components.neuralbridge.ai_safety_checker.OllamaClient")
     async def test_check_with_ai_generic_exception_returns_safe(self, mock_client_class):
         """Test AI-based checking when generate() raises a generic exception → safe."""
         mock_client = AsyncMock()
@@ -1029,3 +1029,20 @@ class TestHighStakesCache:
         # Trigger cleanup
         await cache._cleanup()
         assert len(cache._cache) <= 2
+
+
+class TestGuardRailCheckerSafetyPromptProxy:
+    """Tests for the _create_safety_prompt proxy on GuardRailChecker."""
+
+    def test_create_safety_prompt_delegates_to_ai_checker(self) -> None:
+        """_create_safety_prompt proxies through to AISafetyChecker."""
+        checker = GuardRailChecker()
+        with patch.object(
+            checker._ai_checker,
+            "_create_safety_prompt",
+            return_value="generated prompt",
+        ) as mock_method:
+            result = checker._create_safety_prompt("evaluate this text")
+
+        mock_method.assert_called_once_with("evaluate this text")
+        assert result == "generated prompt"

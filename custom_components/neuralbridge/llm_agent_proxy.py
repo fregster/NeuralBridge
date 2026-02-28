@@ -37,7 +37,7 @@ Usage inside :class:`NeuralBridgeAgent`::
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from homeassistant.components.conversation import ConversationInput, ConversationResult
 from homeassistant.components.conversation.const import DOMAIN as CONVERSATION_DOMAIN
@@ -75,6 +75,45 @@ if TYPE_CHECKING:
     from .session_memory import SessionMemory
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Interface contract
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class LLMAgentProxyProtocol(Protocol):
+    """Interface contract for LLM agent proxy objects.
+
+    Concrete implementations route prompt-enriched user input to the appropriate
+    backend (INTEGRATED HA conversation entity or direct Ollama HTTP).
+    """
+
+    async def process(
+        self,
+        agent_config: dict[str, Any],
+        user_input: ConversationInput,
+        router_decision: Any = None,
+    ) -> ConversationResult | None:
+        """Enrich the query and dispatch to the appropriate backend."""
+        ...
+
+    def consume_local_ha_targets(self, conv_id: str) -> list[str]:
+        """Pop and return entity IDs captured from the last INTEGRATED call."""
+        ...
+
+    def get_device_area(self, device_id: str | None) -> str | None:
+        """Return the friendly area name for a device, or None if unavailable."""
+        ...
+
+    def build_pref_hint(
+        self,
+        query_text: str,
+        for_router: bool = False,
+    ) -> str | None:
+        """Build a compact preference hint to prepend to agent / router input."""
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -240,8 +279,6 @@ class LLMAgentProxy:
         """
         return self._prompt_builder.build_pref_hint(query_text, for_router)
 
-    # ── Shared enrichment helpers ──────────────────────────────────────────
-
     def _render_ha_context(self, prompt: str) -> str:
         """Substitute ``{ha_*}`` tokens with live HA config values.
 
@@ -254,55 +291,6 @@ class LLMAgentProxy:
             Rendered prompt string.
         """
         return self._prompt_builder.render_ha_context(prompt)
-
-    def _build_ollama_system_prompt(
-        self,
-        agent_config: dict[str, Any],
-        user_input: ConversationInput,
-    ) -> tuple[str, bool]:
-        """Build the rendered system prompt for the Ollama backend.
-
-        Delegates to :class:`PromptBuilder`.
-
-        Args:
-            agent_config: The Ollama agent's configuration dict.
-            user_input: The user's conversation input.
-
-        Returns:
-            ``(system_prompt, has_full_sensor_injection)`` tuple.
-        """
-        return self._prompt_builder.build_system_prompt(agent_config, user_input)
-
-    def _build_enriched_user_text(
-        self,
-        agent_config: dict[str, Any],
-        user_input: ConversationInput,
-        router_decision: Any = None,
-        *,
-        include_area: bool = False,
-        verbosity_as_prefix: bool = False,
-    ) -> str:
-        """Build the enriched user-facing text block.
-
-        Delegates to :class:`PromptBuilder`.
-
-        Args:
-            agent_config: The agent's configuration dict.
-            user_input: The user's conversation input.
-            router_decision: Optional router decision for targeted sensor injection.
-            include_area: When ``True`` prepend the device area prefix.
-            verbosity_as_prefix: When ``True`` prepend a brief/verbose hint.
-
-        Returns:
-            The fully enriched user text string.
-        """
-        return self._prompt_builder.build_user_text(
-            agent_config,
-            user_input,
-            router_decision,
-            include_area=include_area,
-            verbosity_as_prefix=verbosity_as_prefix,
-        )
 
     def _create_result(
         self, response_text: str, conversation_id: str | None = None
@@ -356,7 +344,7 @@ class LLMAgentProxy:
             )
             return None
 
-        system_prompt, has_full_sensor_injection = self._build_ollama_system_prompt(
+        system_prompt, has_full_sensor_injection = self._prompt_builder.build_system_prompt(
             agent_config, user_input
         )
 
@@ -381,7 +369,7 @@ class LLMAgentProxy:
             pref_hint = self.build_pref_hint(base_text, for_router=False)
             user_text = f"{pref_hint}\n\n{base_text}" if pref_hint else base_text
         else:
-            user_text = self._build_enriched_user_text(
+            user_text = self._prompt_builder.build_user_text(
                 agent_config,
                 user_input,
                 router_decision,
@@ -455,7 +443,7 @@ class LLMAgentProxy:
         config = self._get_config()
         verbosity_cfg: str = config.get(CONF_RESPONSE_VERBOSITY, DEFAULT_RESPONSE_VERBOSITY)
 
-        query_text = self._build_enriched_user_text(
+        query_text = self._prompt_builder.build_user_text(
             agent_config,
             user_input,
             router_decision,

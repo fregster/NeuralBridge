@@ -98,6 +98,32 @@ class OllamaClient:
             )
         return self._session
 
+    async def _get_json(self, path: str) -> dict[str, Any] | None:
+        """Perform a GET request to *path* and return the parsed JSON body.
+
+        Shares the session and timeout with other API methods.
+
+        Args:
+            path: URL path relative to :attr:`base_url`, e.g. ``"/api/ps"``.
+
+        Returns:
+            Parsed JSON dict on HTTP 200, otherwise ``None``.
+        """
+        try:
+            session = self._get_session()
+            async with asyncio.timeout(self.timeout):
+                async with session.get(f"{self.base_url}{path}") as response:
+                    if response.status == _HTTP_OK:
+                        return await response.json()  # type: ignore[no-any-return]
+                    _LOGGER.error("Ollama %s returned status %d", path, response.status)
+                    return None
+        except aiohttp.ClientError as err:
+            _LOGGER.error("Error calling Ollama %s: %s", path, err)
+            return None
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.exception("Unexpected error calling Ollama %s: %s", path, err)
+            return None
+
     async def generate(
         self, prompt: str, context: dict[str, Any] | None = None
     ) -> OllamaResponse | None:
@@ -244,6 +270,41 @@ class OllamaClient:
         except Exception as err:  # pylint: disable=broad-except
             _LOGGER.exception("Unexpected error calling Ollama /api/show: %s", err)
             return None
+
+    async def async_get_running_models(self) -> list[dict[str, Any]]:
+        """Fetch currently loaded models from the Ollama ``/api/ps`` endpoint.
+
+        Returns the list of model dicts reported by Ollama's process-status
+        endpoint.  Each dict typically contains ``name``, ``size``, and
+        ``size_vram`` fields.  Used as a pre-flight check before benchmarking
+        to detect unexpected resource contention on shared hosts.
+
+        Returns:
+            List of model metadata dicts; empty list on any error or when no
+            models are currently loaded.
+        """
+        data = await self._get_json("/api/ps")
+        if data is None:
+            return []
+        models = data.get("models")
+        return models if isinstance(models, list) else []
+
+    async def async_get_version(self) -> str | None:
+        """Fetch the Ollama server version from the ``/api/version`` endpoint.
+
+        Used by :class:`~.benchmark_host_classifier.BenchmarkHostClassifier`
+        to help fingerprint distinct Ollama server instances (two URLs that
+        return the same version string from the same resolved host are almost
+        certainly the same server).
+
+        Returns:
+            Version string such as ``"0.5.1"``, or ``None`` on any error.
+        """
+        data = await self._get_json("/api/version")
+        if data is None:
+            return None
+        version = data.get("version")
+        return str(version) if version is not None else None
 
     async def close(self) -> None:
         """Close the client session."""

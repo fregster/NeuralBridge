@@ -21,6 +21,10 @@ This document provides a quick reference for NeuralBridge coding standards. For 
 | Function Length | 20-30 lines | 50 lines | manual review |
 | Complexity | 10 | 15 | ruff (C90) |
 | Nesting Depth | 2-3 levels | 4 levels | manual review |
+| Class File Size | 200-300 lines | 500 lines (soft) | manual review |
+| Public Methods per Class | 5-10 | 15 | manual review |
+| Instance Variables per Class | 3-7 | 10 | manual review |
+| Concrete classes per file | 1 | 2 | manual review |
 
 ### Security Rules (NON-NEGOTIABLE)
 
@@ -94,6 +98,92 @@ def function_name(param1: str, param2: int) -> bool:
     """
 ```
 
+## Class Design & Pluggable Architecture
+
+### Preventing God Classes
+
+A *god class* accumulates too many responsibilities into a single class, making it difficult to test, extend, and maintain. NeuralBridge enforces class size and design rules to prevent this anti-pattern.
+
+**Soft limit: 500 lines per class file.**
+
+Exceeding 500 lines is a design smell. It is not a hard block, but **MUST** trigger a design review. Any contribution that pushes an existing file beyond 500 lines requires explicit justification in the PR description. The goal is for most class files to remain well under 300 lines.
+
+| Signal | Recommended Action |
+|--------|--------------------|
+| File approaching 400 lines | Plan a split before adding more logic |
+| File over 500 lines | Refactor is required before the next feature addition |
+| Class has > 10 instance variables | Introduce value objects or sub-components |
+| Class has > 15 public methods | Extract a collaborator or strategy |
+| Class responsibility requires > 1 sentence to describe | Split into focused classes |
+
+### Framework-First Design
+
+All **new classes** MUST follow the *Framework-First* pattern: define a lightweight interface or abstract contract first, then provide one or more concrete implementations. This keeps the architecture pluggable and each class focused.
+
+**The three steps:**
+
+1. **Define the interface (the framework)** — Write a `Protocol` or abstract base class (`ABC`) that captures the minimal contract. No implementation logic here — only method signatures with docstrings.
+2. **Provide a default implementation (the extension)** — Create a concrete class that fulfils the interface for the common case. Keep it focused on a single transport, backend, or use-case.
+3. **Register or inject, never hard-wire** — Callers depend on the interface, not the concrete class. New backends are added by implementing the interface, not by modifying existing classes.
+
+```python
+# Step 1 — Define the protocol (the "framework")
+class SearchProvider(Protocol):
+    """Minimal interface for any search backend."""
+
+    async def search(self, query: str, max_results: int) -> list[SearchResult]:
+        """Execute a search and return ranked results."""
+        ...
+
+
+# Step 2 — Concrete implementation (the "extension")
+class BraveSearchProvider:
+    """Brave Search implementation of SearchProvider."""
+
+    def __init__(self, api_key: str, session: aiohttp.ClientSession) -> None:
+        """Initialise with credentials and a shared HTTP session."""
+        self._api_key = api_key
+        self._session = session
+
+    async def search(self, query: str, max_results: int) -> list[SearchResult]:
+        """Execute a Brave Search API query."""
+        ...
+
+
+# Step 3 — Test stub is trivial because the interface is minimal
+class StubSearchProvider:
+    """In-memory stub for unit tests."""
+
+    async def search(self, query: str, max_results: int) -> list[SearchResult]:
+        """Return a fixed stub result."""
+        return [SearchResult(title="stub", url="http://example.com")]
+```
+
+### Strategies for Splitting a Class That Is Too Large
+
+When a class approaches the 500-line soft limit, apply one or more of these patterns **before** writing more code into it:
+
+| Strategy | When to Apply |
+|----------|---------------|
+| **Extract a collaborator** | A group of methods share private state unrelated to the class's primary role |
+| **Introduce a Strategy** | A conditional chain (`if agent_type == ...`) selects different algorithms |
+| **Separate I/O from logic** | Mix of HTTP/DB calls and business logic in the same class |
+| **Use composition** | The class inherits behaviour it could instead delegate to a held reference |
+| **Split by lifecycle** | Construction/config, runtime operation, and teardown can each be their own object |
+
+### Checklist for New Classes
+
+- [ ] A `Protocol` or `ABC` exists that defines the minimal interface
+- [ ] The new class file starts below 300 lines
+- [ ] The class satisfies the **Single Responsibility Principle** — it has exactly one reason to change
+- [ ] The class responsibility can be described in one sentence
+- [ ] The file contains **at most one primary concrete class** (small dataclasses, value objects, and private helpers are permitted alongside it)
+- [ ] If a `Protocol` and its sole concrete implementation share a file, a comment marks the intent to split the file when a second implementation is added
+- [ ] Concrete classes are injected (not instantiated) by callers where possible
+- [ ] A corresponding stub or fake exists in `tests/` for the interface
+
+---
+
 ## Pre-Commit Checklist
 
 Before EVERY commit:
@@ -108,6 +198,11 @@ Before EVERY commit:
 - [ ] Public functions documented
 - [ ] Proper error handling
 - [ ] Resource cleanup
+- [ ] No class file exceeds 500 lines without documented justification
+- [ ] New classes have a corresponding `Protocol` or `ABC` interface defined
+- [ ] New class responsibility can be described in a single sentence (Single Responsibility Principle)
+- [ ] Each new file contains at most one primary concrete class
+- [ ] If a `Protocol` and its implementation share a file, a comment documents the split intent
 
 ## Quick Commands
 

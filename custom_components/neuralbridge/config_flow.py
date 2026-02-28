@@ -15,6 +15,7 @@ from homeassistant.components.conversation import DOMAIN as CONVERSATION_DOMAIN
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
+from .agent_benchmark import BenchmarkStatus
 from .const import (
     AGENT_TYPE_INTEGRATED,
     AGENT_TYPE_LOCAL_HA,
@@ -28,6 +29,8 @@ from .const import (
     CONF_AGENT_NAME,
     CONF_AGENT_TYPE,
     CONF_AGENTS,
+    CONF_BENCHMARK_DEBUG_LOGGING,
+    CONF_BENCHMARK_INTER_PROBE_DELAY,
     CONF_BENCHMARK_WARM_UP_DELAY,
     CONF_DEFAULT_PROMPT,
     CONF_ENABLE_HOME_CONTROL,
@@ -55,6 +58,7 @@ from .const import (
     CONF_RESPONSE_CACHE_TTL,
     CONF_RETRY_BASE_DELAY,
     CONF_ROUTER_CUSTOM_PROMPT,
+    CONF_ROUTER_FAILOVER_MODE,
     CONF_ROUTER_FALLBACK,
     CONF_ROUTER_LOG_LEVEL,
     CONF_SEARCH_ANSWERS_API_KEY,
@@ -71,11 +75,14 @@ from .const import (
     CONF_STRATEGY_SMART_HOME_INTENT,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
+    DATA_BENCHMARKER,
     DATA_RESPONSE_CACHE,
     DEFAULT_AGENT_CACHE_ENABLED,
     DEFAULT_AGENT_ENABLED,
     DEFAULT_AGENT_MAX_COMPLEXITY,
     DEFAULT_AGENT_MIN_COMPLEXITY,
+    DEFAULT_BENCHMARK_DEBUG_LOGGING,
+    DEFAULT_BENCHMARK_INTER_PROBE_DELAY,
     DEFAULT_BENCHMARK_WARM_UP_DELAY,
     DEFAULT_DEFAULT_PROMPT,
     DEFAULT_ENABLE_HOME_CONTROL,
@@ -100,6 +107,7 @@ from .const import (
     DEFAULT_RESPONSE_CACHE_TTL,
     DEFAULT_RETRY_BASE_DELAY,
     DEFAULT_ROUTER_CUSTOM_PROMPT,
+    DEFAULT_ROUTER_FAILOVER_MODE,
     DEFAULT_ROUTER_FALLBACK,
     DEFAULT_ROUTER_LOG_LEVEL,
     DEFAULT_ROUTER_TIMEOUT,
@@ -121,6 +129,9 @@ from .const import (
     PRIORITY_MAX,
     PRIORITY_MIN_PROCESSING,
     PRIORITY_ROUTER,
+    ROUTER_FAILOVER_BACKUP,
+    ROUTER_FAILOVER_PRIMARY_ONLY,
+    ROUTER_FAILOVER_PRIORITY_ORDER,
     ROUTER_FALLBACK_BLOCK,
     ROUTER_FALLBACK_DEFAULT_COMPLEXITY,
     ROUTER_FALLBACK_SKIP_ROUTING,
@@ -141,6 +152,8 @@ from .languages_loader import get_string, list_available_languages
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigFlowResult
+
+    from .agent_benchmark import AgentBenchmarker
 
 _LOGGER = logging.getLogger(__name__)
 _HTTP_OK = 200
@@ -218,9 +231,123 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 "configure_high_stakes",
                 "advanced_settings",
                 "language_settings",
+                "run_benchmarks_now",
                 "done",
             ],
         )
+
+    # ── Benchmark live view ───────────────────────────────────────────────────
+
+    async def async_step_run_benchmarks_now(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Launch benchmarks for all eligible agents and show a live status view.
+
+        First visit (user_input=None): fires background benchmark tasks for every
+        Ollama / EXISTING agent immediately (no warm-up delay), then shows the
+        current profile status.
+
+        Subsequent visits (form submitted): re-reads profiles to refresh the
+        status display.  When *back_to_menu* is checked the flow returns to the
+        main menu.
+
+        Args:
+            user_input: Form submission data, or ``None`` on first visit.
+
+        Returns:
+            Form result with live status table in description_placeholders.
+        """
+        if user_input is not None and user_input.get("back_to_menu", False):
+            return await self.async_step_init()
+
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+        benchmarker: AgentBenchmarker | None = entry_data.get(DATA_BENCHMARKER)
+        agents: list[dict[str, Any]] = list(self.config_entry.data.get(CONF_AGENTS, []))
+        skippable = {AGENT_TYPE_LOCAL_HA, AGENT_TYPE_WEB_SEARCH}
+
+        # On first visit: fire immediate benchmark tasks (bypass warm-up delay)
+        if user_input is None and benchmarker is not None:
+            for agent_cfg in agents:
+                agent_id: str = agent_cfg.get("id", "")
+                agent_type: str = agent_cfg.get(CONF_AGENT_TYPE, "")
+                if not agent_id or agent_type in skippable:
+                    continue
+                benchmarker.cancel_pending(agent_id)
+                benchmarker.ensure_profile(agent_cfg)
+                self.hass.async_create_task(benchmarker.async_run_benchmark(agent_id, agent_cfg))
+
+        status_table = self._build_benchmark_status_table(benchmarker, agents)
+
+        return self.async_show_form(
+            step_id="run_benchmarks_now",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("back_to_menu", default=False): selector.BooleanSelector(),
+                }
+            ),
+            description_placeholders={"status_table": status_table},
+        )
+
+    @staticmethod
+    def _build_benchmark_status_table(
+        benchmarker: AgentBenchmarker | None,
+        agents: list[dict[str, Any]],
+    ) -> str:
+        """Build a markdown status table for the benchmark progress display.
+
+        Args:
+            benchmarker: The :class:`AgentBenchmarker` instance, or ``None``.
+            agents:       List of agent configuration dicts.
+
+        Returns:
+            A markdown table string suitable for use in ``description_placeholders``.
+        """
+        _status_icons: dict[BenchmarkStatus, str] = {
+            BenchmarkStatus.PENDING: "⏳",
+            BenchmarkStatus.SCHEDULED: "⏳",
+            BenchmarkStatus.RUNNING: "⚙️",
+            BenchmarkStatus.COMPLETE: "✅",
+            BenchmarkStatus.FAILED: "❌",
+            BenchmarkStatus.SKIPPED: "⏭️",
+        }
+
+        if benchmarker is None:
+            return "*Benchmark system unavailable.*"
+
+        rows: list[str] = []
+        for agent in agents:
+            agent_id: str = agent.get("id", "")
+            agent_name: str = agent.get(CONF_AGENT_NAME, "Unknown")
+            agent_type: str = agent.get(CONF_AGENT_TYPE, "")
+
+            if agent_type in (AGENT_TYPE_LOCAL_HA, AGENT_TYPE_WEB_SEARCH):
+                rows.append(f"| {agent_name} | ⏭️ Skipped | — | — |")
+                continue
+
+            profile = benchmarker.get_profile(agent_id)
+            if profile is None:
+                rows.append(f"| {agent_name} | ⏳ Pending | — | — |")
+                continue
+
+            icon = _status_icons.get(profile.status, "?")
+            status_label = profile.status.value.title()
+            score = (
+                f"{profile.capability_score}/27" if profile.capability_score is not None else "—"
+            )
+            latency = (
+                f"{int(profile.median_latency_ms)} ms"
+                if profile.median_latency_ms is not None
+                else "—"
+            )
+            rows.append(f"| {agent_name} | {icon} {status_label} | {score} | {latency} |")
+
+        if not rows:
+            return "*No agents configured.*"
+
+        header = (
+            "| Agent | Status | Score | p50 Latency |\n|-------|--------|-------|-------------|\n"
+        )
+        return header + "\n".join(rows)
 
     # ── Legacy migration ──────────────────────────────────────────────────────
 
@@ -364,6 +491,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_ROUTER_FALLBACK: user_input.get(
                         CONF_ROUTER_FALLBACK, DEFAULT_ROUTER_FALLBACK
                     ),
+                    CONF_ROUTER_FAILOVER_MODE: user_input.get(
+                        CONF_ROUTER_FAILOVER_MODE, DEFAULT_ROUTER_FAILOVER_MODE
+                    ),
                     # Dimension-aware routing strategies
                     CONF_STRATEGY_REASONING: user_input.get(
                         CONF_STRATEGY_REASONING, ROUTING_STRATEGY_DEFAULT
@@ -405,6 +535,9 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_ROUTER_CUSTOM_PROMPT, DEFAULT_ROUTER_CUSTOM_PROMPT
         )
         default_fallback = (existing or {}).get(CONF_ROUTER_FALLBACK, DEFAULT_ROUTER_FALLBACK)
+        default_failover_mode = (existing or {}).get(
+            CONF_ROUTER_FAILOVER_MODE, DEFAULT_ROUTER_FAILOVER_MODE
+        )
         default_strategy_reasoning = (existing or {}).get(
             CONF_STRATEGY_REASONING, ROUTING_STRATEGY_DEFAULT
         )
@@ -458,6 +591,25 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             {
                 "value": ROUTER_FALLBACK_BLOCK,
                 "label": self._s("router_fallbacks", "block") or "Block the request",
+            },
+        ]
+        failover_mode_options: list[selector.SelectOptionDict] = [
+            {
+                "value": ROUTER_FAILOVER_PRIMARY_ONLY,
+                "label": (self._s("router_failover_modes", "primary_only") or "Primary only"),
+            },
+            {
+                "value": ROUTER_FAILOVER_BACKUP,
+                "label": (
+                    self._s("router_failover_modes", "backup") or "Primary + automatic backup"
+                ),
+            },
+            {
+                "value": ROUTER_FAILOVER_PRIORITY_ORDER,
+                "label": (
+                    self._s("router_failover_modes", "priority_order")
+                    or "Priority order (all routers)"
+                ),
             },
         ]
 
@@ -524,6 +676,14 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=fallback_options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_ROUTER_FAILOVER_MODE, default=default_failover_mode
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=failover_mode_options,
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
@@ -1480,7 +1640,13 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Manage existing agents — select an agent to act on."""
-        agents = list(self.config_entry.data.get(CONF_AGENTS, []))
+        all_agents = list(self.config_entry.data.get(CONF_AGENTS, []))
+        # Routing agents have a dedicated UI — exclude them from this list.
+        agents = [
+            a
+            for a in all_agents
+            if not a.get(CONF_IS_ROUTER, False) and a.get(CONF_PRIORITY) != PRIORITY_ROUTER
+        ]
 
         if not agents:
             return self.async_show_form(
@@ -2001,6 +2167,14 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
             benchmark_warm_up_delay: int = int(
                 user_input.get(CONF_BENCHMARK_WARM_UP_DELAY, DEFAULT_BENCHMARK_WARM_UP_DELAY)
             )
+            benchmark_inter_probe_delay: int = int(
+                user_input.get(
+                    CONF_BENCHMARK_INTER_PROBE_DELAY, DEFAULT_BENCHMARK_INTER_PROBE_DELAY
+                )
+            )
+            benchmark_debug_logging: bool = user_input.get(
+                CONF_BENCHMARK_DEBUG_LOGGING, DEFAULT_BENCHMARK_DEBUG_LOGGING
+            )
 
             current_data = {
                 **self.config_entry.data,
@@ -2014,6 +2188,8 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_FORCE_RESPONSE_LANGUAGE: force_response_language,
                 CONF_SPLIT_COMPOUND_COMMANDS: split_compound_commands,
                 CONF_BENCHMARK_WARM_UP_DELAY: benchmark_warm_up_delay,
+                CONF_BENCHMARK_INTER_PROBE_DELAY: benchmark_inter_probe_delay,
+                CONF_BENCHMARK_DEBUG_LOGGING: benchmark_debug_logging,
             }
             self.hass.config_entries.async_update_entry(
                 self.config_entry,
@@ -2055,6 +2231,12 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
         )
         current_warm_up_delay = entry_data.get(
             CONF_BENCHMARK_WARM_UP_DELAY, DEFAULT_BENCHMARK_WARM_UP_DELAY
+        )
+        current_inter_probe_delay = entry_data.get(
+            CONF_BENCHMARK_INTER_PROBE_DELAY, DEFAULT_BENCHMARK_INTER_PROBE_DELAY
+        )
+        current_debug_logging = entry_data.get(
+            CONF_BENCHMARK_DEBUG_LOGGING, DEFAULT_BENCHMARK_DEBUG_LOGGING
         )
 
         return self.async_show_form(
@@ -2131,6 +2313,20 @@ class NeuralBridgeOptionsFlowHandler(config_entries.OptionsFlow):
                             mode=selector.NumberSelectorMode.SLIDER,
                         )
                     ),
+                    vol.Optional(
+                        CONF_BENCHMARK_INTER_PROBE_DELAY, default=current_inter_probe_delay
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=60,
+                            step=1,
+                            unit_of_measurement="s",
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_BENCHMARK_DEBUG_LOGGING, default=current_debug_logging
+                    ): selector.BooleanSelector(),
                 }
             ),
         )

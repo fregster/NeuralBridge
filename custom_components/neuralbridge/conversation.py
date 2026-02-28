@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from homeassistant.components.conversation import (
     ConversationEntity,
@@ -122,6 +122,35 @@ def _safe_log_config(config: dict[str, Any]) -> dict[str, Any]:
         ``'<redacted>'``.  The original *config* is not modified.
     """
     return {k: "<redacted>" if k in _REDACT_FIELDS else v for k, v in config.items()}
+
+
+# ---------------------------------------------------------------------------
+# Protocol
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class ConversationAgentProtocol(Protocol):
+    """Public interface for the NeuralBridge conversation agent.
+
+    Defines the minimal surface that Home Assistant requires of any
+    ConversationEntity.  Sub-engines accept ``NeuralBridgeAgent`` directly;
+    this Protocol exists for documentation and static-analysis purposes.
+    """
+
+    async def async_process(self, user_input: ConversationInput) -> ConversationResult:
+        """Process user input and return a conversation result."""
+        ...
+
+    @property
+    def supported_languages(self) -> Literal["*"]:
+        """Return supported languages."""
+        ...
+
+    @property
+    def supported_features(self) -> ConversationEntityFeature:
+        """Return supported features."""
+        ...
 
 
 async def async_setup_entry(
@@ -249,30 +278,16 @@ class NeuralBridgeAgent(ConversationEntity):
     async def async_process(self, user_input: ConversationInput) -> ConversationResult:
         """Process a user input through the priority-based routing system."""
         _LOGGER.debug("Processing input: %d chars", len(user_input.text))
-        result = await self._compute_result(user_input)
-        result = await self._analyse_and_suggest(user_input, result)
+        result = await self._pipeline._compute_result(user_input)
+        result = await self._confirmation._analyse_and_suggest(user_input, result)
         self._maybe_add_to_chat_log(result)
         return result
 
-    async def _compute_result(self, user_input: ConversationInput) -> ConversationResult:
-        """Delegate to PipelineExecutor."""
-        return await self._pipeline._compute_result(user_input)
-
-    async def _run_pipeline(
-        self,
-        config: dict[str, Any],
-        user_input: ConversationInput,
-        router_agents: list[dict[str, Any]],
-        processing_agents: list[dict[str, Any]],
-    ) -> ConversationResult:
-        """Delegate to PipelineExecutor."""
-        return await self._pipeline._run_pipeline(
-            config, user_input, router_agents, processing_agents
-        )
-
-    def _maybe_add_to_chat_log(self, result: ConversationResult) -> None:
-        """Delegate to PipelineExecutor."""
-        self._pipeline._maybe_add_to_chat_log(result)
+    # ------------------------------------------------------------------
+    # Delegation methods — retained because tests call or patch these
+    # directly on the NeuralBridgeAgent instance.  Each simply forwards
+    # to the responsible sub-engine.
+    # ------------------------------------------------------------------
 
     async def _handle_confirmation_check(
         self, user_input: ConversationInput
@@ -302,6 +317,40 @@ class NeuralBridgeAgent(ConversationEntity):
         """Delegate to ConfirmationFlows."""
         return await self._confirmation._analyse_and_suggest(user_input, result)
 
+    async def _apply_guard_rail_action(
+        self,
+        action: str,
+        result: ConversationResult,
+        response_text: str,
+        conversation_id: str | None,
+        guard_rail_result: Any,
+    ) -> ConversationResult | None:
+        """Delegate to ConfirmationFlows."""
+        return await self._confirmation._apply_guard_rail_action(
+            action, result, response_text, conversation_id, guard_rail_result
+        )
+
+    async def _check_high_stakes(
+        self,
+        agent_config: dict[str, Any],
+        result: ConversationResult,
+        user_input: ConversationInput,
+    ) -> ConversationResult | None:
+        """Delegate to ConfirmationFlows."""
+        return await self._confirmation._check_high_stakes(agent_config, result, user_input)
+
+    async def _get_guard_rail_agent_config(self) -> dict[str, Any] | None:
+        """Delegate to ConfirmationFlows."""
+        return await self._confirmation._get_guard_rail_agent_config()
+
+    async def _compute_result(self, user_input: ConversationInput) -> ConversationResult:
+        """Delegate to PipelineExecutor."""
+        return await self._pipeline._compute_result(user_input)
+
+    def _maybe_add_to_chat_log(self, result: ConversationResult) -> None:
+        """Delegate to PipelineExecutor."""
+        self._pipeline._maybe_add_to_chat_log(result)
+
     async def _process_compound_fragments(
         self,
         fragments: list[str],
@@ -311,28 +360,6 @@ class NeuralBridgeAgent(ConversationEntity):
         """Delegate to PipelineExecutor."""
         return await self._pipeline._process_compound_fragments(
             fragments, processing_agents, user_input
-        )
-
-    async def _try_processing_agents(
-        self,
-        processing_agents: list[dict[str, Any]],
-        user_input: ConversationInput,
-        router_decision: RouterDecision | None = None,
-    ) -> ConversationResult:
-        """Delegate to PipelineExecutor."""
-        return await self._pipeline._try_processing_agents(
-            processing_agents, user_input, router_decision
-        )
-
-    async def _try_agent_with_tracking(
-        self,
-        agent_config: dict[str, Any],
-        user_input: ConversationInput,
-        router_decision: RouterDecision | None = None,
-    ) -> ConversationResult | None:
-        """Delegate to PipelineExecutor."""
-        return await self._pipeline._try_agent_with_tracking(
-            agent_config, user_input, router_decision
         )
 
     async def _try_agent_with_retries(
@@ -375,6 +402,34 @@ class NeuralBridgeAgent(ConversationEntity):
         """Delegate to PipelineExecutor."""
         self._pipeline._record_agent_failure(agent_id, timed_out)
 
+    def _check_explicit_agent_override(
+        self, user_input: ConversationInput, agents: list[dict[str, Any]]
+    ) -> tuple[ConversationInput, list[dict[str, Any]]] | None:
+        """Delegate to PipelineExecutor."""
+        return self._pipeline._check_explicit_agent_override(user_input, agents)
+
+    async def _try_processing_agents(
+        self,
+        processing_agents: list[dict[str, Any]],
+        user_input: ConversationInput,
+        router_decision: RouterDecision | None = None,
+    ) -> ConversationResult:
+        """Delegate to PipelineExecutor."""
+        return await self._pipeline._try_processing_agents(
+            processing_agents, user_input, router_decision
+        )
+
+    async def _try_agent_with_tracking(
+        self,
+        agent_config: dict[str, Any],
+        user_input: ConversationInput,
+        router_decision: RouterDecision | None = None,
+    ) -> ConversationResult | None:
+        """Delegate to PipelineExecutor."""
+        return await self._pipeline._try_agent_with_tracking(
+            agent_config, user_input, router_decision
+        )
+
     async def _check_with_routers(
         self,
         user_input: ConversationInput,
@@ -405,40 +460,9 @@ class NeuralBridgeAgent(ConversationEntity):
             benchmarker,
         )
 
-    def _dispatch_stats_updated(self) -> None:
-        """Delegate to RouterEngine."""
-        self._router._dispatch_stats_updated()
-
-    def _record_router_failure_and_fallback(
-        self, agent_id: str, fallback: str
-    ) -> RouterDecision | None:
-        """Delegate to RouterEngine."""
-        return self._router._record_router_failure_and_fallback(agent_id, fallback)
-
-    def _log_router_decision(self, log_level: str, agent_name: str, parsed: RouterDecision) -> None:
-        """Delegate to RouterEngine."""
-        self._router._log_router_decision(log_level, agent_name, parsed)
-
     async def _call_router_backend(self, router_config: dict[str, Any], prompt: str) -> str | None:
         """Delegate to RouterEngine."""
         return await self._router._call_router_backend(router_config, prompt)
-
-    async def _call_ollama_router(
-        self,
-        router_config: dict[str, Any],
-        prompt: str,
-        agent_id: str,
-        agent_name: str,
-        timeout: int,
-    ) -> str | None:
-        """Delegate to RouterEngine."""
-        return await self._router._call_ollama_router(
-            router_config, prompt, agent_id, agent_name, timeout
-        )
-
-    def _router_fallback(self, fallback: str) -> RouterDecision | None:
-        """Delegate to RouterEngine."""
-        return self._router._router_fallback(fallback)
 
     async def _call_existing_agent_for_routing(
         self, entity_id: str, prompt: str, timeout: int
@@ -446,9 +470,9 @@ class NeuralBridgeAgent(ConversationEntity):
         """Delegate to RouterEngine."""
         return await self._router._call_existing_agent_for_routing(entity_id, prompt, timeout)
 
-    def _extract_speech_from_response(self, response: Any) -> str | None:
+    def _router_fallback(self, fallback: str) -> RouterDecision | None:
         """Delegate to RouterEngine."""
-        return self._router._extract_speech_from_response(response)
+        return self._router._router_fallback(fallback)
 
     async def _try_agent(
         self,
@@ -465,37 +489,11 @@ class NeuralBridgeAgent(ConversationEntity):
         """Delegate to PipelineExecutor."""
         return await self._pipeline._process_with_web_search(agent_config, user_input)
 
-    async def _apply_guard_rail_action(
-        self,
-        action: str,
-        result: ConversationResult,
-        response_text: str,
-        conversation_id: str | None,
-        guard_rail_result: Any,
-    ) -> ConversationResult | None:
-        """Delegate to ConfirmationFlows."""
-        return await self._confirmation._apply_guard_rail_action(
-            action, result, response_text, conversation_id, guard_rail_result
-        )
-
     async def _check_guardrails(
         self, agent_config: dict[str, Any], result: ConversationResult, conversation_id: str | None
     ) -> ConversationResult | None:
         """Delegate to ConfirmationFlows."""
         return await self._confirmation._check_guardrails(agent_config, result, conversation_id)
-
-    async def _check_high_stakes(
-        self,
-        agent_config: dict[str, Any],
-        result: ConversationResult,
-        user_input: ConversationInput,
-    ) -> ConversationResult | None:
-        """Delegate to ConfirmationFlows."""
-        return await self._confirmation._check_high_stakes(agent_config, result, user_input)
-
-    async def _get_guard_rail_agent_config(self) -> dict[str, Any] | None:
-        """Delegate to ConfirmationFlows."""
-        return await self._confirmation._get_guard_rail_agent_config()
 
     def _find_tts_entity(self) -> str | None:
         """Delegate to ConfirmationFlows."""
@@ -508,6 +506,10 @@ class NeuralBridgeAgent(ConversationEntity):
         return await self._confirmation._send_broadcast_announcement(
             text, media_players, user_input
         )
+
+    # ------------------------------------------------------------------
+    # Utility helpers — used by sub-engines and tests.
+    # ------------------------------------------------------------------
 
     def _create_result(
         self, response_text: str, conversation_id: str | None = None
@@ -540,12 +542,6 @@ class NeuralBridgeAgent(ConversationEntity):
         response = intent.IntentResponse(language=self.hass.config.language)
         response.async_set_speech(error_message)
         return ConversationResult(response=response, conversation_id=conversation_id)
-
-    def _check_explicit_agent_override(
-        self, user_input: ConversationInput, agents: list[dict[str, Any]]
-    ) -> tuple[ConversationInput, list[dict[str, Any]]] | None:
-        """Delegate to PipelineExecutor."""
-        return self._pipeline._check_explicit_agent_override(user_input, agents)
 
     async def async_will_remove_from_hass(self) -> None:
         """Clean up resources when entity is removed from Home Assistant."""

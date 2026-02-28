@@ -1,0 +1,355 @@
+# NeuralBridge Performance Dashboard
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-discovers all configured NeuralBridge agents via Jinja2 templates —
+# no hardcoded entity IDs required. Works regardless of how many agents you
+# have configured.
+#
+# HOW TO ADD THIS DASHBOARD (3 steps):
+#
+#   1. Go to Settings → Dashboards → Add Dashboard (+ button, top-right)
+#   2. Name it "NeuralBridge", enable "Show in sidebar", click CREATE
+#   3. Open the new dashboard → three-dot menu → Edit dashboard →
+#      Raw configuration editor → paste the content below (from "title:" down)
+#      → SAVE
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# OPTIONAL: Enhanced visuals with HACS frontend cards
+#   Install via HACS → Frontend (search each card name):
+#   • ApexCharts Card  — radar charts for benchmark dimensions
+#   • Sankey Chart     — request-flow diagram in Operations view
+#   • Mushroom Cards   — compact agent status chips
+#
+#   The dashboard works fully without these — they are in clearly-marked
+#   "HACS — optional" sections at the bottom of each view.
+# ─────────────────────────────────────────────────────────────────────────────
+
+title: NeuralBridge
+views:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # VIEW 1 — Benchmark Scores
+  # ═══════════════════════════════════════════════════════════════════════════
+  - title: Benchmark
+    icon: mdi:medal-outline
+    cards:
+
+      # ── Ranked leaderboard — one line per agent, no wide tables ──────────
+      - type: markdown
+        title: "🏆 Agent Capability Leaderboard"
+        content: >
+          {% set _skip = ['sensor.neuralbridge_statistics', 'sensor.neuralbridge_preferences'] %}
+          {% set agents = states
+               | selectattr('entity_id', 'match', 'sensor\\.neuralbridge_')
+               | rejectattr('entity_id', 'in', _skip)
+               | list %}
+          {% if not agents %}
+          *No NeuralBridge agent sensors found. Ensure the integration is set up and HA has reloaded.*
+          {% else %}
+          {% set ns = namespace(scored=[], unscored=[], rank=0) %}
+          {% for s in agents %}
+          {%   set b = s.attributes.get('benchmark', none) %}
+          {%   if b and b.get('capability_score') is not none %}
+          {%     set ns.scored = ns.scored + [s] %}
+          {%   else %}
+          {%     set ns.unscored = ns.unscored + [s] %}
+          {%   endif %}
+          {% endfor %}
+          {% set medals = ['🥇','🥈','🥉'] %}
+          {% for s in (ns.scored | sort(attribute='attributes.benchmark.capability_score', reverse=True)) %}
+          {%   set b    = s.attributes.benchmark %}
+          {%   set name = s.name | replace('NeuralBridge ', '') %}
+          {%   set score = b.get('capability_score', 0) | int %}
+          {%   set pct   = (score / 27 * 100) | round | int %}
+          {%   set filled = (pct / 10) | round(0, 'floor') | int %}
+          {%   set empty  = 10 - filled %}
+          {%   set lat  = b.get('median_latency_ms') %}
+          {%   set tps  = b.get('probe_tokens_per_sec') | default(b.get('realworld_tokens_per_sec'), true) %}
+          {%   set medal = medals[loop.index0] if loop.index0 < 3 else '  ' ~ loop.index ~ '.' %}
+          {{ medal }} **{{ name }}** — {{ score }}/27 &nbsp; `${'█' * filled}${'░' * empty}` {{ pct }}%
+          &nbsp;&nbsp;&nbsp; ⚡ {{ '%.0f ms' | format(lat) if lat else '—' }} &nbsp;·&nbsp; {{ '%.1f tok/s' | format(tps) if tps else '—' }}
+          {% endfor %}
+          {% if ns.unscored %}
+          ---
+          *Skipped (no benchmark applicable):*
+          {% for s in ns.unscored %}
+          — {{ s.name | replace('NeuralBridge ', '') }}
+          {% endfor %}
+          {% endif %}
+          {% endif %}
+
+      # ── Benchmark status strip ────────────────────────────────────────────
+      - type: markdown
+        title: "📡 Benchmark Status"
+        content: >
+          {% set _skip = ['sensor.neuralbridge_statistics', 'sensor.neuralbridge_preferences'] %}
+          {% set all_agents = states
+               | selectattr('entity_id', 'match', 'sensor\\.neuralbridge_')
+               | rejectattr('entity_id', 'in', _skip)
+               | selectattr('attributes.benchmark', 'defined')
+               | list %}
+          {% if not all_agents %}
+          *No agents with benchmark data found.*
+          {% else %}
+          {% set status_icons = {
+               'complete':  '✅',
+               'running':   '⏳',
+               'pending':   '🕐',
+               'scheduled': '📅',
+               'skipped':   '⏭️',
+               'failed':    '❌'
+          } %}
+          {% for s in all_agents %}
+          {%   set b      = s.attributes.benchmark %}
+          {%   set status = b.get('status', 'unknown') %}
+          {%   set icon   = status_icons.get(status, '❓') %}
+          {%   set name   = s.name | replace('NeuralBridge ', '') %}
+          {{ icon }} **{{ name }}** — {{ status }}{% if status == 'failed' %}: {{ b.get('error', 'unknown error') }}{% endif %}
+
+          {% endfor %}
+          {% set any_failed = all_agents | selectattr('attributes.benchmark.status', 'eq', 'failed') | list %}
+          {% if any_failed %}
+          > To retry a failed benchmark: **Developer Tools → Services → `neuralbridge.run_benchmark`**
+          {% endif %}
+          {% endif %}
+
+      # ── Per-agent dimension breakdown — score card layout, no wide tables ─
+      - type: markdown
+        title: "📊 Dimension Breakdown"
+        content: >
+          {% set _skip = ['sensor.neuralbridge_statistics', 'sensor.neuralbridge_preferences'] %}
+          {% set benchmarked = states
+               | selectattr('entity_id', 'match', 'sensor\\.neuralbridge_')
+               | rejectattr('entity_id', 'in', _skip)
+               | selectattr('attributes.benchmark', 'defined')
+               | selectattr('attributes.benchmark.status', 'eq', 'complete')
+               | list
+               | sort(attribute='attributes.benchmark.capability_score', reverse=True) %}
+          {% if not benchmarked %}
+          *No completed benchmarks yet.*
+
+          Benchmarks run automatically after HA starts (default warm-up delay: 60 s).
+          Trigger manually via **Developer Tools → Services → `neuralbridge.run_benchmark`**.
+          {% else %}
+          {% for s in benchmarked %}
+          {%   set b     = s.attributes.benchmark %}
+          {%   set name  = s.name | replace('NeuralBridge ', '') %}
+          {%   set score = b.get('capability_score', 0) | int %}
+          {%   set pct   = (score / 27 * 100) | round | int %}
+          {%   set lat   = b.get('median_latency_ms') %}
+          {%   set p95   = b.get('p95_latency_ms') %}
+          {%   set tps_p = b.get('probe_tokens_per_sec') %}
+          {%   set tps_r = b.get('realworld_tokens_per_sec') %}
+
+          ---
+          ### {{ name }} &nbsp; {{ score }}/27 ({{ pct }}%)
+
+          | Dimension | Score |
+          |:----------|:------|
+          | 🏠 Smart Home Intent | {{ '█' * b.get('score_smart_home_intent', 0) }}{{ '░' * (5 - b.get('score_smart_home_intent', 0)) }} {{ b.get('score_smart_home_intent', 0) }}/5 |
+          | 🧠 Reasoning | {{ '█' * b.get('score_reasoning', 0) }}{{ '░' * (4 - b.get('score_reasoning', 0)) }} {{ b.get('score_reasoning', 0) }}/4 |
+          | 📋 Instruction Following | {{ '█' * b.get('score_instruction_following', 0) }}{{ '░' * (3 - b.get('score_instruction_following', 0)) }} {{ b.get('score_instruction_following', 0) }}/3 |
+          | 🔢 Structured Output | {{ '█' * b.get('score_structured_output', 0) }}{{ '░' * (3 - b.get('score_structured_output', 0)) }} {{ b.get('score_structured_output', 0) }}/3 |
+          | 🧬 Memory | {{ '█' * b.get('score_memory', 0) }}{{ '░' * (3 - b.get('score_memory', 0)) }} {{ b.get('score_memory', 0) }}/3 |
+          | 📚 Factual | {{ '█' * b.get('score_factual', 0) }}{{ '░' * (2 - b.get('score_factual', 0)) }} {{ b.get('score_factual', 0) }}/2 |
+          | 🎨 Creative | {{ '█' * b.get('score_creative_generation', 0) }}{{ '░' * (2 - b.get('score_creative_generation', 0)) }} {{ b.get('score_creative_generation', 0) }}/2 |
+          | 🔊 Verbosity | {{ '█' * b.get('score_verbosity_calibration', 0) }}{{ '░' * (2 - b.get('score_verbosity_calibration', 0)) }} {{ b.get('score_verbosity_calibration', 0) }}/2 |
+          | 🛡️ Robustness | {{ '█' * b.get('score_robustness', 0) }}{{ '░' * (2 - b.get('score_robustness', 0)) }} {{ b.get('score_robustness', 0) }}/2 |
+          | 🚫 Safety Refusal | {{ '█' * b.get('score_safety_refusal', 0) }}{{ '░' * (1 - b.get('score_safety_refusal', 0)) }} {{ b.get('score_safety_refusal', 0) }}/1 |
+
+          ⚡ p50 **{{ '%.0f ms' | format(lat) if lat else '—' }}** &nbsp;·&nbsp; p95 **{{ '%.0f ms' | format(p95) if p95 else '—' }}** &nbsp;·&nbsp; Probe **{{ '%.1f tok/s' | format(tps_p) if tps_p else '—' }}** &nbsp;·&nbsp; Real-world **{{ '%.1f tok/s' | format(tps_r) if tps_r else '—' }}** ({{ b.get('realworld_sample_count', 0) }} samples)
+          🔬 {{ b.get('model_family', '—') }} · {{ b.get('parameter_count_billions', '—') }}B · {{ b.get('quantization', '—') }} · {{ '{:,}'.format(b.context_window) if b.context_window else '—' }} ctx · *Last run: {{ b.get('last_benchmarked', '—')[:10] if b.get('last_benchmarked') else '—' }}*
+
+          {% endfor %}
+          {% endif %}
+
+      # ── [HACS — optional] ApexCharts radar chart per agent ────────────────
+      # Requires: HACS → Frontend → "ApexCharts Card"
+      # Uncomment and adjust entity_id to match your agent sensor names.
+      #
+      # - type: custom:apexcharts-card
+      #   title: "Capability Radar — Gemini"
+      #   chart_type: radar
+      #   series:
+      #     - entity: sensor.neuralbridge_gemini
+      #       name: Gemini
+      #       data_generator: |
+      #         return [
+      #           {x: '🏠 Smart Home',    y: entity.attributes?.benchmark?.score_smart_home_intent ?? 0},
+      #           {x: '🧠 Reasoning',     y: entity.attributes?.benchmark?.score_reasoning ?? 0},
+      #           {x: '📋 Instruction',   y: entity.attributes?.benchmark?.score_instruction_following ?? 0},
+      #           {x: '🔢 Structured',    y: entity.attributes?.benchmark?.score_structured_output ?? 0},
+      #           {x: '🧬 Memory',        y: entity.attributes?.benchmark?.score_memory ?? 0},
+      #           {x: '📚 Factual',       y: entity.attributes?.benchmark?.score_factual ?? 0},
+      #           {x: '🎨 Creative',      y: entity.attributes?.benchmark?.score_creative_generation ?? 0},
+      #           {x: '🔊 Verbosity',     y: entity.attributes?.benchmark?.score_verbosity_calibration ?? 0},
+      #           {x: '🛡️ Robustness',    y: entity.attributes?.benchmark?.score_robustness ?? 0},
+      #           {x: '🚫 Safety',        y: entity.attributes?.benchmark?.score_safety_refusal ?? 0},
+      #         ];
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # VIEW 2 — Routing & Operational Metrics
+  # ═══════════════════════════════════════════════════════════════════════════
+  - title: Operations
+    icon: mdi:robot
+    cards:
+
+      # ── Global request counter gauge ──────────────────────────────────────
+      - type: gauge
+        title: Total Routing Requests
+        entity: sensor.neuralbridge_statistics
+        needle: true
+        min: 0
+        max: 1000
+        segments:
+          - from: 0
+            color: "#44739e"
+          - from: 250
+            color: "#39ac49"
+          - from: 750
+            color: "#f4b942"
+
+      # ── Per-agent status cards — one card block per agent, narrow layout ──
+      - type: markdown
+        title: "🤖 Agent Status"
+        content: >
+          {% set _skip = ['sensor.neuralbridge_statistics', 'sensor.neuralbridge_preferences'] %}
+          {% set agents = states
+               | selectattr('entity_id', 'match', 'sensor\\.neuralbridge_')
+               | rejectattr('entity_id', 'in', _skip)
+               | list
+               | sort(attribute='attributes.priority') %}
+          {% if not agents %}
+          *No agent sensors found.*
+          {% else %}
+          {% set type_icons = {
+               'home_assistant':     '🏠',
+               'existing_integration': '🔗',
+               'ollama':             '🦙',
+               'web_search':         '🔍'
+          } %}
+          {% for s in agents %}
+          {%   set a       = s.attributes %}
+          {%   set name    = s.name | replace('NeuralBridge ', '') %}
+          {%   set sr      = a.get('success_rate') %}
+          {%   set lat     = a.get('avg_response_time_ms') %}
+          {%   set cb      = a.get('circuit_breaker', 'closed') %}
+          {%   set cb_icon = '🔴 open' if cb == 'open' else '🟢 closed' %}
+          {%   set en_icon = '✅' if a.get('enabled', true) else '⛔ disabled' %}
+          {%   set router_tag = ' · 📡 router' if a.get('is_router') else '' %}
+          {%   set type_icon = type_icons.get(a.get('agent_type', ''), '🤖') %}
+          {%   set p = a.get('priority', '?') %}
+          ---
+          #### {{ type_icon }} {{ name }} `p{{ p }}`{{ router_tag }}
+          {{ en_icon }} &nbsp; Circuit: {{ cb_icon }} &nbsp; Cache: {{ '🗂️' if a.get('cache_enabled') else '—' }} &nbsp; Guard rails: {{ '🛡️' if a.get('guard_rails_enabled') else '—' }}
+          📊 **{{ s.state }} req** &nbsp;·&nbsp; ✅ {{ '%.0f%%' | format(sr * 100) if sr is not none else '—' }} success &nbsp;·&nbsp; ⚡ {{ '%.0f ms' | format(lat) if lat is not none else '—' }} avg{% if a.get('is_router') %} &nbsp;·&nbsp; 🚫 {{ a.get('blocks', 0) }} blocked ({{ '%.1f%%' | format(a.get('block_rate', 0) * 100) }}){% endif %}
+
+          {% endfor %}
+          {% endif %}
+
+      # ── Success-rate gauges — one per agent ───────────────────────────────
+      - type: markdown
+        title: "📈 Success Rates"
+        content: >
+          {% set _skip = ['sensor.neuralbridge_statistics', 'sensor.neuralbridge_preferences'] %}
+          {% set agents = states
+               | selectattr('entity_id', 'match', 'sensor\\.neuralbridge_')
+               | rejectattr('entity_id', 'in', _skip)
+               | selectattr('attributes.success_rate', 'defined')
+               | list
+               | sort(attribute='attributes.priority') %}
+          {% if not agents %}
+          *No agents with recorded requests yet.*
+          {% else %}
+          {% for s in agents %}
+          {%   set name = s.name | replace('NeuralBridge ', '') %}
+          {%   set sr   = (s.attributes.success_rate * 100) | round | int %}
+          {%   set filled = (sr / 10) | round(0, 'floor') | int %}
+          {%   set col = '🟢' if sr >= 90 else ('🟡' if sr >= 70 else '🔴') %}
+          {{ col }} **{{ name }}** &nbsp; `{{ '█' * filled }}{{ '░' * (10 - filled) }}` {{ sr }}%
+          {% endfor %}
+          {% endif %}
+
+      # ── Global statistics entity ──────────────────────────────────────────
+      - type: entities
+        title: "📋 Global Statistics"
+        entities:
+          - entity: sensor.neuralbridge_statistics
+            secondary_info: last-changed
+        show_header_toggle: false
+
+      # ── Preferences ───────────────────────────────────────────────────────
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: sensor.neuralbridge_preferences
+            state_not: unavailable
+        card:
+          type: entities
+          title: "🧠 Preference Memory"
+          entities:
+            - entity: sensor.neuralbridge_preferences
+              secondary_info: last-changed
+          show_header_toggle: false
+
+      # ── [HACS — optional] Sankey routing-flow diagram ─────────────────────
+      # Shows request flow: router → processing agents → outcome.
+      # Requires: HACS → Frontend → "Sankey Chart"
+      #
+      # The card requires template sensors that expose integer flow counts.
+      # Add these to your configuration.yaml (adjust entity IDs to match yours):
+      #
+      # template:
+      #   - sensor:
+      #       - name: nb_flow_router_to_ha
+      #         state: >
+      #           {{ state_attr('sensor.neuralbridge_home_assistant', 'successes') | int(0) }}
+      #       - name: nb_flow_router_to_gemini
+      #         state: >
+      #           {{ state_attr('sensor.neuralbridge_gemini', 'successes') | int(0) }}
+      #       - name: nb_flow_router_blocked
+      #         state: >
+      #           {{ state_attr('sensor.neuralbridge_routing_agent', 'blocks') | int(0) }}
+      #
+      # Then uncomment:
+      #
+      # - type: custom:sankey-chart
+      #   title: "🌊 Request Flow"
+      #   min_box_size: 5
+      #   max_box_size: 60
+      #   show_names: true
+      #   show_icons: false
+      #   entities:
+      #     - entity: sensor.neuralbridge_statistics
+      #       children:
+      #         - sensor.nb_flow_router_to_ha
+      #         - sensor.nb_flow_router_to_gemini
+      #         - sensor.nb_flow_router_blocked
+      #     - entity: sensor.nb_flow_router_to_ha
+      #       name: "Home Assistant"
+      #     - entity: sensor.nb_flow_router_to_gemini
+      #       name: "Gemini"
+      #     - entity: sensor.nb_flow_router_blocked
+      #       name: "🚫 Blocked"
+
+      # ── [HACS — optional] Per-agent ApexCharts bar chart ──────────────────
+      # Requires: HACS → Frontend → "ApexCharts Card"
+      # Shows requests, successes and failures per agent as grouped bars.
+      # Adjust entity list to match your agent sensor IDs.
+      #
+      # - type: custom:apexcharts-card
+      #   title: "📊 Agent Request Breakdown"
+      #   chart_type: bar
+      #   apex_config:
+      #     plotOptions:
+      #       bar:
+      #         horizontal: false
+      #         columnWidth: 55%
+      #   series:
+      #     - name: Requests
+      #       data_generator: |
+      #         return [
+      #           {x: 'Home Assistant', y: entity.find(e => e.entity_id === 'sensor.neuralbridge_home_assistant')?.state ?? 0},
+      #           {x: 'Gemini',         y: entity.find(e => e.entity_id === 'sensor.neuralbridge_gemini')?.state ?? 0},
+      #         ];
+      #   all_series_config:
+      #     entity: sensor.neuralbridge_statistics

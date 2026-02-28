@@ -672,3 +672,245 @@ async def test_generate_respects_max_concurrent_semaphore() -> None:
         result = await task
 
     assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# P6 — _get_json() GET helper
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_session_with_get(mock_get_response: AsyncMock) -> MagicMock:
+    """Return a mock session where session.get() returns a context manager."""
+    session = MagicMock()
+    session.closed = False
+    session.close = AsyncMock()
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=mock_get_response)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    session.get = MagicMock(return_value=cm)
+    return session
+
+
+async def test_get_json_200_returns_parsed_dict() -> None:
+    """_get_json() returns parsed JSON dict on a 200 response."""
+    mock_response = _make_mock_response(200, {"key": "value"})
+    mock_session = _make_mock_session_with_get(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client._get_json("/api/ps")
+        await client.close()
+
+    assert result == {"key": "value"}
+    mock_session.get.assert_called_once_with("http://localhost:11434/api/ps")
+
+
+async def test_get_json_non_200_returns_none() -> None:
+    """_get_json() returns None on a non-200 response."""
+    mock_response = _make_mock_response(404, text_data="Not Found")
+    mock_session = _make_mock_session_with_get(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client._get_json("/api/version")
+
+    assert result is None
+
+
+async def test_get_json_client_error_returns_none() -> None:
+    """_get_json() returns None when aiohttp raises ClientError."""
+    mock_session = _make_mock_session_with_get(_make_mock_response())
+    mock_session.get = MagicMock(side_effect=aiohttp.ClientError("refused"))
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client._get_json("/api/ps")
+
+    assert result is None
+
+
+async def test_get_json_unexpected_exception_returns_none() -> None:
+    """_get_json() returns None when an unexpected exception is raised."""
+    mock_session = _make_mock_session_with_get(_make_mock_response())
+    mock_session.get = MagicMock(side_effect=RuntimeError("boom"))
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client._get_json("/api/ps")
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# P7 — async_get_running_models()
+# ---------------------------------------------------------------------------
+
+
+async def test_async_get_running_models_returns_model_list() -> None:
+    """async_get_running_models() returns the list of model dicts on 200."""
+    models = [{"name": "llama3:8b", "size_vram": 4_900_000_000}]
+    mock_response = _make_mock_response(200, {"models": models})
+    mock_session = _make_mock_session_with_get(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client.async_get_running_models()
+        await client.close()
+
+    assert result == models
+
+
+async def test_async_get_running_models_empty_list() -> None:
+    """async_get_running_models() returns empty list when no models are loaded."""
+    mock_response = _make_mock_response(200, {"models": []})
+    mock_session = _make_mock_session_with_get(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client.async_get_running_models()
+
+    assert result == []
+
+
+async def test_async_get_running_models_missing_models_key_returns_empty() -> None:
+    """async_get_running_models() returns empty list when 'models' key is absent."""
+    mock_response = _make_mock_response(200, {"other": "data"})
+    mock_session = _make_mock_session_with_get(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client.async_get_running_models()
+
+    assert result == []
+
+
+async def test_async_get_running_models_non_list_models_returns_empty() -> None:
+    """async_get_running_models() returns empty list when 'models' is not a list."""
+    mock_response = _make_mock_response(200, {"models": "not-a-list"})
+    mock_session = _make_mock_session_with_get(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client.async_get_running_models()
+
+    assert result == []
+
+
+async def test_async_get_running_models_api_error_returns_empty() -> None:
+    """async_get_running_models() returns empty list when the API call fails."""
+    mock_session = _make_mock_session_with_get(_make_mock_response())
+    mock_session.get = MagicMock(side_effect=aiohttp.ClientError("down"))
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client.async_get_running_models()
+
+    assert result == []
+
+
+# ---------------------------------------------------------------------------
+# P8 — async_get_version()
+# ---------------------------------------------------------------------------
+
+
+async def test_async_get_version_returns_version_string() -> None:
+    """async_get_version() returns the version string on 200."""
+    mock_response = _make_mock_response(200, {"version": "0.5.1"})
+    mock_session = _make_mock_session_with_get(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client.async_get_version()
+        await client.close()
+
+    assert result == "0.5.1"
+
+
+async def test_async_get_version_missing_key_returns_none() -> None:
+    """async_get_version() returns None when 'version' key is absent."""
+    mock_response = _make_mock_response(200, {"other": "data"})
+    mock_session = _make_mock_session_with_get(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client.async_get_version()
+
+    assert result is None
+
+
+async def test_async_get_version_non_200_returns_none() -> None:
+    """async_get_version() returns None on a non-200 response."""
+    mock_response = _make_mock_response(503, text_data="Unavailable")
+    mock_session = _make_mock_session_with_get(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client.async_get_version()
+
+    assert result is None
+
+
+async def test_async_get_version_integer_version_coerced_to_string() -> None:
+    """async_get_version() converts non-string version values to str."""
+    mock_response = _make_mock_response(200, {"version": 5})
+    mock_session = _make_mock_session_with_get(mock_response)
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client.async_get_version()
+
+    assert result == "5"
+
+
+async def test_async_get_version_api_error_returns_none() -> None:
+    """async_get_version() returns None when the API call fails."""
+    mock_session = _make_mock_session_with_get(_make_mock_response())
+    mock_session.get = MagicMock(side_effect=aiohttp.ClientError("down"))
+
+    with patch(
+        "custom_components.neuralbridge.ollama_client.aiohttp.ClientSession",
+        return_value=mock_session,
+    ):
+        client = OllamaClient("http://localhost:11434", "llama3")
+        result = await client.async_get_version()
+
+    assert result is None

@@ -23,6 +23,7 @@ import re
 import time
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from typing import Protocol, runtime_checkable
 
 # ---------------------------------------------------------------------------
 # Input size guards
@@ -160,6 +161,50 @@ def _normalise_cache_key(text: str) -> str:
         stemmed.append(stemmed_word)
     # 6. Collapse whitespace
     return " ".join(stemmed)
+
+
+# ---------------------------------------------------------------------------
+# Interface contract
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class ResponseCacheProtocol(Protocol):
+    """Interface contract for response cache objects.
+
+    Concrete implementations deduplicate conversation queries by caching
+    successful agent responses for a configurable TTL.
+    """
+
+    def get(self, text: str, *, normalise: bool = False) -> str | None:
+        """Return a cached response for *text*, or ``None`` on a miss."""
+        ...
+
+    def store(
+        self,
+        text: str,
+        response: str,
+        agent_name: str,
+        *,
+        normalise: bool = False,
+    ) -> None:
+        """Cache a successful agent response."""
+        ...
+
+    def invalidate(self) -> int:
+        """Purge all cached entries and return the count removed."""
+        ...
+
+    def configure(
+        self,
+        enabled: bool,
+        ttl_seconds: int,
+        *,
+        semantic: bool | None = None,
+        semantic_ttl_seconds: int | None = None,
+    ) -> None:
+        """Update cache configuration without restarting."""
+        ...
 
 
 # ---------------------------------------------------------------------------

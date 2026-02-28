@@ -26,6 +26,7 @@
           "configure_high_stakes": "Configure High-Stakes Actions",
           "advanced_settings": "Advanced Settings",
           "language_settings": "Language Settings",
+          "run_benchmarks_now": "Run Benchmarks Now",
           "done": "Close"
         }
       },
@@ -131,7 +132,7 @@
       },
       "configure_routing_agent": {
         "title": "Configure Routing Agent",
-        "description": "Select an installed Home Assistant conversation agent to act as the routing classifier. Only one routing agent is allowed.\n\n{routing_agent_info}",
+        "description": "Select an installed Home Assistant conversation agent to act as the routing classifier. Configure a failover plan when multiple routing agents are used.\n\n{routing_agent_info}",
         "data": {
           "agent_name": "Agent Name",
           "enabled": "Agent Enabled",
@@ -139,7 +140,13 @@
           "timeout": "Routing Timeout",
           "router_log_level": "Logging Level",
           "router_custom_prompt": "Custom Classification Prompt",
-          "router_fallback": "Fallback Behaviour",
+          "router_fallback": "Error Fallback Behaviour",
+          "router_failover_mode": "Failover Plan",
+          "strategy_reasoning": "Reasoning Strategy",
+          "strategy_instruction_following": "Instruction-Following Strategy",
+          "strategy_smart_home_intent": "Smart-Home Intent Strategy",
+          "strategy_factual": "Factual Q&A Strategy",
+          "strategy_memory": "Memory/Context Strategy",
           "delete_agent": "Delete Routing Agent"
         },
         "data_description": {
@@ -149,7 +156,13 @@
           "timeout": "Maximum time to wait for a routing decision (keep short to avoid stalling the pipeline)",
           "router_log_level": "Controls how much routing detail is written to the Home Assistant log",
           "router_custom_prompt": "Override the built-in JSON classification prompt. Leave blank to use the default prompt. Must instruct the agent to return JSON with \"local_ha\" (bool) and \"complexity\" (0–100) fields.",
-          "router_fallback": "What to do when the routing agent errors, times out, or returns an unparseable response",
+          "router_fallback": "What to do when this routing agent errors, times out, or returns an unparseable response",
+          "router_failover_mode": "How multiple routing agents work together. 'Primary only' uses just this router. 'Primary + backup' falls through to the next-priority router on error. 'Priority order' tries all routers in order and stops at the first success.",
+          "strategy_reasoning": "Agent selection strategy when the request requires multi-step reasoning. 'Default' uses benchmark scores; 'Fastest' picks the lowest-latency agent; 'Most capable' picks the highest-scoring agent; 'Local only' restricts to Ollama or LOCAL_HA agents.",
+          "strategy_instruction_following": "Agent selection strategy when the request requires following precise instructions or formatting rules.",
+          "strategy_smart_home_intent": "Agent selection strategy when the request is a smart-home device control command.",
+          "strategy_factual": "Agent selection strategy when the request asks for a factual answer.",
+          "strategy_memory": "Agent selection strategy when the request requires remembering context from earlier in the conversation.",
           "delete_agent": "Check this box and submit to permanently delete the routing agent (you will be asked to confirm)"
         }
       },
@@ -332,7 +345,9 @@
           "response_cache_semantic": "Enable Semantic Cache Keying",
           "semantic_cache_ttl": "Semantic Cache TTL",
           "announce_media_players": "Broadcast Announcement Speakers",
-          "benchmark_warm_up_delay": "Benchmark Warm-up Delay"
+          "benchmark_warm_up_delay": "Benchmark Warm-up Delay",
+          "benchmark_inter_probe_delay": "Benchmark Inter-Probe Delay",
+          "benchmark_debug_logging": "Log Probe Responses (Debug)"
         },
         "data_description": {
           "enable_home_control": "Allow NeuralBridge to control Home Assistant devices. When enabled, the Assist UI shows 'This assistant can control your home'. Add a Home Assistant sub-agent at a low priority number to handle device commands, with LLM agents at higher priorities for general questions.",
@@ -344,7 +359,9 @@
           "response_cache_semantic": "When enabled, paraphrase variants of the same question (e.g. 'What is the weather?' and 'How is the weather today?') share the same cache entry.",
           "semantic_cache_ttl": "How long (in seconds) a semantically-keyed cache entry remains valid. Should be shorter than the exact TTL due to the looser key matching.",
           "announce_media_players": "Select the media player entities that will receive broadcast announcements. Leave empty to disable the feature. Requires a TTS integration.",
-          "benchmark_warm_up_delay": "How long (in seconds) NeuralBridge waits after startup before running the first benchmark probe."
+          "benchmark_warm_up_delay": "How long (in seconds) NeuralBridge waits after startup before running the first benchmark probe.",
+          "benchmark_inter_probe_delay": "How long (in seconds) NeuralBridge pauses between each probe request during benchmarking. A warm-up request is also sent before the first scored probe to ensure the model is fully loaded. Increase this value if your Ollama server processes only one request at a time to avoid contention.",
+          "benchmark_debug_logging": "When enabled, every benchmark probe response is logged at WARNING level so you can see exactly what each agent returned and why probes passed or failed. Disable after debugging to avoid log noise."
         }
       },
       "configure_guard_rails": {
@@ -393,6 +410,16 @@
         },
         "data_description": {
           "language": "Choose the language for NeuralBridge responses and interface elements. The integration must be reloaded for this change to take full effect."
+        }
+      },
+      "run_benchmarks_now": {
+        "title": "Benchmark Agents",
+        "description": "Benchmarks have been started for all eligible agents. Click **Submit** to refresh the status below.\n\n{status_table}\n\n*LOCAL\\_HA and Web Search agents are skipped — benchmarks are not meaningful for those types.*",
+        "data": {
+          "back_to_menu": "Return to main menu"
+        },
+        "data_description": {
+          "back_to_menu": "Toggle on and submit to exit back to the main menu. Leave off and submit to refresh the status."
         }
       }
     },

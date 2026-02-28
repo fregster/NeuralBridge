@@ -63,7 +63,7 @@ def _make_session_cm(mock_response: AsyncMock) -> MagicMock:
 
         session_cm = _make_session_cm(mock_response)
         with patch(
-            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            "custom_components.neuralbridge.providers.brave_search.aiohttp.ClientSession",
             return_value=session_cm,
         ):
             ...
@@ -129,7 +129,7 @@ async def test_brave_search_success_returns_results() -> None:
     session_cm = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_search.aiohttp.ClientSession",
         return_value=session_cm,
     ):
         provider = BraveSearchProvider(api_key="tok", timeout=5)
@@ -148,7 +148,7 @@ async def test_brave_search_with_count_clamp_min() -> None:
     session_cm = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_search.aiohttp.ClientSession",
         return_value=session_cm,
     ):
         provider = BraveSearchProvider(api_key="tok", timeout=5)
@@ -164,7 +164,7 @@ async def test_brave_search_with_count_clamp_max() -> None:
     session_cm = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_search.aiohttp.ClientSession",
         return_value=session_cm,
     ):
         provider = BraveSearchProvider(api_key="tok", timeout=5)
@@ -187,7 +187,7 @@ async def test_brave_search_non_200_returns_empty(caplog: pytest.LogCaptureFixtu
 
     with (
         patch(
-            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            "custom_components.neuralbridge.providers.brave_search.aiohttp.ClientSession",
             return_value=session_cm,
         ),
         caplog.at_level(logging.WARNING),
@@ -218,7 +218,7 @@ async def test_brave_search_client_error_returns_empty(
 
     with (
         patch(
-            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            "custom_components.neuralbridge.providers.brave_search.aiohttp.ClientSession",
             return_value=session,
         ),
         caplog.at_level(logging.ERROR),
@@ -244,7 +244,7 @@ async def test_brave_search_unexpected_exception_returns_empty(
 
     with (
         patch(
-            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            "custom_components.neuralbridge.providers.brave_search.aiohttp.ClientSession",
             return_value=session,
         ),
         caplog.at_level(logging.ERROR),
@@ -268,7 +268,7 @@ async def test_brave_search_api_key_never_logged(caplog: pytest.LogCaptureFixtur
 
     with (
         patch(
-            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            "custom_components.neuralbridge.providers.brave_search.aiohttp.ClientSession",
             return_value=session_cm,
         ),
         caplog.at_level(logging.DEBUG),
@@ -292,7 +292,7 @@ async def test_brave_search_session_reused_across_calls() -> None:
     session_mock = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_search.aiohttp.ClientSession",
         return_value=session_mock,
     ) as session_cls:
         provider = BraveSearchProvider(api_key="tok")
@@ -310,7 +310,7 @@ async def test_brave_search_close_closes_session_and_clears_ref() -> None:
     session_mock = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_search.aiohttp.ClientSession",
         return_value=session_mock,
     ):
         provider = BraveSearchProvider(api_key="tok")
@@ -331,7 +331,7 @@ async def test_brave_search_session_recreated_after_close() -> None:
     session_mock2 = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_search.aiohttp.ClientSession",
         side_effect=[session_mock1, session_mock2],
     ) as session_cls:
         provider = BraveSearchProvider(api_key="tok")
@@ -783,7 +783,7 @@ async def test_brave_answers_search_openai_style_response() -> None:
     session_cm = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
         return_value=session_cm,
     ):
         provider = BraveAnswersProvider(api_key="tok", timeout=5)
@@ -802,7 +802,7 @@ async def test_brave_answers_search_brave_native_dict_response() -> None:
     session_cm = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
         return_value=session_cm,
     ):
         provider = BraveAnswersProvider(api_key="tok", timeout=5)
@@ -819,7 +819,7 @@ async def test_brave_answers_search_top_level_string_response() -> None:
     session_cm = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
         return_value=session_cm,
     ):
         provider = BraveAnswersProvider(api_key="tok", timeout=5)
@@ -835,7 +835,7 @@ async def test_brave_answers_search_no_answer_returns_empty() -> None:
     session_cm = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
         return_value=session_cm,
     ):
         provider = BraveAnswersProvider(api_key="tok", timeout=5)
@@ -851,7 +851,7 @@ async def test_brave_answers_search_count_param_is_accepted() -> None:
     session_cm = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
         return_value=session_cm,
     ):
         provider = BraveAnswersProvider(api_key="tok", timeout=5)
@@ -874,7 +874,7 @@ async def test_brave_answers_search_non_200_returns_empty(
 
     with (
         patch(
-            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
             return_value=session_cm,
         ),
         caplog.at_level(logging.WARNING),
@@ -900,7 +900,7 @@ async def test_brave_answers_search_client_error_returns_empty(
 
     with (
         patch(
-            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
             return_value=session,
         ),
         caplog.at_level(logging.ERROR),
@@ -926,7 +926,7 @@ async def test_brave_answers_search_unexpected_exception_returns_empty(
 
     with (
         patch(
-            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
             return_value=session,
         ),
         caplog.at_level(logging.ERROR),
@@ -947,7 +947,7 @@ async def test_brave_answers_search_api_key_never_logged(
 
     with (
         patch(
-            "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+            "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
             return_value=session_cm,
         ),
         caplog.at_level(logging.DEBUG),
@@ -970,7 +970,7 @@ async def test_brave_answers_session_reused_across_calls() -> None:
     session_mock = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
         return_value=session_mock,
     ) as session_cls:
         provider = BraveAnswersProvider(api_key="tok")
@@ -986,7 +986,7 @@ async def test_brave_answers_close_closes_session_and_clears_ref() -> None:
     session_mock = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
         return_value=session_mock,
     ):
         provider = BraveAnswersProvider(api_key="tok")
@@ -1006,7 +1006,7 @@ async def test_brave_answers_session_recreated_after_close() -> None:
     session_mock2 = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
         side_effect=[session_mock1, session_mock2],
     ) as session_cls:
         provider = BraveAnswersProvider(api_key="tok")
@@ -1299,7 +1299,7 @@ async def test_brave_search_respects_max_concurrent_semaphore() -> None:
     session_cm = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_search.aiohttp.ClientSession",
         return_value=session_cm,
     ):
         provider = BraveSearchProvider("test-key", max_concurrent=1)
@@ -1326,7 +1326,7 @@ async def test_brave_answers_respects_max_concurrent_semaphore() -> None:
     session_cm = _make_session_cm(mock_response)
 
     with patch(
-        "custom_components.neuralbridge.web_search_client.aiohttp.ClientSession",
+        "custom_components.neuralbridge.providers.brave_answers.aiohttp.ClientSession",
         return_value=session_cm,
     ):
         provider = BraveAnswersProvider("test-key", max_concurrent=1)
