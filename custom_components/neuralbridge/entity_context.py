@@ -253,12 +253,12 @@ class EntityContextCache:
             hass: The Home Assistant core instance.
 
         Returns:
-            Hex-encoded MD5 digest of the sorted, comma-joined entity IDs.
+            Hex-encoded SHA-256 digest of the sorted, comma-joined entity IDs.
         """
         entity_ids = sorted(
             state.entity_id for state in hass.states.async_all() if state.domain in RELEVANT_DOMAINS
         )
-        return hashlib.md5(",".join(entity_ids).encode()).hexdigest()  # noqa: S324
+        return hashlib.sha256(",".join(entity_ids).encode()).hexdigest()
 
     def _build_summary(self, hass: HomeAssistant) -> str:
         """Build a compact entity summary grouped by domain.

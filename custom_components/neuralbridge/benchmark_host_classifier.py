@@ -54,7 +54,12 @@ _LOGGER = logging.getLogger(__name__)
 
 # Hostnames that resolve to the local machine.
 _LOOPBACK_HOSTS: frozenset[str] = frozenset(
-    {"localhost", "127.0.0.1", "::1", "0.0.0.0"}  # noqa: S104
+    {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "0.0.0.0",  # noqa: S104  # nosec B104 — lookup set, not a bind address
+    }
 )
 
 # HA integration domain names that are definitively cloud-hosted.
